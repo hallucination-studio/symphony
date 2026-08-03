@@ -11,7 +11,8 @@ import {
   type TaskStateId,
 } from "../contracts/identity.js";
 import { parseMutationResult } from "../contracts/mutation.js";
-import type { PullRequestSnapshot, TaskIssueSnapshot } from "../contracts/observation.js";
+import type { PullRequestSnapshot } from "../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../contracts/task-management.js";
 import {
   createDeliveryIdentity,
   verifiedDelivery,
@@ -113,9 +114,9 @@ function sameRootExceptStatusAndRevision(
 ): boolean {
   return before.issue_id === after.issue_id
     && before.title === after.title
-    && before.description === after.description
-    && before.parent_id === after.parent_id
-    && taskStringSetsEqual(before.labels, after.labels)
+    && before.description_markdown === after.description_markdown
+    && before.parent_issue_id === after.parent_issue_id
+    && taskStringSetsEqual(before.label_ids, after.label_ids)
     && before.delegate_id === after.delegate_id
     && before.priority === after.priority;
 }
@@ -239,8 +240,8 @@ export class AcceptedRevisionDeliveryCoordinator {
   async #moveRootToInReview(context: DeliveryContext): Promise<TaskRevision> {
     const before = await this.#readRoot(context);
     const rootTaskId = parseTaskIssueId(context.authorization.root_id);
-    if (before.status === this.#rootInReviewState) return before.revision;
-    if (before.status !== this.#rootInProgressState) {
+    if (before.status_id === this.#rootInReviewState) return before.revision;
+    if (before.status_id !== this.#rootInProgressState) {
       throw new DeliveryAbort("root_status_conflict");
     }
     const call: UpdateIssueCall = Object.freeze({
@@ -260,11 +261,11 @@ export class AcceptedRevisionDeliveryCoordinator {
     const after = await this.#readRoot(context);
     if (receipt.state === "invalid") throw new DeliveryAbort("invalid_contract");
     if (
-      after.status !== this.#rootInReviewState
+      after.status_id !== this.#rootInReviewState
       || after.revision === before.revision
       || !sameRootExceptStatusAndRevision(before, after)
     ) {
-      if (after.status === this.#rootInProgressState && sameRootExceptStatusAndRevision(before, after)) {
+      if (after.status_id === this.#rootInProgressState && sameRootExceptStatusAndRevision(before, after)) {
         throw new DeliveryAbort("root_update_unconfirmed");
       }
       throw new DeliveryAbort("root_status_conflict");
@@ -345,8 +346,8 @@ export class AcceptedRevisionDeliveryCoordinator {
       if (
         issue === null
         || issue.issue_id !== rootTaskId
-        || issue.parent_id !== null
-        || !issue.labels.includes(this.#rootLabelId)
+        || issue.parent_issue_id !== null
+        || !issue.label_ids.includes(this.#rootLabelId)
       ) throw new DeliveryAbort("root_status_conflict");
       return issue;
     } catch (error) {
@@ -451,14 +452,14 @@ export class AcceptedRevisionDeliveryCoordinator {
       || !("issue_id" in fresh)
       || fresh.issue_id !== after.issue_id
       || fresh.revision !== after.revision
-      || fresh.status !== after.status
+      || fresh.status_id !== after.status_id
       || !sameRootExceptStatusAndRevision(fresh, after)
       || result.output.concrete_diff.length !== 1
       || change?.kind !== "field_changed"
       || change.issue_id !== before.issue_id
       || change.field !== "status"
-      || change.before !== before.status
-      || change.after !== after.status
+      || change.before !== before.status_id
+      || change.after !== after.status_id
       || result.output.sanitized_reason !== null
     ) throw new DeliveryAbort("invalid_contract");
   }

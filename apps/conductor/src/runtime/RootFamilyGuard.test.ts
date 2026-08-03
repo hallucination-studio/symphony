@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseRootIssueId, parseTaskIssueId, parseTaskStateId } from "../contracts/identity.js";
-import { parseTaskObservationEvent, parseTaskSnapshot } from "../contracts/observation.js";
+import { parseTaskObservationEvent } from "../contracts/observation.js";
+import { canonicalTaskRevision, parseTaskSnapshot, type TaskIssueSnapshot } from "../contracts/task-management.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
 import type { TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import { createTaskManageCallerAuthority, parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
@@ -14,7 +15,7 @@ import { RootFamilyGuard } from "./RootFamilyGuard.js";
 const workflow = parseTaskWorkflowIdentities({
   labels: { root: "label:root", cycle: "label:cycle", plan: "label:plan", work: "label:work", verify: "label:verify" },
   cycle_states: {
-    draft: "cycle:draft", in_progress: "cycle:in-progress", awaiting_acceptance: "cycle:awaiting",
+    draft: "cycle:draft", in_progress: "root:in-progress", awaiting_acceptance: "cycle:awaiting",
     succeeded: "cycle:succeeded", rejected: "cycle:rejected", failed: "cycle:failed", canceled: "cycle:canceled",
   },
   stage_states: {
@@ -30,22 +31,46 @@ const rootStates = {
 };
 
 function event(secondStatus = workflow.cycle_states.draft) {
+  const states = {
+    team_id: "team:family", revision: `symphony:v1:${"0".repeat(64)}`,
+    todo_state_id: rootStates.todo, draft_state_id: workflow.cycle_states.draft,
+    in_progress_state_id: rootStates.in_progress, awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+    in_review_state_id: rootStates.in_review, done_state_id: rootStates.done,
+    succeeded_state_id: workflow.cycle_states.succeeded, rejected_state_id: workflow.cycle_states.rejected,
+    failed_state_id: workflow.cycle_states.failed, canceled_state_id: workflow.cycle_states.canceled,
+  };
+  const issue = (input: {
+    issue_id: string; kind: TaskIssueSnapshot["kind"]; status_id: string; status: TaskIssueSnapshot["status"];
+    title: string; description_markdown: string; parent_issue_id: string | null; label_ids: readonly string[];
+    delegate_id: string | null; priority: number | null;
+  }) => {
+    const fields = { ...input, provider_created_at: "2026-08-03T00:00:00.000Z", provider_updated_at: "2026-08-03T00:00:00.000Z", creation_actor_id: "actor:agent", archived: false, trashed: false };
+    return { ...fields, revision: canonicalTaskRevision(fields) };
+  };
+  const secondSemantic: TaskIssueSnapshot["status"] = secondStatus === workflow.cycle_states.draft ? "Draft"
+    : secondStatus === workflow.cycle_states.succeeded ? "Succeeded"
+      : secondStatus === workflow.cycle_states.rejected ? "Rejected"
+        : secondStatus === workflow.cycle_states.failed ? "Failed"
+          : secondStatus === workflow.cycle_states.canceled ? "Canceled"
+            : secondStatus === workflow.cycle_states.awaiting_acceptance ? "Awaiting Acceptance" : "In Progress";
   const task = parseTaskSnapshot({
     root_id: "root-1",
-    issues: [{
-      issue_id: "root-1", revision: "revision:root:1", status: rootStates.in_progress,
-      title: "Root", description: "Requirement", parent_id: null, labels: [workflow.labels.root],
+    workflow_state_map: states,
+    issues: [issue({
+      issue_id: "root-1", kind: "root", status_id: rootStates.in_progress, status: "In Progress",
+      title: "Root", description_markdown: "Requirement", parent_issue_id: null, label_ids: [workflow.labels.root],
       delegate_id: "actor:agent", priority: 1,
-    }, {
-      issue_id: "cycle-1", revision: "revision:cycle:1", status: workflow.cycle_states.in_progress,
-      title: "Cycle 1", description: null, parent_id: "root-1", labels: [workflow.labels.cycle],
+    }), issue({
+      issue_id: "cycle-1", kind: "cycle", status_id: workflow.cycle_states.in_progress, status: "In Progress",
+      title: "Cycle 1", description_markdown: "# Cycle 1", parent_issue_id: "root-1", label_ids: [workflow.labels.cycle],
       delegate_id: null, priority: null,
-    }, {
-      issue_id: "cycle-2", revision: "revision:cycle:2", status: secondStatus,
-      title: "Cycle 2", description: null, parent_id: "root-1", labels: [workflow.labels.cycle],
+    }), issue({
+      issue_id: "cycle-2", kind: "cycle", status_id: secondStatus, status: secondSemantic,
+      title: "Cycle 2", description_markdown: "# Cycle 2", parent_issue_id: "root-1", label_ids: [workflow.labels.cycle],
       delegate_id: null, priority: null,
-    }],
+    })],
     relations: [],
+    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
   });
   return parseTaskObservationEvent({
     schema_version: 1,

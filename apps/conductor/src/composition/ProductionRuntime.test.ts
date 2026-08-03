@@ -20,7 +20,8 @@ import { deriveCycleUuid } from "../contracts/cycle-identities.js";
 import { renderTaskIssueRecordProjectionMarkdown } from "../contracts/cycle-record-markdown.js";
 import { parseRootDefinition } from "../contracts/cycle.js";
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
-import { parseGitSnapshot, parseTaskSnapshot } from "../contracts/observation.js";
+import { parseGitSnapshot } from "../contracts/observation.js";
+import { canonicalTaskRevision, parseTaskSnapshot } from "../contracts/task-management.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import { parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
 import { ExactGitDiffReader, ProductionCycleReader } from "./ProductionRuntime.js";
@@ -48,10 +49,10 @@ const workflow = parseTaskWorkflowIdentities({
   },
   stage_states: {
     todo: "state:stage:todo",
-    in_progress: "state:stage:in-progress",
+    in_progress: "state:cycle:in-progress",
     done: "state:stage:done",
-    failed: "state:stage:failed",
-    canceled: "state:stage:canceled",
+    failed: "state:cycle:failed",
+    canceled: "state:cycle:canceled",
   },
 });
 const rootDescription = [
@@ -174,7 +175,26 @@ function persistedApprovalFixture(
   plan: Readonly<{ revision: string; status: string; title?: string }> | null = null,
 ) {
   const version = "symphony-identity:v1";
-  const currentRootRevision = parseTaskRevision(`symphony:v1:${"a".repeat(64)}`);
+  const timestamp = "2026-08-02T01:00:00.000Z";
+  const issue = (fields: Record<string, unknown>) => ({ ...fields, revision: canonicalTaskRevision(fields) });
+  const rootFields = {
+    issue_id: rootId,
+    provider_created_at: timestamp,
+    provider_updated_at: timestamp,
+    creation_actor_id: "actor:symphony",
+    kind: "root",
+    status_id: workflow.cycle_states.in_progress,
+    status: "In Progress",
+    title: "Root",
+    description_markdown: rootDescription,
+    parent_issue_id: null,
+    label_ids: [workflow.labels.root],
+    delegate_id: "actor:agent",
+    priority: 1,
+    archived: false,
+    trashed: false,
+  } as const;
+  const currentRootRevision = canonicalTaskRevision(rootFields);
   const deterministicCycleId = parseTaskIssueId(deriveCycleUuid(
     version, "cycle_issue", rootId, "first_cycle", "first_cycle",
   ));
@@ -212,41 +232,79 @@ function persistedApprovalFixture(
     correlation_id: correlation,
     root_description_markdown: rootDescription,
   }, { root_id: rootId, root_revision: currentRootRevision, correlation_id: correlation });
+  const draftCycleFields = {
+    issue_id: deterministicCycleId,
+    provider_created_at: timestamp,
+    provider_updated_at: timestamp,
+    creation_actor_id: "actor:symphony",
+    kind: "cycle",
+    status_id: workflow.cycle_states.draft,
+    status: "Draft",
+    title: "Cycle",
+    description_markdown: description,
+    parent_issue_id: rootId,
+    label_ids: [workflow.labels.cycle],
+    delegate_id: null,
+    priority: null,
+    archived: false,
+    trashed: false,
+  } as const;
   const prepared = prepareCycleApproval({
     root_id: rootId,
     cycle_id: deterministicCycleId,
-    cycle_revision: parseTaskRevision(`symphony:v1:${"c".repeat(64)}`),
+    cycle_revision: canonicalTaskRevision(draftCycleFields),
     cycle_status: "Draft",
     cycle_description_markdown: description,
     root_definition: definition,
   });
   const body = renderTaskIssueRecordProjectionMarkdown(prepared.projection);
-  const timestamp = "2026-08-02T01:00:00.000Z";
+  const currentCycleFields = {
+    ...draftCycleFields,
+    status_id: workflow.cycle_states.in_progress,
+    status: "In Progress",
+  } as const;
+  const planFields = plan === null ? null : {
+    issue_id: prepared.specification.plan_issue_id,
+    provider_created_at: timestamp,
+    provider_updated_at: timestamp,
+    creation_actor_id: "actor:symphony",
+    kind: "plan",
+    status_id: plan.status,
+    status: plan.status === workflow.stage_states.todo ? "Todo" : "In Progress",
+    title: plan.title ?? "Plan approved Cycle",
+    description_markdown: "## Plan\n\nCompile the approved Cycle into one sealed Work and Verify graph.",
+    parent_issue_id: deterministicCycleId,
+    label_ids: [workflow.labels.plan],
+    delegate_id: null,
+    priority: null,
+    archived: false,
+    trashed: false,
+  } as const;
+  const stateFields = {
+    team_id: "team:runtime-test",
+    todo_state_id: workflow.stage_states.todo,
+    draft_state_id: workflow.cycle_states.draft,
+    in_progress_state_id: workflow.cycle_states.in_progress,
+    awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+    in_review_state_id: "state:in-review",
+    done_state_id: workflow.stage_states.done,
+    succeeded_state_id: workflow.cycle_states.succeeded,
+    rejected_state_id: workflow.cycle_states.rejected,
+    failed_state_id: workflow.cycle_states.failed,
+    canceled_state_id: workflow.cycle_states.canceled,
+  } as const;
   const task = parseTaskSnapshot({
     root_id: rootId,
+    workflow_state_map: { ...stateFields, revision: canonicalTaskRevision(stateFields) },
     issues: [
-      {
-        issue_id: rootId, revision: currentRootRevision, status: "state:root:in-progress", title: "Root",
-        description: rootDescription, parent_id: null, labels: [workflow.labels.root], delegate_id: "actor:agent", priority: 1,
-      },
-      {
-        issue_id: deterministicCycleId, revision: `symphony:v1:${"d".repeat(64)}`,
-        status: workflow.cycle_states.in_progress, title: "Cycle", description, parent_id: rootId,
-        labels: [workflow.labels.cycle], delegate_id: null, priority: null,
-      },
-      ...(plan === null ? [] : [{
-        issue_id: prepared.specification.plan_issue_id,
-        revision: plan.revision,
-        status: plan.status,
-        title: plan.title ?? "Plan approved Cycle",
-        description: "## Plan\n\nCompile the approved Cycle into one sealed Work and Verify graph.",
-        parent_id: deterministicCycleId,
-        labels: [workflow.labels.plan],
-        delegate_id: null,
-        priority: null,
-      }]),
+      issue(rootFields),
+      issue(currentCycleFields),
+      ...(planFields === null ? [] : [issue(planFields)]),
     ],
     relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
   return {
     cycle_id: deterministicCycleId,
@@ -313,7 +371,10 @@ test("production Cycle reader rebuilds stable seals without retained workflow st
     correlation_id: parseCorrelationId("corr:second"),
   });
   assert.equal(started?.specification.seal_digest, first.specification.seal_digest);
-  assert.equal(started?.plan_issue?.revision, "revision:plan:2");
+  assert.equal(
+    started?.plan_issue?.revision,
+    secondFixture.task.issues.find(({ kind }) => kind === "plan")?.revision,
+  );
   assert.equal(started?.plan_issue?.sealed_revision, first.plan_issue.sealed_revision);
 });
 

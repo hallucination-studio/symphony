@@ -16,11 +16,10 @@ import type { CycleAdvanceRequest, CycleAdvanceResult } from "../contracts/cycle
 import {
   parseGitSnapshot,
   parseTaskObservationEvent,
-  parseTaskSnapshot,
   type TaskChangeOriginEvidence,
   type TaskObservationEvent,
-  type TaskSnapshot,
 } from "../contracts/observation.js";
+import { canonicalTaskRevision, parseTaskSnapshot, type TaskIssueSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type {
   CycleMachineHostInterface,
@@ -49,19 +48,19 @@ const workflow = Object.freeze({
   },
   cycle_states: {
     draft: "state:cycle:draft",
-    in_progress: "state:cycle:in-progress",
+    in_progress: rootStates.in_progress,
     awaiting_acceptance: "state:cycle:awaiting-acceptance",
     succeeded: "state:cycle:succeeded",
     rejected: "state:cycle:rejected",
-    failed: "state:cycle:failed",
-    canceled: "state:cycle:canceled",
+    failed: "state:failed",
+    canceled: "state:canceled",
   },
   stage_states: {
-    todo: "state:stage:todo",
-    in_progress: "state:stage:in-progress",
-    done: "state:stage:done",
-    failed: "state:stage:failed",
-    canceled: "state:stage:canceled",
+    todo: rootStates.todo,
+    in_progress: rootStates.in_progress,
+    done: rootStates.done,
+    failed: "state:failed",
+    canceled: "state:canceled",
   },
 });
 
@@ -73,22 +72,64 @@ interface TaskOptions {
   readonly title?: string;
 }
 
-function task(rootId: RootIssueId, options: TaskOptions = {}): TaskSnapshot {
+const workflowStateMap = {
+  team_id: "team:serial", revision: `symphony:v1:${"0".repeat(64)}`,
+  todo_state_id: rootStates.todo, draft_state_id: workflow.cycle_states.draft,
+  in_progress_state_id: rootStates.in_progress,
+  awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+  in_review_state_id: rootStates.in_review, done_state_id: rootStates.done,
+  succeeded_state_id: workflow.cycle_states.succeeded, rejected_state_id: workflow.cycle_states.rejected,
+  failed_state_id: workflow.cycle_states.failed, canceled_state_id: workflow.cycle_states.canceled,
+} as const;
+
+function issue(fields: {
+  readonly issue_id: string;
+  readonly kind: TaskIssueSnapshot["kind"];
+  readonly status_id: string;
+  readonly status: TaskIssueSnapshot["status"];
+  readonly title: string;
+  readonly description_markdown: string;
+  readonly parent_issue_id: string | null;
+  readonly label_ids: readonly string[];
+  readonly delegate_id: string | null;
+  readonly priority: number | null;
+  readonly revision_marker?: string;
+}) {
+  const { revision_marker, ...input } = fields;
+  const canonicalFields = {
+    ...input,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: revision_marker === undefined
+      ? "2026-08-03T00:00:00.000Z"
+      : `2026-08-03T00:00:${revision_marker.endsWith("3") ? "03" : revision_marker.endsWith("2") ? "02" : "01"}.000Z`,
+    creation_actor_id: "actor:agent",
+    archived: false,
+    trashed: false,
+  };
+  return { ...canonicalFields, revision: canonicalTaskRevision(canonicalFields) };
+}
+
+function snapshot(rootId: RootIssueId, issues: readonly unknown[]): TaskSnapshot {
   return parseTaskSnapshot({
-    root_id: rootId,
-    issues: [{
+    root_id: rootId, workflow_state_map: workflowStateMap, issues, relations: [],
+    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
+  });
+}
+
+function task(rootId: RootIssueId, options: TaskOptions = {}): TaskSnapshot {
+  return snapshot(rootId, [issue({
       issue_id: rootId,
-      revision: options.revision ?? "revision:root:1",
-      status: options.status ?? rootStates.todo,
+      kind: "root",
+      status_id: options.status ?? rootStates.todo,
+      status: options.status === rootStates.done ? "Done" : options.status === rootStates.in_review ? "In Review" : options.status === rootStates.in_progress ? "In Progress" : "Todo",
       title: options.title ?? `Root ${rootId}`,
-      description: null,
-      parent_id: null,
-      labels: [options.label ?? rootLabelId],
+      description_markdown: "# Root",
+      parent_issue_id: null,
+      label_ids: [options.label ?? rootLabelId],
       delegate_id: options.delegateId === undefined ? agentActor : options.delegateId,
       priority: 1,
-    }],
-    relations: [],
-  });
+      ...(options.revision === undefined ? {} : { revision_marker: options.revision }),
+    })]);
 }
 
 function cycleTask(
@@ -97,64 +138,59 @@ function cycleTask(
   options: TaskOptions = {},
 ): TaskSnapshot {
   const root = task(rootId, options);
-  return parseTaskSnapshot({
-    ...root,
-    issues: [...root.issues, {
+  return snapshot(rootId, [...root.issues, issue({
       issue_id: `${rootId}:CYCLE`,
-      revision: `revision:cycle:${status}`,
-      status: workflow.cycle_states[status],
+      kind: "cycle",
+      status_id: workflow.cycle_states[status],
+      status: status === "draft" ? "Draft" : status === "awaiting_acceptance" ? "Awaiting Acceptance" : status === "succeeded" ? "Succeeded" : status === "rejected" ? "Rejected" : status === "failed" ? "Failed" : status === "canceled" ? "Canceled" : "In Progress",
       title: "Cycle",
-      description: null,
-      parent_id: rootId,
-      labels: [workflow.labels.cycle],
+      description_markdown: "# Cycle",
+      parent_issue_id: rootId,
+      label_ids: [workflow.labels.cycle],
       delegate_id: agentActor,
       priority: 2,
-    }],
-  });
+      revision_marker: status,
+    })]);
 }
 
 function doneTask(rootId: RootIssueId): TaskSnapshot {
   const cycleId = parseCycleIssueId(`${rootId}:CYCLE`);
   const stageId = parseStageIssueId(`${rootId}:STAGE`);
-  return parseTaskSnapshot({
-    root_id: rootId,
-    issues: [
-      {
+  return snapshot(rootId, [
+      issue({
         issue_id: rootId,
-        revision: "revision:root:done",
-        status: rootStates.done,
+        kind: "root", status_id: rootStates.done, status: "Done",
         title: `Done ${rootId}`,
-        description: "root-description-secret",
-        parent_id: null,
-        labels: [rootLabelId],
+        description_markdown: "root-description-secret",
+        parent_issue_id: null,
+        label_ids: [rootLabelId],
         delegate_id: agentActor,
         priority: 1,
-      },
-      {
+        revision_marker: "done",
+      }),
+      issue({
         issue_id: cycleId,
-        revision: "revision:cycle:done",
-        status: "state:cycle:succeeded",
+        kind: "cycle", status_id: workflow.cycle_states.succeeded, status: "Succeeded",
         title: "Completed Cycle",
-        description: "cycle-handoff-secret",
-        parent_id: rootId,
-        labels: ["label:cycle"],
+        description_markdown: "cycle-handoff-secret",
+        parent_issue_id: rootId,
+        label_ids: ["label:cycle"],
         delegate_id: null,
         priority: null,
-      },
-      {
+        revision_marker: "done",
+      }),
+      issue({
         issue_id: stageId,
-        revision: "revision:stage:done",
-        status: "state:stage:done",
+        kind: "work", status_id: workflow.stage_states.done, status: "Done",
         title: "Completed Work",
-        description: "credential-secret",
-        parent_id: cycleId,
-        labels: ["label:work"],
+        description_markdown: "credential-secret",
+        parent_issue_id: cycleId,
+        label_ids: ["label:work"],
         delegate_id: null,
         priority: null,
-      },
-    ],
-    relations: [],
-  });
+        revision_marker: "done",
+      }),
+    ]);
 }
 
 function event(
@@ -830,19 +866,22 @@ test("fresh Done retires the Root runtime and logs only correlated cleanup facts
   assert.equal(f.registry.has(rootId), false);
   assert.deepEqual(lifecycle, ["cycle_retired", "root_home_deleted"]);
   const started = f.logs.find((entry) => entry.event === "root_cleanup_started");
+  const doneRoot = done.issues.find(({ kind }) => kind === "root")!;
+  const doneCycle = done.issues.find(({ kind }) => kind === "cycle")!;
+  const doneStage = done.issues.find(({ kind }) => kind === "work")!;
   assert.deepEqual(started, {
     event: "root_cleanup_started",
     root_id: rootId,
-    root_revision: parseTaskRevision("revision:root:done"),
+    root_revision: doneRoot.revision,
     runtime_generation: parseRuntimeGeneration(1),
     correlation_id: parseCorrelationId("corr:root:done"),
     reason_code: "root_done",
     cycles: [{
       cycle_id: parseCycleIssueId(`${rootId}:CYCLE`),
-      revision: parseTaskRevision("revision:cycle:done"),
+      revision: doneCycle.revision,
       stages: [{
         stage_id: parseStageIssueId(`${rootId}:STAGE`),
-        revision: parseTaskRevision("revision:stage:done"),
+        revision: doneStage.revision,
       }],
     }],
   });

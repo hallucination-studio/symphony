@@ -8,6 +8,7 @@ import {
   parseTaskIssueSnapshot,
   parseTaskRelationSnapshot,
   parseTaskResourceCreationEvidence,
+  parseTaskSnapshot,
   parseTaskWorkflowStateMap,
 } from "./task-management.js";
 
@@ -46,6 +47,63 @@ function issueSource() {
   } as const;
   return { ...fields, revision: canonicalTaskRevision(fields) };
 }
+
+function rootIssueSource() {
+  const fields = {
+    ...issueSource(),
+    issue_id: "LIN-1",
+    kind: "root",
+    parent_issue_id: null,
+    label_ids: ["label:root"],
+  } as const;
+  const basis = Object.fromEntries(Object.entries(fields).filter(([key]) => key !== "revision"));
+  return { ...basis, revision: canonicalTaskRevision(basis) };
+}
+
+function snapshotSource() {
+  return {
+    root_id: "LIN-1",
+    workflow_state_map: states,
+    issues: [rootIssueSource()],
+    relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
+  } as const;
+}
+
+test("Task snapshots expose one complete normalized fact model and reject every legacy field", () => {
+  const parsed = parseTaskSnapshot(snapshotSource());
+
+  assert.equal(parsed.workflow_state_map.team_id, "team:1");
+  assert.equal(parsed.issues[0]?.description_markdown.startsWith("# Work"), true);
+  assert.deepEqual(parsed.resource_creation_evidence, []);
+  assert.deepEqual(parsed.issue_history, []);
+  assert.deepEqual(parsed.issue_record_observations, []);
+  assert.ok(Object.isFrozen(parsed));
+
+  assert.throws(
+    () => parseTaskSnapshot({ ...snapshotSource(), provider: { sdk: true } }),
+    /invalid_contract_keys/u,
+  );
+  assert.throws(
+    () => parseTaskSnapshot({
+      ...snapshotSource(),
+      issues: [{
+        issue_id: "LIN-1",
+        revision: "revision:legacy",
+        status: "Todo",
+        title: "Legacy",
+        description: null,
+        parent_id: null,
+        labels: [],
+        delegate_id: null,
+        priority: null,
+      }],
+    }),
+    /invalid_contract_keys/u,
+  );
+});
 
 test("Task Issue snapshots bind semantic status, provider provenance, and canonical revision", () => {
   const parsedStates = parseTaskWorkflowStateMap(states);

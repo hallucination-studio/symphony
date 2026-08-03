@@ -12,7 +12,9 @@ import {
   parseTaskRevision,
   parseTaskStateId,
 } from "../contracts/identity.js";
-import type { PullRequestSnapshot, TaskIssueSnapshot } from "../contracts/observation.js";
+import type { PullRequestSnapshot } from "../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../contracts/task-management.js";
+import { parseMarkdownText } from "../contracts/validation.js";
 import type {
   DeliverRevisionRequest,
   DeliveryIdentity,
@@ -140,17 +142,24 @@ class FakeDelivery implements DeliveryInterface {
   }
 }
 
-function rootIssue(status = rootInProgress, taskRevision = "revision:root:1"): TaskIssueSnapshot {
+function rootIssue(statusId = rootInProgress, taskRevision = "revision:root:1"): TaskIssueSnapshot {
   return {
     issue_id: parseTaskIssueId(rootId),
     revision: parseTaskRevision(taskRevision),
-    status,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    kind: "root",
+    status_id: statusId,
+    status: statusId === rootInReview ? "In Review" : "In Progress",
     title: "D5 Root",
-    description: "# Root\n\nDeliver the accepted revision.",
-    parent_id: null,
-    labels: [rootLabel],
+    description_markdown: parseMarkdownText("# Root\n\nDeliver the accepted revision."),
+    parent_issue_id: null,
+    label_ids: [rootLabel],
     delegate_id: "agent:symphony",
     priority: 1,
+    archived: false,
+    trashed: false,
   };
 }
 

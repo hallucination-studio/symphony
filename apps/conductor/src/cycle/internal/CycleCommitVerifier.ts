@@ -11,7 +11,8 @@ import {
   type TaskStateId,
 } from "../../contracts/identity.js";
 import { parseMutationResult } from "../../contracts/mutation.js";
-import type { GitSnapshot, TaskIssueSnapshot } from "../../contracts/observation.js";
+import type { GitSnapshot } from "../../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../../contracts/task-management.js";
 import type {
   GitCommitProof,
   GitWorkspaceInterface,
@@ -229,12 +230,12 @@ function assertVerifyStatusReadback(
     || verify.parent_cycle_id !== selected.parent_cycle_id
     || verify.status !== expectedStatus
     || fresh.issue_id !== parseTaskIssueId(selected.issue_id)
-    || fresh.status !== workflow.stage_states[expectedStatus]
+    || fresh.status_id !== workflow.stage_states[expectedStatus]
     || fresh.title !== selected.title
-    || fresh.description !== selected.description_markdown
-    || fresh.parent_id !== parseTaskIssueId(selected.parent_cycle_id)
-    || fresh.labels.length !== 1
-    || fresh.labels[0] !== workflow.labels.verify
+    || fresh.description_markdown !== selected.description_markdown
+    || fresh.parent_issue_id !== parseTaskIssueId(selected.parent_cycle_id)
+    || fresh.label_ids.length !== 1
+    || fresh.label_ids[0] !== workflow.labels.verify
     || fresh.delegate_id !== null
     || fresh.priority !== null
   ) throw new Error("verify_status_readback_mismatch");
@@ -267,11 +268,11 @@ function assertCycleStatusReadback(
       && !sameStage(before.verify_issue, after.verify_issue)
     )
     || fresh.issue_id !== parseTaskIssueId(before.cycle_id)
-    || fresh.status !== workflow.cycle_states[expectedStatus]
-    || fresh.description !== before.specification.cycle_description_markdown
-    || fresh.parent_id !== parseTaskIssueId(before.root_id)
-    || fresh.labels.length !== 1
-    || fresh.labels[0] !== workflow.labels.cycle
+    || fresh.status_id !== workflow.cycle_states[expectedStatus]
+    || fresh.description_markdown !== before.specification.cycle_description_markdown
+    || fresh.parent_issue_id !== parseTaskIssueId(before.root_id)
+    || fresh.label_ids.length !== 1
+    || fresh.label_ids[0] !== workflow.labels.cycle
     || fresh.delegate_id !== null
     || fresh.priority !== null
   ) throw new Error("cycle_status_readback_mismatch");

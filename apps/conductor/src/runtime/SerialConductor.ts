@@ -16,9 +16,9 @@ import {
 } from "../contracts/identity.js";
 import {
   parseTaskObservationEvent,
-  type TaskIssueSnapshot,
   type TaskObservationEvent,
 } from "../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../contracts/task-management.js";
 import type { CycleAdvanceResult } from "../contracts/cycle.js";
 import type { RootTurnOutcome } from "../contracts/runtime.js";
 import type { PreparedCycleAction } from "../cycle/internal/CycleMachine.js";
@@ -244,13 +244,13 @@ function rootIssue(observation: TaskObservationEvent): TaskIssueSnapshot {
 function cleanupCycles(observation: TaskObservationEvent): readonly RootCleanupCycleLog[] {
   const rootTaskId = parseTaskIssueId(observation.root_id);
   return Object.freeze(observation.task.issues
-    .filter(({ parent_id }) => parent_id === rootTaskId)
+    .filter(({ parent_issue_id }) => parent_issue_id === rootTaskId)
     .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
     .map((cycle) => Object.freeze({
       cycle_id: parseCycleIssueId(cycle.issue_id),
       revision: cycle.revision,
       stages: Object.freeze(observation.task.issues
-        .filter(({ parent_id }) => parent_id === cycle.issue_id)
+        .filter(({ parent_issue_id }) => parent_issue_id === cycle.issue_id)
         .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
         .map((stage) => Object.freeze({
           stage_id: parseStageIssueId(stage.issue_id),
@@ -273,10 +273,10 @@ function admissionReason(
 ): AdmissionParkReason | null {
   if (stopped) return "runtime_stopped";
   const issue = rootIssue(observation);
-  if (!issue.labels.includes(rootKindLabelId)) return "invalid_root_kind";
+  if (!issue.label_ids.includes(rootKindLabelId)) return "invalid_root_kind";
   if (issue.delegate_id !== actorId) return "not_delegated";
-  if (issue.status === rootStates.in_review) return "in_review";
-  if (issue.status !== rootStates.todo && issue.status !== rootStates.in_progress) {
+  if (issue.status_id === rootStates.in_review) return "in_review";
+  if (issue.status_id !== rootStates.todo && issue.status_id !== rootStates.in_progress) {
     return "status_not_executable";
   }
   return null;

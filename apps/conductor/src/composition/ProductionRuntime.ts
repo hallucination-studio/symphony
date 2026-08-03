@@ -30,15 +30,11 @@ import {
   type StageExecutionStatus,
   type StageKind,
 } from "../contracts/cycle.js";
-import {
-  type GitSnapshot,
-  type TaskIssueSnapshot,
-  type TaskSnapshot,
-} from "../contracts/observation.js";
+import type { GitSnapshot } from "../contracts/observation.js";
 import {
   parseMarkdownText,
 } from "../contracts/validation.js";
-import { canonicalTaskRevision } from "../contracts/task-management.js";
+import { canonicalTaskRevision, type TaskIssueSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import { isSensitiveWorkspacePath } from "../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import type { RootToolBridgeLog } from "../codex-app-server/internal/DynamicToolBridge.js";
 import { CycleMachineHost, type CycleMachineReadRequest, type FreshCycleExecutionReader } from "../cycle/internal/CycleMachine.js";
@@ -136,7 +132,7 @@ function kindOf(
   workflow: TaskWorkflowIdentities,
 ): "root" | "cycle" | StageKind {
   const matches = Object.entries(workflow.labels)
-    .filter(([, identity]) => issue.labels.includes(identity))
+    .filter(([, identity]) => issue.label_ids.includes(identity))
     .map(([kind]) => kind as "root" | "cycle" | StageKind);
   if (matches.length !== 1) throw new Error("task_kind_invalid");
   return matches[0]!;
@@ -147,7 +143,7 @@ function cycleStatus(
   workflow: TaskWorkflowIdentities,
 ): CycleExecutionStatus {
   for (const [status, identity] of Object.entries(workflow.cycle_states)) {
-    if (issue.status === identity) return status as CycleExecutionStatus;
+    if (issue.status_id === identity) return status as CycleExecutionStatus;
   }
   throw new Error("cycle_status_invalid");
 }
@@ -157,7 +153,7 @@ function stageStatus(
   workflow: TaskWorkflowIdentities,
 ): StageExecutionStatus {
   for (const [status, identity] of Object.entries(workflow.stage_states)) {
-    if (issue.status === identity) return status as StageExecutionStatus;
+    if (issue.status_id === identity) return status as StageExecutionStatus;
   }
   throw new Error("stage_status_invalid");
 }
@@ -211,22 +207,22 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
   async #sealedBasis(task: TaskSnapshot, cycle: TaskIssueSnapshot): Promise<SealedCycleBasis> {
     const parsedCycleId = parseTaskIssueId(cycle.issue_id);
     if (
-      cycle.parent_id !== parseTaskIssueId(this.target.root_id)
+      cycle.parent_issue_id !== parseTaskIssueId(this.target.root_id)
       || kindOf(cycle, this.workflow) !== "cycle"
-      || cycle.description === null
+      || cycle.description_markdown === null
     ) throw new Error("sealed_cycle_basis_cycle_invalid");
     const root = taskIssue(task, parseTaskIssueId(this.target.root_id));
-    if (root.description === null || kindOf(root, this.workflow) !== "root") {
+    if (root.description_markdown === null || kindOf(root, this.workflow) !== "root") {
       throw new Error("sealed_cycle_basis_root_invalid");
     }
-    const draft = parseCycleDraftMarkdown(cycle.description);
+    const draft = parseCycleDraftMarkdown(cycle.description_markdown);
     const correlationId = parseCorrelationId(`approval:${parsedCycleId}`);
     const definition = parseRootDefinition({
       schema_version: 1,
       root_id: this.target.root_id,
       root_revision: draft.root_definition_revision,
       correlation_id: correlationId,
-      root_description_markdown: root.description,
+      root_description_markdown: root.description_markdown,
     }, {
       root_id: this.target.root_id,
       root_revision: draft.root_definition_revision,
@@ -237,7 +233,7 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       cycle_id: parsedCycleId,
       cycle_revision: cycle.revision,
       cycle_status: "Draft",
-      cycle_description_markdown: cycle.description,
+      cycle_description_markdown: cycle.description_markdown,
       root_definition: definition,
     });
     const comments = await this.snapshots.readIssueRecordComments(parsedCycleId);
@@ -268,17 +264,17 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     const cycle = task.issues.find(({ issue_id }) => issue_id === cycleTaskId);
     if (cycle === undefined) return null;
     if (
-      cycle.parent_id !== parseTaskIssueId(request.root_id)
+      cycle.parent_issue_id !== parseTaskIssueId(request.root_id)
       || kindOf(cycle, this.workflow) !== "cycle"
-      || cycle.description === null
+      || cycle.description_markdown === null
     ) throw new Error("cycle_reader_contract_invalid");
     const basis = await this.#sealedBasis(task, cycle);
     const specification = this.#specification(task, cycle, basis);
-    if (cycle.description !== specification.cycle_description_markdown) {
+    if (cycle.description_markdown !== specification.cycle_description_markdown) {
       throw new Error("sealed_spec_changed");
     }
     const stages = task.issues
-      .filter(({ parent_id }) => parent_id === cycleTaskId)
+      .filter(({ parent_issue_id }) => parent_issue_id === cycleTaskId)
       .sort((left, right) => left.issue_id.localeCompare(right.issue_id));
     const executionStages = stages.map((issue) => this.#stage(issue, request.cycle_id));
     const plan = executionStages.filter(({ kind }) => kind === "plan");
@@ -334,9 +330,9 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     cycle: TaskIssueSnapshot,
     basis: SealedCycleBasis,
   ): CycleSpecification {
-    const draft = parseCycleDraftMarkdown(cycle.description);
+    const draft = parseCycleDraftMarkdown(cycle.description_markdown);
     const root = taskIssue(task, parseTaskIssueId(this.target.root_id));
-    if (root.description === null || kindOf(root, this.workflow) !== "root") {
+    if (root.description_markdown === null || kindOf(root, this.workflow) !== "root") {
       throw new Error("root_definition_invalid");
     }
     const sealCorrelation = parseCorrelationId(`approval:${basis.approval_record.record_id}`);
@@ -345,7 +341,7 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       root_id: this.target.root_id,
       root_revision: draft.root_definition_revision,
       correlation_id: sealCorrelation,
-      root_description_markdown: root.description,
+      root_description_markdown: root.description_markdown,
     }, {
       root_id: this.target.root_id,
       root_revision: draft.root_definition_revision,
@@ -361,7 +357,7 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     return sealCycleSpecification({
       schema_version: 1,
       ...expected,
-      cycle_description_markdown: cycle.description,
+      cycle_description_markdown: cycle.description_markdown,
       root_adr_markdown: draft.root_adr_markdown,
       status: "in_progress",
     }, definition, expected);
@@ -369,11 +365,11 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
 
   #stage(issue: TaskIssueSnapshot, cycleId: CycleIssueId): StageExecutionSnapshot {
     const kind = kindOf(issue, this.workflow);
-    if (kind === "root" || kind === "cycle" || issue.description === null) {
+    if (kind === "root" || kind === "cycle" || issue.description_markdown === null) {
       throw new Error("cycle_reader_stage_invalid");
     }
     const issueId = parseStageIssueId(issue.issue_id);
-    const description = parseMarkdownText(issue.description, "cycle_reader_stage_invalid");
+    const description = parseMarkdownText(issue.description_markdown, "cycle_reader_stage_invalid");
     const sealed = Object.freeze({
       issue_id: issueId,
       sealed_revision: canonicalTaskRevision({

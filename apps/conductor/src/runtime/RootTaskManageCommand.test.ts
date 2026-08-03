@@ -8,7 +8,9 @@ import {
   parseRootIssueId,
   parseRuntimeGeneration,
   parseTaskIssueId,
+  parseTaskLabelId,
   parseTaskRevision,
+  parseTaskStateId,
 } from "../contracts/identity.js";
 import { deriveCycleUuid } from "../contracts/cycle-identities.js";
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
@@ -19,7 +21,15 @@ import {
   sealCycleSpecification,
   type CycleExecutionSnapshot,
 } from "../contracts/cycle.js";
-import { parseTaskSnapshot, type TaskIssueSnapshot, type TaskSnapshot } from "../contracts/observation.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  parseTaskRelationSnapshot,
+  parseTaskSnapshot,
+  type TaskIssueSnapshot,
+  type TaskSnapshot,
+} from "../contracts/task-management.js";
+import { parseMarkdownText } from "../contracts/validation.js";
 import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   createTaskManageCallerAuthority,
@@ -48,8 +58,6 @@ const cycleTaskId = parseTaskIssueId(deriveCycleUuid(
   identityVersion, "cycle_issue", rootId, "first_cycle", "first_cycle",
 ));
 const derivedCycleId = (kind: string) => deriveCycleUuid(identityVersion, kind, cycleTaskId);
-const canonicalRootRevision = `symphony:v1:${"1".repeat(64)}`;
-const canonicalDraftRevision = `symphony:v1:${"2".repeat(64)}`;
 const generation = parseRuntimeGeneration(7);
 const correlationId = parseCorrelationId("corr:root:7");
 const execution: TaskManageBoundaryExecution = { assertActive: () => undefined };
@@ -86,10 +94,10 @@ const workflow = parseTaskWorkflowIdentities({
   },
   stage_states: {
     todo: "state:stage-todo",
-    in_progress: "state:stage-in-progress",
+    in_progress: "state:cycle-in-progress",
     done: "state:stage-done",
-    failed: "state:stage-failed",
-    canceled: "state:stage-canceled",
+    failed: "state:cycle-failed",
+    canceled: "state:cycle-canceled",
   },
 });
 
@@ -112,6 +120,9 @@ const rootDescription = [
   "",
   "Only exact role-owned mutations reach the provider.",
 ].join("\n");
+const canonicalRootRevision = issue(
+  "ROOT-A", null, "root:current", workflow.cycle_states.in_progress, workflow.labels.root, rootDescription,
+).revision;
 const cycleDescription = [
   "# Cycle Draft",
   "",
@@ -213,6 +224,9 @@ const correctedCycleDescription = cycleDescription.replace(
   "Validate Markdown and exact revisions at the Root boundary.",
   "Validate closed Markdown and exact revisions at the Root boundary.",
 );
+const canonicalDraftRevision = issue(
+  cycleTaskId, "ROOT-A", "cycle:draft", workflow.cycle_states.draft, workflow.labels.cycle, cycleDescription,
+).revision;
 
 function issue(
   issueId: string,
@@ -222,32 +236,105 @@ function issue(
   label: string,
   description: string | null,
 ): TaskIssueSnapshot {
-  return {
+  const statusById = new Map<string, TaskIssueSnapshot["status"]>([
+    [workflow.cycle_states.draft, "Draft"],
+    [workflow.cycle_states.in_progress, "In Progress"],
+    [workflow.cycle_states.awaiting_acceptance, "Awaiting Acceptance"],
+    [workflow.cycle_states.succeeded, "Succeeded"],
+    [workflow.cycle_states.rejected, "Rejected"],
+    [workflow.cycle_states.failed, "Failed"],
+    [workflow.cycle_states.canceled, "Canceled"],
+    [workflow.stage_states.todo, "Todo"],
+    [workflow.stage_states.in_progress, "In Progress"],
+    [workflow.stage_states.done, "Done"],
+    [workflow.stage_states.failed, "Failed"],
+    [workflow.stage_states.canceled, "Canceled"],
+    ["state:root-in-progress", "In Progress"],
+  ]);
+  const semanticStatus = statusById.get(status);
+  if (semanticStatus === undefined) throw new Error("unknown_test_status");
+  const kind = (Object.entries(workflow.labels).find(([, value]) => value === label)?.[0] ?? "root") as TaskIssueSnapshot["kind"];
+  const providerUpdatedAt = issueTimestamp(revision);
+  const fields = {
     issue_id: parseTaskIssueId(issueId),
-    revision: parseTaskRevision(revision),
-    status,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: providerUpdatedAt,
+    creation_actor_id: "actor:symphony",
+    kind,
+    status_id: parseTaskStateId(status),
+    status: semanticStatus,
     title: issueId,
-    description,
-    parent_id: parentId === null ? null : parseTaskIssueId(parentId),
-    labels: [label],
+    description_markdown: parseMarkdownText(description ?? "# Empty"),
+    parent_issue_id: parentId === null ? null : parseTaskIssueId(parentId),
+    label_ids: [parseTaskLabelId(label)],
     delegate_id: null,
     priority: null,
+    archived: false,
+    trashed: false,
   };
+  return parseTaskIssueSnapshotChange({ ...fields, revision: canonicalTaskRevision(fields) });
+}
+
+function issueTimestamp(token: string): string {
+  return new Date(
+    Date.parse("2026-08-03T00:00:00.000Z")
+      + Number.parseInt(createHash("sha256").update(token).digest("hex").slice(0, 8), 16),
+  ).toISOString();
+}
+
+function changedIssue(
+  current: TaskIssueSnapshot,
+  changes: Partial<Omit<TaskIssueSnapshot, "revision" | "provider_updated_at">>,
+  token: string,
+): TaskIssueSnapshot {
+  const { revision: _revision, provider_updated_at: _updatedAt, ...unchanged } = current;
+  const fields = { ...unchanged, ...changes, provider_updated_at: issueTimestamp(token) };
+  return parseTaskIssueSnapshotChange({ ...fields, revision: canonicalTaskRevision(fields) });
+}
+
+function createdIssue(call: CreateIssueCall, token: string, title = call.input.desired.title): TaskIssueSnapshot {
+  const base = issue(
+    call.input.issue_id,
+    call.input.parent_issue_id,
+    token,
+    call.input.desired.state_id,
+    workflow.labels.cycle,
+    call.input.desired.description,
+  );
+  return changedIssue(base, {
+    title,
+    label_ids: call.input.desired.label_ids,
+    delegate_id: call.input.desired.delegate_id,
+    priority: call.input.desired.priority,
+  }, `${token}:normalized`);
 }
 
 const rootIssue = () => issue(
-  "ROOT-A", null, canonicalRootRevision, "state:root-in-progress", workflow.labels.root, rootDescription,
+  "ROOT-A", null, "root:current", workflow.cycle_states.in_progress, workflow.labels.root, rootDescription,
 );
 
 function snapshot(
   cycles: readonly TaskIssueSnapshot[] = [],
   relations: readonly unknown[] = [],
 ): TaskSnapshot {
-  return parseTaskSnapshot({ root_id: rootId, issues: [rootIssue(), ...cycles], relations });
+  return parseTaskSnapshot({
+    root_id: rootId,
+    workflow_state_map: {
+      team_id: "team:root-test", revision: `symphony:v1:${"0".repeat(64)}`,
+      todo_state_id: workflow.stage_states.todo, draft_state_id: workflow.cycle_states.draft,
+      in_progress_state_id: workflow.cycle_states.in_progress,
+      awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+      in_review_state_id: "state:root-in-review", done_state_id: workflow.stage_states.done,
+      succeeded_state_id: workflow.cycle_states.succeeded, rejected_state_id: workflow.cycle_states.rejected,
+      failed_state_id: workflow.cycle_states.failed, canceled_state_id: workflow.cycle_states.canceled,
+    },
+    issues: [rootIssue(), ...cycles], relations,
+    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
+  });
 }
 
 const draftCycle = () => issue(
-  cycleTaskId, "ROOT-A", canonicalDraftRevision, workflow.cycle_states.draft,
+  cycleTaskId, "ROOT-A", "cycle:draft", workflow.cycle_states.draft,
   workflow.labels.cycle, cycleDescription,
 );
 const secondDraftCycle = () => issue(
@@ -280,12 +367,19 @@ const verifyStage = () => issue(
   workflow.labels.verify, "## Verify\n\nVerified every mapped acceptance criterion.",
 );
 
-const executionRelation = Object.freeze({
+const executionRelationFields = {
   relation_id: "REL-WORK-VERIFY",
-  revision: "revision:relation:sealed",
+  provider_created_at: "2026-08-03T00:00:00.000Z",
+  provider_updated_at: "2026-08-03T00:00:00.000Z",
+  creation_actor_id: "actor:symphony",
+  creation_evidence_id: "evidence:REL-WORK-VERIFY",
   type: "blocks",
   source_issue_id: "WORK-A",
   target_issue_id: "VERIFY-A",
+} as const;
+const executionRelation = parseTaskRelationSnapshot({
+  ...executionRelationFields,
+  revision: canonicalTaskRevision(executionRelationFields),
 });
 
 function awaitingSnapshot(): TaskSnapshot {
@@ -320,7 +414,7 @@ function approvedCycle(options: ApprovedCycleOptions = {}): CycleExecutionSnapsh
     root_id: rootId,
     cycle_id: parseCycleIssueId(cycleTaskId),
     root_definition_revision: definition.root_revision,
-    cycle_revision: parseTaskRevision("revision:cycle:sealed"),
+    cycle_revision: parseTaskRevision(canonicalDraftRevision),
     correlation_id: parseCorrelationId("corr:cycle:seal"),
   });
   const specification = sealCycleSpecification({
@@ -337,7 +431,7 @@ function approvedCycle(options: ApprovedCycleOptions = {}): CycleExecutionSnapsh
       sealed_revision: "revision:plan:sealed",
       kind: "plan",
       title: "PLAN-A",
-      description_markdown: planStage().description,
+      description_markdown: planStage().description_markdown,
       parent_cycle_id: cycleTaskId,
     },
     work_issues: [{
@@ -345,7 +439,7 @@ function approvedCycle(options: ApprovedCycleOptions = {}): CycleExecutionSnapsh
       sealed_revision: "revision:work:sealed",
       kind: "work",
       title: "WORK-A",
-      description_markdown: workStage().description,
+      description_markdown: workStage().description_markdown,
       parent_cycle_id: cycleTaskId,
     }],
     verify_issue: {
@@ -353,7 +447,7 @@ function approvedCycle(options: ApprovedCycleOptions = {}): CycleExecutionSnapsh
       sealed_revision: "revision:verify:sealed",
       kind: "verify",
       title: "VERIFY-A",
-      description_markdown: verifyStage().description,
+      description_markdown: verifyStage().description_markdown,
       parent_cycle_id: cycleTaskId,
     },
     relations: [{
@@ -370,7 +464,7 @@ function approvedCycle(options: ApprovedCycleOptions = {}): CycleExecutionSnapsh
     cycle_id: specificationTarget.cycle_id,
     runtime_generation: generation,
     correlation_id: correlationId,
-    cycle_revision: parseTaskRevision("revision:cycle:awaiting"),
+    cycle_revision: awaitingCycle().revision,
     specification,
     sealed_graph: graph,
   });
@@ -685,12 +779,12 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
     },
     {
       current: awaitingSnapshot(),
-      call: update(cycleTaskId, "revision:cycle:awaiting", { state_id: workflow.cycle_states.succeeded }),
+      call: update(cycleTaskId, awaitingCycle().revision, { state_id: workflow.cycle_states.succeeded }),
       approved: approvedCycle(),
     },
     {
       current: awaitingSnapshot(),
-      call: update(cycleTaskId, "revision:cycle:awaiting", { state_id: workflow.cycle_states.rejected }),
+      call: update(cycleTaskId, awaitingCycle().revision, { state_id: workflow.cycle_states.rejected }),
       approved: approvedCycle(),
     },
   ];
@@ -715,17 +809,7 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
         callerAuthority.verifier.assert(providerExecution.caller, call);
         assert.equal(providerExecution.caller.cycle_id, null);
         effects.push(call.function);
-        const created = {
-          issue_id: call.input.issue_id,
-          revision: "revision:cycle:new",
-          status: call.input.desired.state_id,
-          title: call.input.desired.title,
-          description: call.input.desired.description,
-          parent_id: call.input.parent_issue_id,
-          labels: call.input.desired.label_ids,
-          delegate_id: call.input.desired.delegate_id,
-          priority: call.input.desired.priority,
-        };
+        const created = createdIssue(call, "cycle:new");
         return parseTaskMcpResult({
           ...envelope("create_issue"), function: "create_issue",
           output: {
@@ -754,12 +838,18 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
         assert.ok(before);
         const field = "description" in call.input.desired ? "description" : "status";
         const afterValue = field === "description" ? call.input.desired.description : call.input.desired.state_id;
-        const fresh = {
-          ...before,
-          revision: parseTaskRevision(`${before.revision}:next`),
-          description: field === "description" ? call.input.desired.description ?? null : before.description,
-          status: field === "status" ? call.input.desired.state_id ?? before.status : before.status,
-        };
+        const nextStatusId = call.input.desired.state_id ?? before.status_id;
+        const fresh = changedIssue(before, {
+          description_markdown: field === "description"
+            ? parseMarkdownText(call.input.desired.description ?? "# Empty")
+            : before.description_markdown,
+          status_id: nextStatusId,
+          status: field === "status"
+            ? nextStatusId === workflow.cycle_states.in_progress ? "In Progress"
+              : nextStatusId === workflow.cycle_states.succeeded ? "Succeeded"
+                : nextStatusId === workflow.cycle_states.rejected ? "Rejected" : before.status
+            : before.status,
+        }, `${before.revision}:next`);
         current = parseTaskSnapshot({
           ...current,
           issues: current.issues.map((issue) => issue.issue_id === fresh.issue_id ? fresh : issue),
@@ -775,7 +865,7 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
               kind: "field_changed",
               issue_id: call.input.issue_id,
               field,
-              before: field === "description" ? before.description : before.status,
+              before: field === "description" ? before.description_markdown : before.status_id,
               after: afterValue,
             }],
             sanitized_reason: null,
@@ -793,11 +883,11 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
     let freshReadRequired = false;
     const candidateCall = entry.call;
     if (candidateCall.function === "update_issue") {
-      const status = current.issues.find(
+      const statusId = current.issues.find(
         ({ issue_id }) => issue_id === candidateCall.input.issue_id,
-      )?.status;
-      freshReadRequired = status === workflow.cycle_states.draft
-        || status === workflow.cycle_states.awaiting_acceptance;
+      )?.status_id;
+      freshReadRequired = statusId === workflow.cycle_states.draft
+        || statusId === workflow.cycle_states.awaiting_acceptance;
     }
     if (freshReadRequired) {
       const read = await bound.get_issue(getIssue(cycleTaskId), execution);
@@ -863,7 +953,7 @@ test("Root requires a current-turn exact acceptance view before Succeeded or Rej
         manager,
         { readApprovedCycle: async () => approvedCycle() },
       ).update_issue(
-        update(cycleTaskId, "revision:cycle:awaiting", { state_id: stateId }),
+        update(cycleTaskId, awaitingCycle().revision, { state_id: stateId }),
         execution,
       ),
       denied,
@@ -943,7 +1033,7 @@ test("Root refuses acceptance when the verified revision changes after its exact
   );
   await assert.rejects(
     bound.update_issue(
-      update(cycleTaskId, "revision:cycle:awaiting", {
+      update(cycleTaskId, awaitingCycle().revision, {
         state_id: workflow.cycle_states.succeeded,
       }),
       execution,
@@ -979,11 +1069,11 @@ test("Root resolves unknown Succeeded acceptance into the original exact deliver
     assert.equal(providerExecution.caller.cycle_seal_digest, approved.specification.seal_digest);
     assert.equal(providerExecution.caller.graph_seal_digest, approved.sealed_graph_digest);
     effects.push("update_issue");
-    const terminal = {
-      ...awaitingCycle(),
-      revision: parseTaskRevision("revision:cycle:accepted"),
-      status: call.input.desired.state_id ?? workflow.cycle_states.rejected,
-    };
+    const terminalStatusId = call.input.desired.state_id ?? workflow.cycle_states.rejected;
+    const terminal = changedIssue(awaitingCycle(), {
+      status_id: terminalStatusId,
+      status: terminalStatusId === workflow.cycle_states.succeeded ? "Succeeded" : "Rejected",
+    }, "cycle:accepted");
     current = parseTaskSnapshot({
       ...current,
       issues: current.issues.map((entry) => entry.issue_id === terminal.issue_id ? terminal : entry),
@@ -1009,7 +1099,7 @@ test("Root resolves unknown Succeeded acceptance into the original exact deliver
   };
   assert.ok(initial.acceptance_view);
   const unknown = await bound.update_issue(
-    update(cycleTaskId, "revision:cycle:awaiting", {
+    update(cycleTaskId, awaitingCycle().revision, {
       state_id: workflow.cycle_states.succeeded,
     }),
     execution,
@@ -1056,12 +1146,11 @@ test("Root rejects substituted terminal facts while resolving unknown acceptance
   };
   manager.update_issue = async (call, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, call);
-    const terminal = {
-      ...awaitingCycle(),
-      revision: parseTaskRevision("revision:cycle:substituted"),
-      status: workflow.cycle_states.rejected,
+    const terminal = changedIssue(awaitingCycle(), {
+      status_id: workflow.cycle_states.rejected,
+      status: "Rejected",
       title: "Provider-substituted title",
-    };
+    }, "cycle:substituted");
     current = parseTaskSnapshot({
       ...current,
       issues: current.issues.map((entry) => entry.issue_id === terminal.issue_id ? terminal : entry),
@@ -1087,7 +1176,7 @@ test("Root rejects substituted terminal facts while resolving unknown acceptance
 
   await bound.get_issue(getIssue(cycleTaskId), execution);
   assert.equal((await bound.update_issue(
-    update(cycleTaskId, "revision:cycle:awaiting", {
+    update(cycleTaskId, awaitingCycle().revision, {
       state_id: workflow.cycle_states.rejected,
     }),
     execution,
@@ -1191,8 +1280,11 @@ test("Root does not let an exact Draft read in one correlation authorize another
 
 test("Root compares Draft labels as facts independent of provider order", async () => {
   const auxiliaryLabel = "label:review";
-  const currentDraft = { ...draftCycle(), labels: [workflow.labels.cycle, auxiliaryLabel] };
-  const providerDraft = { ...currentDraft, labels: [auxiliaryLabel, workflow.labels.cycle] };
+  const currentDraft = changedIssue(draftCycle(), {
+    label_ids: [workflow.labels.cycle, parseTaskLabelId(auxiliaryLabel)],
+  }, "cycle:draft:current-label-order");
+  // Task Manager output has already canonicalized provider label order.
+  const providerDraft = currentDraft;
   let current = snapshot([currentDraft]);
   const manager = recordingManager([]);
   manager.get_issue = async (call) => parseTaskMcpResult({
@@ -1201,11 +1293,9 @@ test("Root compares Draft labels as facts independent of provider order", async 
     output: { issue: providerDraft },
   }, call);
   manager.update_issue = async (call) => {
-    const fresh = {
-      ...providerDraft,
-      revision: parseTaskRevision("revision:cycle:corrected"),
-      description: call.input.desired.description ?? providerDraft.description,
-    };
+    const fresh = changedIssue(providerDraft, {
+      description_markdown: parseMarkdownText(call.input.desired.description ?? providerDraft.description_markdown),
+    }, "cycle:corrected");
     current = snapshot([fresh]);
     return parseTaskMcpResult({
       ...envelope("update_issue"),
@@ -1219,8 +1309,8 @@ test("Root compares Draft labels as facts independent of provider order", async 
           kind: "field_changed",
           issue_id: call.input.issue_id,
           field: "description",
-          before: providerDraft.description,
-          after: fresh.description,
+          before: providerDraft.description_markdown,
+          after: fresh.description_markdown,
         }],
         sanitized_reason: null,
       },
@@ -1230,7 +1320,7 @@ test("Root compares Draft labels as facts independent of provider order", async 
 
   await bound.get_issue(getIssue(cycleTaskId), execution);
   const result = await bound.update_issue(
-    update(cycleTaskId, canonicalDraftRevision, { description: correctedCycleDescription }),
+    update(cycleTaskId, currentDraft.revision, { description: correctedCycleDescription }),
     execution,
   );
 
@@ -1272,13 +1362,20 @@ test("Root rejects multiple non-terminal Cycles before provider effects", async 
 
 test("Root rejects a Draft with a prematerialized execution graph before approval", async () => {
   const effects: string[] = [];
-  const current = snapshot([draftCycle(), draftWork()], [{
+  const draftRelationFields = {
     relation_id: "REL-DRAFT-WORK",
-    revision: "revision:relation:draft-work",
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    creation_evidence_id: "evidence:REL-DRAFT-WORK",
     type: "blocks",
     source_issue_id: cycleTaskId,
     target_issue_id: "WORK-A",
-  }]);
+  } as const;
+  const current = snapshot([draftCycle(), draftWork()], [parseTaskRelationSnapshot({
+    ...draftRelationFields,
+    revision: canonicalTaskRevision(draftRelationFields),
+  })]);
 
   await assert.rejects(
     bind(() => current, recordingManager(effects)).update_issue(
@@ -1309,11 +1406,10 @@ test("Root rejects a Stage inserted while an approval is being applied", async (
   };
   manager.update_issue = async (call) => {
     effects.push("update_issue");
-    const approved = {
-      ...draftCycle(),
-      revision: parseTaskRevision("revision:cycle:sealed"),
-      status: workflow.cycle_states.in_progress,
-    };
+    const approved = changedIssue(draftCycle(), {
+      status_id: workflow.cycle_states.in_progress,
+      status: "In Progress" as const,
+    }, "cycle:sealed");
     current = snapshot([approved, draftWork()]);
     return parseTaskMcpResult({
       ...envelope("update_issue"),
@@ -1361,11 +1457,10 @@ test("Root rejects a Stage present when an unknown approval is resolved", async 
     },
   }, call);
   manager.update_issue = async (call) => {
-    const approved = {
-      ...draftCycle(),
-      revision: parseTaskRevision("revision:cycle:sealed-after-unknown"),
-      status: workflow.cycle_states.in_progress,
-    };
+    const approved = changedIssue(draftCycle(), {
+      status_id: workflow.cycle_states.in_progress,
+      status: "In Progress" as const,
+    }, "cycle:sealed-after-unknown");
     current = snapshot([approved, draftWork()]);
     return parseTaskMcpResult({
       ...envelope("update_issue"),
@@ -1400,10 +1495,9 @@ test("Root rejects a Stage present when an unknown approval is resolved", async 
 test("Root resolves an unknown approval only in its originating correlation", async () => {
   const otherCorrelation = parseCorrelationId("corr:root:other");
   const auxiliaryLabel = "label:review";
-  const originalDraft = {
-    ...draftCycle(),
-    labels: [workflow.labels.cycle, auxiliaryLabel],
-  };
+  const originalDraft = changedIssue(draftCycle(), {
+    label_ids: [workflow.labels.cycle, parseTaskLabelId(auxiliaryLabel)],
+  }, "cycle:draft:original");
   let current = snapshot([originalDraft]);
   const effects: string[] = [];
   const manager = recordingManager(effects);
@@ -1422,12 +1516,11 @@ test("Root resolves an unknown approval only in its originating correlation", as
   manager.update_issue = async (call, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, call);
     effects.push(`update:${call.correlation_id}`);
-    const approved = {
-      ...originalDraft,
-      revision: parseTaskRevision("revision:cycle:sealed-after-unknown"),
-      status: workflow.cycle_states.in_progress,
-      labels: [auxiliaryLabel, workflow.labels.cycle],
-    };
+    const approved = changedIssue(originalDraft, {
+      status_id: workflow.cycle_states.in_progress,
+      status: "In Progress" as const,
+      label_ids: [parseTaskLabelId(auxiliaryLabel), workflow.labels.cycle],
+    }, "cycle:sealed-after-unknown");
     current = snapshot([approved]);
     return parseTaskMcpResult({
       ...envelope("update_issue"),
@@ -1446,7 +1539,7 @@ test("Root resolves an unknown approval only in its originating correlation", as
   const approvalBinding = base.forCorrelation(correlationId);
   await approvalBinding.get_issue(getIssue(cycleTaskId), execution);
   const unknown = await approvalBinding.update_issue(
-    update(cycleTaskId, canonicalDraftRevision, {
+    update(cycleTaskId, originalDraft.revision, {
       state_id: workflow.cycle_states.in_progress,
     }),
     execution,
@@ -1488,12 +1581,10 @@ test("Root rejects an applied read-back that changes a field outside the exact g
   }, received);
   manager.update_issue = async (received, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, received);
-    const fresh = {
-      ...draftCycle(),
-      revision: parseTaskRevision("revision:cycle:changed"),
+    const fresh = changedIssue(draftCycle(), {
       title: "Unauthorized title change",
-      description: received.input.desired.description ?? null,
-    };
+      description_markdown: parseMarkdownText(received.input.desired.description ?? "# Empty"),
+    }, "cycle:changed");
     return parseTaskMcpResult({
       ...envelope("update_issue"),
       function: "update_issue",
@@ -1506,7 +1597,7 @@ test("Root rejects an applied read-back that changes a field outside the exact g
           kind: "field_changed",
           issue_id: received.input.issue_id,
           field: "description",
-          before: draftCycle().description,
+          before: draftCycle().description_markdown,
           after: received.input.desired.description,
         }],
         sanitized_reason: null,
@@ -1560,17 +1651,7 @@ test("Root creates a successor Draft only after a current-turn exact terminal pr
     callerAuthority.verifier.assert(providerExecution.caller, call);
     assert.equal(providerExecution.caller.cycle_id, null);
     effects.push("create_issue");
-    const created = {
-      issue_id: call.input.issue_id,
-      revision: "revision:cycle:successor",
-      status: call.input.desired.state_id,
-      title: call.input.desired.title,
-      description: call.input.desired.description,
-      parent_id: call.input.parent_issue_id,
-      labels: call.input.desired.label_ids,
-      delegate_id: call.input.desired.delegate_id,
-      priority: call.input.desired.priority,
-    };
+    const created = createdIssue(call, "cycle:successor");
     return parseTaskMcpResult({
       ...envelope("create_issue"),
       function: "create_issue",
@@ -1675,17 +1756,8 @@ test("Root rejects a substituted Draft after unknown successor creation acceptan
   manager.get_issue = async (received, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, received);
     return parseTaskMcpResult({
-      ...envelope("get_issue"), function: "get_issue", output: { issue: {
-        issue_id: received.input.issue_id,
-        revision: "revision:cycle:pending",
-        status: call.input.desired.state_id,
-        title: "Provider-substituted title",
-        description: call.input.desired.description,
-        parent_id: call.input.parent_issue_id,
-        labels: call.input.desired.label_ids,
-        delegate_id: call.input.desired.delegate_id,
-        priority: call.input.desired.priority,
-      } },
+      ...envelope("get_issue"), function: "get_issue",
+      output: { issue: createdIssue(call, "cycle:pending", "Provider-substituted title") },
     }, received);
   };
   const bound = bind(() => snapshot(), manager);

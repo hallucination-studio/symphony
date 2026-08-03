@@ -11,7 +11,7 @@ import {
   parseTaskRevision,
   parseTaskStateId,
 } from "../contracts/identity.js";
-import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/observation.js";
+import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import type {
   TaskManageBoundaryExecution,
   TaskManageCommandInterface,

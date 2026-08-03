@@ -146,39 +146,47 @@ test("generic query functions return only normalized closed resources with stabl
     updated_at: "2026-07-30T00:00:00.000Z",
     archived: false,
   }]);
-  client.states = [{
-    id: "state:todo", revision: "revision:state:todo", name: "Todo", team_id: TEAM_ID, archived: false,
-  }];
+  client.states = ["Todo", "Draft"].map((name) => ({
+    id: `state:${name.toLowerCase()}`, revision: `revision:state:${name.toLowerCase()}`,
+    name, team_id: TEAM_ID, archived: false,
+  }));
   client.labels = [
     { id: "label:root", revision: "revision:label:root", name: "symphony:kind/root", team_id: TEAM_ID },
+    { id: "label:cycle", revision: "revision:label:cycle", name: "symphony:kind/cycle", team_id: TEAM_ID },
     { id: "label:shared", revision: "revision:label:shared", name: "shared", team_id: null },
   ];
   const queries = new LinearQueries(client, options());
 
   const getCall = call("get_issue", { issue_id: "root-1" });
   if (getCall.function !== "get_issue") assert.fail("expected get_issue");
-  assert.equal((await queries.get_issue(getCall)).output.issue?.revision, "revision:root-1");
+  assert.match((await queries.get_issue(getCall)).output.issue?.revision ?? "", /^symphony:v1:[0-9a-f]{64}$/u);
 
   const listCall = call("list_issues", { cursor: null, page_size: 1 });
   if (listCall.function !== "list_issues") assert.fail("expected list_issues");
-  assert.deepEqual((await queries.list_issues(listCall)).output, {
-      issues: [{
-        issue_id: "root-1",
-        revision: "revision:root-1",
-        status: "state:todo",
-        title: "Issue root-1",
-        description: null,
-        parent_id: null,
-        labels: ["label:root"],
-        delegate_id: ACTOR_ID,
-        priority: 2,
-      }],
-      next_cursor: "1",
+  const listed = (await queries.list_issues(listCall)).output;
+  assert.equal(listed.next_cursor, "1");
+  assert.deepEqual({ ...listed.issues[0], revision: "canonical" }, {
+    issue_id: "root-1",
+    revision: "canonical",
+    provider_created_at: "2026-07-30T00:00:00.000Z",
+    provider_updated_at: "2026-07-30T00:00:00.000Z",
+    creation_actor_id: ACTOR_ID,
+    kind: "root",
+    status_id: "state:todo",
+    status: "Todo",
+    title: "Issue root-1",
+    description_markdown: "# Empty",
+    parent_issue_id: null,
+    label_ids: ["label:root"],
+    delegate_id: ACTOR_ID,
+    priority: 2,
+    archived: false,
+    trashed: false,
   });
 
   const childrenCall = call("list_children", { parent_issue_id: "root-1", cursor: null, page_size: 10 });
   if (childrenCall.function !== "list_children") assert.fail("expected list_children");
-  assert.equal((await queries.list_children(childrenCall)).output.issues[0]?.parent_id, "root-1");
+  assert.equal((await queries.list_children(childrenCall)).output.issues[0]?.parent_issue_id, "root-1");
 
   const relationsCall = call("list_relations", { issue_id: "cycle-1", cursor: null, page_size: 10 });
   if (relationsCall.function !== "list_relations") assert.fail("expected list_relations");
@@ -192,6 +200,7 @@ test("generic query functions return only normalized closed resources with stabl
   if (labelsCall.function !== "list_labels") assert.fail("expected list_labels");
   assert.deepEqual((await queries.list_labels(labelsCall)).output.labels.map(({ label_id }) => label_id), [
     "label:root",
+    "label:cycle",
     "label:shared",
   ]);
 });
@@ -227,24 +236,23 @@ test("startup inventory paginates every Root without delegate filtering in stabl
     )),
   ];
 
-  assert.deepEqual(await new LinearQueries(client, options()).inventoryRoots(), [
+  const inventory = await new LinearQueries(client, options()).inventoryRoots();
+  assert.ok(inventory.every(({ revision }) => /^symphony:v1:[0-9a-f]{64}$/u.test(revision)));
+  assert.deepEqual(inventory.map(({ revision: _revision, ...root }) => root), [
     {
       root_id: "root-1",
-      revision: "revision:root-1",
       status: "Todo",
       priority: 1,
       created_at: "2026-07-30T00:00:00.000Z",
     },
     {
       root_id: "other",
-      revision: "revision:other",
       status: "Todo",
       priority: 2,
       created_at: "2026-07-30T00:00:00.000Z",
     },
     {
       root_id: "root-2",
-      revision: "revision:root-2",
       status: "In Progress",
       priority: 2,
       created_at: "2026-07-30T00:00:00.000Z",
@@ -321,7 +329,7 @@ test("inventory and snapshot fail closed on malformed facts, ambiguity, and raw 
   ]);
   const overlap = await new LinearQueries(ambiguous, options()).readRootSnapshot(parseRootIssueId("root-1"));
   assert.deepEqual(
-    overlap.issues.filter(({ parent_id }) => parent_id === "root-1").map(({ issue_id }) => issue_id),
+    overlap.issues.filter(({ parent_issue_id }) => parent_issue_id === "root-1").map(({ issue_id }) => issue_id),
     ["cycle-1", "cycle-2"],
   );
 
@@ -338,11 +346,6 @@ test("Root reads reject wrong team, revision, ancestry, and kind facts", async (
     {
       code: /linear_team_mismatch/u,
       root: issue("root-1", null, "Todo", ["symphony:kind/root"], { team_id: "team:other" }),
-      children: [],
-    },
-    {
-      code: /linear_invalid_payload/u,
-      root: issue("root-1", null, "Todo", ["symphony:kind/root"], { revision: "" }),
       children: [],
     },
     {

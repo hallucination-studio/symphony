@@ -10,8 +10,8 @@ import {
   parseTaskObservationEvent,
   type TaskObservationEvent,
   type TaskChangeOriginEvidence,
-  type TaskSnapshot,
 } from "../../contracts/observation.js";
+import type { TaskSnapshot } from "../../contracts/task-management.js";
 import { taskSnapshotChanges, taskSnapshotDigest } from "../../observation/TaskFacts.js";
 import type { TaskManageObserverInterface } from "../api/TaskManageObserverInterface.js";
 

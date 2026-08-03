@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { parseTaskIssueRecord, type TaskIssueRecord } from "./cycle-records.js";
 import {
   parseRootIssueId,
   parseTaskIssueId,
@@ -214,10 +215,7 @@ const STATUS_STATE_FIELD: Record<TaskWorkflowStatus, keyof TaskWorkflowStateMap>
   Canceled: "canceled_state_id",
 };
 
-export function parseTaskIssueSnapshot(
-  value: unknown,
-  states: TaskWorkflowStateMap,
-): TaskIssueSnapshot {
+export function parseTaskIssueSnapshotChange(value: unknown): TaskIssueSnapshot {
   const record = asRecord(value);
   assertExactKeys(record, ISSUE_KEYS);
   const revision = parseCanonicalRevision(record.revision);
@@ -225,7 +223,6 @@ export function parseTaskIssueSnapshot(
   assertCanonicalRevision(revision, fields, "task_issue_revision_mismatch");
   const status = parseEnum(record.status, TASK_WORKFLOW_STATUSES);
   const statusId = parseTaskStateId(record.status_id);
-  if (states[STATUS_STATE_FIELD[status]] !== statusId) throw new Error("task_issue_status_mismatch");
   return Object.freeze({
     issue_id: parseTaskIssueId(record.issue_id),
     revision,
@@ -244,6 +241,17 @@ export function parseTaskIssueSnapshot(
     archived: parseBoolean(record.archived, "invalid_task_archived"),
     trashed: parseBoolean(record.trashed, "invalid_task_trashed"),
   });
+}
+
+export function parseTaskIssueSnapshot(
+  value: unknown,
+  states: TaskWorkflowStateMap,
+): TaskIssueSnapshot {
+  const issue = parseTaskIssueSnapshotChange(value);
+  if (states[STATUS_STATE_FIELD[issue.status]] !== issue.status_id) {
+    throw new Error("task_issue_status_mismatch");
+  }
+  return issue;
 }
 
 export interface TaskRelationSnapshot {
@@ -487,4 +495,82 @@ export function parseInvalidTaskSnapshot(value: unknown): InvalidTaskSnapshot {
     surviving_family_digest: parseDigest(record.surviving_family_digest, "invalid_surviving_family_digest"),
     sanitized_reason_code: expectedReason,
   });
+}
+
+export type TaskIssueRecordObservation = TaskIssueRecord | InvalidTaskIssueRecord;
+
+export interface TaskSnapshot {
+  readonly root_id: RootIssueId;
+  readonly workflow_state_map: TaskWorkflowStateMap;
+  readonly issues: readonly TaskIssueSnapshot[];
+  readonly relations: readonly TaskRelationSnapshot[];
+  readonly resource_creation_evidence: readonly TaskResourceCreationEvidence[];
+  readonly issue_history: readonly TaskIssueHistoryEntry[];
+  readonly issue_record_observations: readonly TaskIssueRecordObservation[];
+}
+
+export type TaskSnapshotObservation = TaskSnapshot | InvalidTaskSnapshot;
+
+function parseTaskIssueRecordObservation(value: unknown): TaskIssueRecordObservation {
+  const record = asRecord(value);
+  return "observation_kind" in record
+    ? parseInvalidTaskIssueRecord(value)
+    : parseTaskIssueRecord(value);
+}
+
+export function parseTaskSnapshot(value: unknown): TaskSnapshot {
+  const record = asRecord(value);
+  assertExactKeys(record, [
+    "root_id", "workflow_state_map", "issues", "relations", "resource_creation_evidence",
+    "issue_history", "issue_record_observations",
+  ]);
+  const rootId = parseRootIssueId(record.root_id);
+  const states = parseTaskWorkflowStateMap(record.workflow_state_map);
+  const issues = parseArray(record.issues, (entry) => parseTaskIssueSnapshot(entry, states));
+  const issueIds = new Set(issues.map(({ issue_id }) => issue_id));
+  if (issueIds.size !== issues.length) throw new Error("duplicate_issue_identity");
+  const rootIssue = issues.find(({ issue_id }) => String(issue_id) === String(rootId));
+  if (rootIssue === undefined) throw new Error("missing_root_identity");
+  if (rootIssue.kind !== "root" || rootIssue.parent_issue_id !== null) throw new Error("invalid_root_identity");
+  for (const issue of issues) {
+    if (issue.parent_issue_id !== null && !issueIds.has(issue.parent_issue_id)) {
+      throw new Error("unknown_parent_identity");
+    }
+  }
+  const relations = parseArray(record.relations, parseTaskRelationSnapshot);
+  if (new Set(relations.map(({ relation_id }) => relation_id)).size !== relations.length) {
+    throw new Error("duplicate_relation_identity");
+  }
+  for (const relation of relations) {
+    if (!issueIds.has(relation.source_issue_id) || !issueIds.has(relation.target_issue_id)) {
+      throw new Error("unknown_relation_endpoint");
+    }
+  }
+  const creationEvidence = parseArray(record.resource_creation_evidence, parseTaskResourceCreationEvidence);
+  if (new Set(creationEvidence.map(({ evidence_id }) => evidence_id)).size !== creationEvidence.length) {
+    throw new Error("duplicate_creation_evidence_identity");
+  }
+  const history = parseArray(record.issue_history, parseTaskIssueHistoryEntry);
+  if (history.some(({ issue_id }) => !issueIds.has(issue_id))) throw new Error("unknown_history_issue_identity");
+  const recordObservations = parseArray(record.issue_record_observations, parseTaskIssueRecordObservation);
+  if (new Set(recordObservations.map(({ record_id }) => record_id)).size !== recordObservations.length) {
+    throw new Error("duplicate_record_observation_identity");
+  }
+  if (recordObservations.some(({ issue_id }) => !issueIds.has(issue_id))) {
+    throw new Error("unknown_record_owner_identity");
+  }
+  return Object.freeze({
+    root_id: rootId,
+    workflow_state_map: states,
+    issues,
+    relations,
+    resource_creation_evidence: creationEvidence,
+    issue_history: history,
+    issue_record_observations: recordObservations,
+  });
+}
+
+export function parseTaskSnapshotObservation(value: unknown): TaskSnapshotObservation {
+  const record = asRecord(value);
+  return "failure_kind" in record ? parseInvalidTaskSnapshot(value) : parseTaskSnapshot(value);
 }

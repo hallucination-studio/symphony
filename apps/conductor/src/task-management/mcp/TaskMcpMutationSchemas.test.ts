@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseRootIssueId, parseRuntimeGeneration } from "../../contracts/identity.js";
+import { canonicalTaskRevision } from "../../contracts/task-management.js";
 import {
   TASK_MCP_CAPABILITIES,
   parseTaskMcpCall,
@@ -27,25 +28,36 @@ function envelope(functionName: keyof typeof TASK_MCP_CAPABILITIES) {
   };
 }
 
-const issue = {
+const issueFields = {
   issue_id: "LIN-2",
-  revision: "revision:2",
-  status: "state:todo",
+  provider_created_at: "2026-08-03T00:00:00.000Z",
+  provider_updated_at: "2026-08-03T00:00:00.000Z",
+  creation_actor_id: "actor:1",
+  kind: "work",
+  status_id: "state:todo",
+  status: "Todo",
   title: "Implement mutation contracts",
-  description: null,
-  parent_id: "LIN-1",
-  labels: ["label:work"],
+  description_markdown: null,
+  parent_issue_id: "LIN-1",
+  label_ids: ["label:work"],
   delegate_id: "actor:1",
   priority: 2,
-};
+  archived: false,
+  trashed: false,
+} as const;
+const issue = { ...issueFields, revision: canonicalTaskRevision(issueFields) };
 
 const relation = {
   relation_id: RELATION_UUID,
-  revision: "revision:relation:1",
+  provider_created_at: "2026-08-03T00:00:00.000Z",
+  provider_updated_at: "2026-08-03T00:00:00.000Z",
+  creation_actor_id: "actor:1",
+  creation_evidence_id: "evidence:relation:1",
   type: "blocks",
   source_issue_id: "LIN-2",
   target_issue_id: "LIN-3",
 };
+Object.assign(relation, { revision: canonicalTaskRevision(relation) });
 
 test("all five mutation calls require exact fresh preconditions", () => {
   const cases = [

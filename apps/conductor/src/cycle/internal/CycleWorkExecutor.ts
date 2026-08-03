@@ -8,7 +8,8 @@ import {
   type StageIssueId,
   type TaskStateId,
 } from "../../contracts/identity.js";
-import type { GitSnapshot, TaskIssueSnapshot } from "../../contracts/observation.js";
+import type { GitSnapshot } from "../../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../../contracts/task-management.js";
 import {
   parseWorkRequest,
   parseWorkResult,
@@ -219,12 +220,12 @@ function assertExactStatusReadback(
       || current.description_markdown !== selected.description_markdown
       || current.parent_cycle_id !== selected.parent_cycle_id
       || fresh.issue_id !== parseTaskIssueId(selected.issue_id)
-      || fresh.status !== workflow.stage_states[expectedStatus]
+      || fresh.status_id !== workflow.stage_states[expectedStatus]
       || fresh.title !== selected.title
-      || fresh.description !== selected.description_markdown
-      || fresh.parent_id !== parseTaskIssueId(selected.parent_cycle_id)
-      || fresh.labels.length !== 1
-      || fresh.labels[0] !== workflow.labels.work
+      || fresh.description_markdown !== selected.description_markdown
+      || fresh.parent_issue_id !== parseTaskIssueId(selected.parent_cycle_id)
+      || fresh.label_ids.length !== 1
+      || fresh.label_ids[0] !== workflow.labels.work
       || fresh.delegate_id !== null
       || fresh.priority !== null
     ) throw new Error("work_status_readback_mismatch");

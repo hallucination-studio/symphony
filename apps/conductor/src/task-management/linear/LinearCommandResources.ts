@@ -1,10 +1,10 @@
 import type { TaskIssueId } from "../../contracts/identity.js";
 import {
-  parseTaskIssueSnapshot,
+  parseTaskIssueSnapshotChange,
   parseTaskRelationSnapshot,
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
-} from "../../contracts/observation.js";
+} from "../../contracts/task-management.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString } from "../../contracts/validation.js";
 import { taskStringSetsEqual } from "../../observation/TaskFacts.js";
 import type { UpdateIssueDesired } from "../mcp/TaskMcpSchemas.js";
@@ -45,7 +45,7 @@ export function parseLinearCommandIssue(value: unknown): LinearCommandIssueRecor
     throw new Error("linear_invalid_payload");
   }
   return Object.freeze({
-    snapshot: parseTaskIssueSnapshot({
+    snapshot: parseTaskIssueSnapshotChange({
       issue_id: record.id,
       revision: record.revision,
       status: record.status,
@@ -117,10 +117,10 @@ function priorityMatches(actual: number | null, desired: number | null): boolean
 
 export function linearIssueMatches(issue: TaskIssueSnapshot, desired: UpdateIssueDesired): boolean {
   return (desired.title === undefined || issue.title === desired.title)
-    && (desired.description === undefined || issue.description === desired.description)
-    && (desired.state_id === undefined || issue.status === desired.state_id)
-    && (desired.parent_id === undefined || issue.parent_id === desired.parent_id)
-    && (desired.label_ids === undefined || taskStringSetsEqual(issue.labels, desired.label_ids))
+    && (desired.description === undefined || issue.description_markdown === desired.description)
+    && (desired.state_id === undefined || issue.status_id === desired.state_id)
+    && (desired.parent_id === undefined || issue.parent_issue_id === desired.parent_id)
+    && (desired.label_ids === undefined || taskStringSetsEqual(issue.label_ids, desired.label_ids))
     && (desired.delegate_id === undefined || issue.delegate_id === desired.delegate_id)
     && (desired.priority === undefined || priorityMatches(issue.priority, desired.priority));
 }

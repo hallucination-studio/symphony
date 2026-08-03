@@ -28,7 +28,7 @@ import {
   parseTaskSnapshot,
   type TaskIssueSnapshot,
   type TaskSnapshot,
-} from "../../contracts/observation.js";
+} from "../../contracts/task-management.js";
 import type { RuntimeTarget } from "../../contracts/runtime.js";
 import {
   parseTaskWorkflowIdentities,
@@ -169,7 +169,7 @@ function cycleStatus(
   workflow: TaskWorkflowIdentities,
 ): keyof TaskWorkflowIdentities["cycle_states"] | null {
   for (const [status, identity] of Object.entries(workflow.cycle_states)) {
-    if (issue.status === identity) return status as keyof TaskWorkflowIdentities["cycle_states"];
+    if (issue.status_id === identity) return status as keyof TaskWorkflowIdentities["cycle_states"];
   }
   return null;
 }
@@ -180,7 +180,7 @@ function hasOnlyTaskKind(
   workflow: TaskWorkflowIdentities,
 ): boolean {
   const kinds = Object.entries(workflow.labels)
-    .filter(([, identity]) => issue.labels.includes(identity))
+    .filter(([, identity]) => issue.label_ids.includes(identity))
     .map(([kind]) => kind);
   return kinds.length === 1 && kinds[0] === expected;
 }
@@ -245,9 +245,9 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       }
     }
     const rootTaskId = parseTaskIssueId(this.#target.root_id);
-    const cycles = task.issues.filter((issue) => issue.labels.includes(this.#workflow.labels.cycle));
+    const cycles = task.issues.filter((issue) => issue.label_ids.includes(this.#workflow.labels.cycle));
     for (const cycle of cycles) {
-      if (cycle.parent_id !== rootTaskId || !hasOnlyTaskKind(cycle, "cycle", this.#workflow)) {
+      if (cycle.parent_issue_id !== rootTaskId || !hasOnlyTaskKind(cycle, "cycle", this.#workflow)) {
         return this.#paused("invalid_contract", "cycle_admission_topology_invalid", correlationId);
       }
       if (cycleStatus(cycle, this.#workflow) === null) {
@@ -439,15 +439,15 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     if (
       cycle.issue_id !== parseTaskIssueId(snapshot.cycle_id)
       || cycle.revision !== snapshot.cycle_revision
-      || cycle.description !== snapshot.specification.cycle_description_markdown
-      || cycle.status !== this.#workflow.cycle_states[snapshot.cycle_status]
+      || cycle.description_markdown !== snapshot.specification.cycle_description_markdown
+      || cycle.status_id !== this.#workflow.cycle_states[snapshot.cycle_status]
     ) return false;
     const stages = [
       ...(snapshot.plan_issue === null ? [] : [snapshot.plan_issue]),
       ...snapshot.sealed_work_issues,
       ...(snapshot.verify_issue === null ? [] : [snapshot.verify_issue]),
     ];
-    const taskStages = task.issues.filter(({ parent_id }) => parent_id === cycle.issue_id);
+    const taskStages = task.issues.filter(({ parent_issue_id }) => parent_issue_id === cycle.issue_id);
     if (taskStages.length !== stages.length) return false;
     const stageIds = new Set(stages.map(({ issue_id }) => parseTaskIssueId(issue_id)));
     for (const stage of stages) {
@@ -456,8 +456,8 @@ export class CycleMachineHost implements CycleMachineHostInterface {
         issue === undefined
         || issue.revision !== stage.revision
         || issue.title !== stage.title
-        || issue.description !== stage.description_markdown
-        || issue.status !== this.#workflow.stage_states[stage.status]
+        || issue.description_markdown !== stage.description_markdown
+        || issue.status_id !== this.#workflow.stage_states[stage.status]
         || !hasOnlyTaskKind(issue, stage.kind, this.#workflow)
       ) return false;
     }

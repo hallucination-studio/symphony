@@ -8,15 +8,20 @@ import {
   type TaskIssueId,
   type TaskRevision,
 } from "../../contracts/identity.js";
+import type { TaskChangeOriginEvidence } from "../../contracts/observation.js";
 import {
-  parseTaskIssueSnapshot,
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
   parseTaskRelationSnapshot,
   parseTaskSnapshot,
+  parseTaskWorkflowStateMap,
+  type TaskKind,
   type TaskIssueSnapshot,
-  type TaskChangeOriginEvidence,
   type TaskRelationSnapshot,
   type TaskSnapshot,
-} from "../../contracts/observation.js";
+  type TaskWorkflowStateMap,
+  type TaskWorkflowStatus,
+} from "../../contracts/task-management.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString, parseEnum } from "../../contracts/validation.js";
 import type {
   GetIssueCall,
@@ -118,7 +123,14 @@ export interface RootInventoryItem {
 }
 
 interface LinearIssueRecord {
-  readonly snapshot: TaskIssueSnapshot;
+  readonly issueId: TaskIssueId;
+  readonly statusId: ReturnType<typeof parseTaskStateId>;
+  readonly title: string;
+  readonly descriptionMarkdown: string;
+  readonly parentIssueId: TaskIssueId | null;
+  readonly labelIds: readonly ReturnType<typeof parseTaskLabelId>[];
+  readonly delegateId: string | null;
+  readonly priority: number | null;
   readonly teamId: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -179,17 +191,16 @@ function parseIssue(value: unknown): LinearIssueRecord {
     ]);
     const labels = parseArray(record.labels, (label) => parseBoundedString(label, "invalid_linear_label", 256), 256);
     return Object.freeze({
-      snapshot: parseTaskIssueSnapshot({
-        issue_id: record.id,
-        revision: record.revision,
-        status: record.status,
-        title: record.title,
-        description: record.description,
-        parent_id: record.parent_id,
-        labels,
-        delegate_id: record.delegate_id,
-        priority: parsePriority(record.priority),
-      }),
+      issueId: parseTaskIssueId(record.id),
+      statusId: parseTaskStateId(record.status),
+      title: parseBoundedString(record.title, "invalid_linear_issue_title", 1_024),
+      descriptionMarkdown: parseNullableText(record.description, "invalid_linear_issue_description", 100_000) ?? "# Empty",
+      parentIssueId: record.parent_id === null ? null : parseTaskIssueId(record.parent_id),
+      labelIds: Object.freeze(labels.map(parseTaskLabelId)),
+      delegateId: record.delegate_id === null
+        ? null
+        : parseBoundedString(record.delegate_id, "invalid_linear_delegate_id", 128),
+      priority: parsePriority(record.priority),
       teamId: parseBoundedString(record.team_id, "invalid_linear_team_id", 128),
       createdAt: parseTimestamp(record.created_at),
       updatedAt: parseTimestamp(record.updated_at),
@@ -202,22 +213,27 @@ function parseIssue(value: unknown): LinearIssueRecord {
   });
 }
 
-function parseRelation(value: unknown): TaskRelationSnapshot {
+function parseRelation(value: unknown, serviceActorId: string): TaskRelationSnapshot {
   return providerPayload(() => {
     const record = asRecord(value);
     assertExactKeys(record, [
       "id", "revision", "type", "source_issue_id", "target_issue_id", "created_at", "updated_at", "archived",
     ]);
-    parseTimestamp(record.created_at);
-    parseTimestamp(record.updated_at);
+    const providerCreatedAt = parseTimestamp(record.created_at);
+    const providerUpdatedAt = parseTimestamp(record.updated_at);
     if (typeof record.archived !== "boolean") fail("linear_invalid_payload");
-    return parseTaskRelationSnapshot({
+    if (record.archived) fail("linear_archived_relation");
+    const fields = {
       relation_id: record.id,
-      revision: record.revision,
+      provider_created_at: providerCreatedAt,
+      provider_updated_at: providerUpdatedAt,
+      creation_actor_id: serviceActorId,
+      creation_evidence_id: `linear:relation:${String(record.id)}`,
       type: record.type,
       source_issue_id: record.source_issue_id,
       target_issue_id: record.target_issue_id,
-    });
+    };
+    return parseTaskRelationSnapshot({ ...fields, revision: canonicalTaskRevision(fields) });
   });
 }
 
@@ -359,11 +375,11 @@ function resultEnvelope<C extends QueryCall>(call: C): Omit<C, "input"> {
 function issueKind(
   issue: LinearIssueRecord,
   labelNames: ReadonlyMap<string, string>,
-): "root" | "cycle" | typeof STAGE_KINDS[number] | null {
-  for (const labelId of issue.snapshot.labels) {
+): TaskKind | null {
+  for (const labelId of issue.labelIds) {
     if (!labelNames.has(labelId)) return fail("linear_unknown_label_identity");
   }
-  const kindLabels = issue.snapshot.labels
+  const kindLabels = issue.labelIds
     .map((labelId) => labelNames.get(labelId))
     .filter((name): name is string => name?.startsWith(KIND_PREFIX) === true);
   if (kindLabels.length === 0) return null;
@@ -373,6 +389,37 @@ function issueKind(
     return kind as "root" | "cycle" | typeof STAGE_KINDS[number];
   }
   return fail("linear_invalid_kind");
+}
+
+function normalizedIssue(
+  issue: LinearIssueRecord,
+  stateNames: ReadonlyMap<string, string>,
+  labelNames: ReadonlyMap<string, string>,
+): TaskIssueSnapshot {
+  const status = parseProviderEnum(stateNames.get(issue.statusId), [
+    "Todo", "Draft", "In Progress", "Awaiting Acceptance", "In Review", "Done",
+    "Succeeded", "Rejected", "Failed", "Canceled",
+  ] as const) as TaskWorkflowStatus;
+  const kind = issueKind(issue, labelNames);
+  if (kind === null) return fail("linear_missing_kind");
+  const fields = {
+    issue_id: issue.issueId,
+    provider_created_at: issue.createdAt,
+    provider_updated_at: issue.updatedAt,
+    creation_actor_id: issue.creatorId ?? fail("linear_missing_issue_creator"),
+    kind,
+    status_id: issue.statusId,
+    status,
+    title: issue.title,
+    description_markdown: issue.descriptionMarkdown,
+    parent_issue_id: issue.parentIssueId,
+    label_ids: issue.labelIds,
+    delegate_id: issue.delegateId,
+    priority: issue.priority,
+    archived: issue.archived,
+    trashed: issue.trashed,
+  };
+  return parseTaskIssueSnapshotChange({ ...fields, revision: canonicalTaskRevision(fields) });
 }
 
 function parseProviderEnum<const T extends readonly string[]>(value: unknown, allowed: T): T[number] {
@@ -403,9 +450,9 @@ export class LinearQueries {
     return this.#boundary(async () => {
       const issue = await this.#issue(parseTaskIssueId(issueId));
       this.#assertTeam([issue]);
-      if (issue.snapshot.issue_id !== issueId) fail("linear_issue_identity_mismatch");
+      if (issue.issueId !== issueId) fail("linear_issue_identity_mismatch");
       return Object.freeze({
-        issue_id: issue.snapshot.issue_id,
+        issue_id: issue.issueId,
         provider_created_at: issue.createdAt,
         actor_id: issue.creatorId,
       });
@@ -494,10 +541,11 @@ export class LinearQueries {
         });
       }
       this.#assertTeam([issue]);
-      if (issue.snapshot.issue_id !== call.input.issue_id) fail("linear_issue_identity_mismatch");
+      if (issue.issueId !== call.input.issue_id) fail("linear_issue_identity_mismatch");
+      const snapshot = normalizedIssue(issue, await this.#stateNames(), await this.#labelNames());
       return Object.freeze({
         ...resultEnvelope(call),
-        output: Object.freeze({ issue: issue.snapshot }),
+        output: Object.freeze({ issue: snapshot }),
       });
     });
   }
@@ -510,8 +558,10 @@ export class LinearQueries {
         call.input.page_size,
       );
       const teamIssues = page.nodes.filter(({ teamId }) => teamId === this.#teamId);
+      const stateNames = await this.#stateNames();
+      const labelNames = await this.#labelNames();
       return Object.freeze({ ...resultEnvelope(call), output: Object.freeze({
-        issues: Object.freeze(teamIssues.map(({ snapshot }) => snapshot)),
+        issues: Object.freeze(teamIssues.map((issue) => normalizedIssue(issue, stateNames, labelNames))),
         next_cursor: page.nextCursor,
       }) });
     });
@@ -526,10 +576,12 @@ export class LinearQueries {
       );
       this.#assertTeam(page.nodes);
       for (const child of page.nodes) {
-        if (child.snapshot.parent_id !== call.input.parent_issue_id) fail("linear_child_parent_mismatch");
+        if (child.parentIssueId !== call.input.parent_issue_id) fail("linear_child_parent_mismatch");
       }
+      const stateNames = await this.#stateNames();
+      const labelNames = await this.#labelNames();
       return Object.freeze({ ...resultEnvelope(call), output: Object.freeze({
-        issues: Object.freeze(page.nodes.map(({ snapshot }) => snapshot)),
+        issues: Object.freeze(page.nodes.map((issue) => normalizedIssue(issue, stateNames, labelNames))),
         next_cursor: page.nextCursor,
       }) });
     });
@@ -539,7 +591,7 @@ export class LinearQueries {
     return this.#boundary(async () => {
       const page = parsePage(
         await this.client.listRelations(call.input.issue_id, call.input.cursor, call.input.page_size),
-        parseRelation,
+        (entry) => parseRelation(entry, this.#serviceActorId),
         call.input.page_size,
       );
       for (const relation of page.nodes) {
@@ -608,12 +660,13 @@ export class LinearQueries {
       const roots: RootInventoryItem[] = [];
       for (const issue of teamIssues) {
         if (issueKind(issue, labelNames) !== "root") continue;
-        if (issue.snapshot.parent_id !== null) fail("linear_root_has_parent");
+        if (issue.parentIssueId !== null) fail("linear_root_has_parent");
+        const snapshot = normalizedIssue(issue, stateNames, labelNames);
         roots.push(Object.freeze({
-          root_id: parseRootIssueId(issue.snapshot.issue_id),
-          revision: issue.snapshot.revision,
-          status: parseProviderEnum(stateNames.get(issue.snapshot.status), ROOT_STATUSES),
-          priority: issue.snapshot.priority ?? 0,
+          root_id: parseRootIssueId(snapshot.issue_id),
+          revision: snapshot.revision,
+          status: parseProviderEnum(stateNames.get(snapshot.status_id), ROOT_STATUSES),
+          priority: snapshot.priority ?? 0,
           created_at: issue.createdAt,
         }));
       }
@@ -631,28 +684,28 @@ export class LinearQueries {
       const stateNames = await this.#stateNames();
       const root = await this.#issue(parseTaskIssueId(parsedRootId));
       this.#assertTeam([root]);
-      if (root.snapshot.issue_id !== parseTaskIssueId(parsedRootId)) fail("linear_root_identity_mismatch");
-      if (root.snapshot.parent_id !== null) fail("linear_root_has_parent");
+      if (root.issueId !== parseTaskIssueId(parsedRootId)) fail("linear_root_identity_mismatch");
+      if (root.parentIssueId !== null) fail("linear_root_has_parent");
       if (issueKind(root, labelNames) !== "root") fail("linear_root_kind_mismatch");
-      parseProviderEnum(stateNames.get(root.snapshot.status), ROOT_STATUSES);
+      parseProviderEnum(stateNames.get(root.statusId), ROOT_STATUSES);
 
-      const cycles = await this.#children(root.snapshot.issue_id);
+      const cycles = await this.#children(root.issueId);
       this.#assertUniqueIssues(cycles);
       const issues = [root];
       for (const cycle of cycles) {
-        if (cycle.snapshot.parent_id !== root.snapshot.issue_id) fail("linear_cycle_parent_mismatch");
+        if (cycle.parentIssueId !== root.issueId) fail("linear_cycle_parent_mismatch");
         if (issueKind(cycle, labelNames) !== "cycle") fail("linear_cycle_kind_mismatch");
-        parseProviderEnum(stateNames.get(cycle.snapshot.status), CYCLE_STATUSES);
-        const stages = await this.#children(cycle.snapshot.issue_id);
+        parseProviderEnum(stateNames.get(cycle.statusId), CYCLE_STATUSES);
+        const stages = await this.#children(cycle.issueId);
         this.#assertUniqueIssues(stages);
         for (const stage of stages) {
-          if (stage.snapshot.parent_id !== cycle.snapshot.issue_id) fail("linear_stage_parent_mismatch");
+          if (stage.parentIssueId !== cycle.issueId) fail("linear_stage_parent_mismatch");
           if (stage.creatorId !== this.#serviceActorId) fail("linear_stage_creator_mismatch");
           if (!STAGE_KINDS.includes(issueKind(stage, labelNames) as typeof STAGE_KINDS[number])) {
             fail("linear_stage_kind_mismatch");
           }
-          parseProviderEnum(stateNames.get(stage.snapshot.status), STAGE_STATUSES);
-          if ((await this.#children(stage.snapshot.issue_id)).length !== 0) fail("linear_stage_has_children");
+          parseProviderEnum(stateNames.get(stage.statusId), STAGE_STATUSES);
+          if ((await this.#children(stage.issueId)).length !== 0) fail("linear_stage_has_children");
         }
         issues.push(cycle, ...stages);
       }
@@ -660,7 +713,7 @@ export class LinearQueries {
 
       const relations = new Map<string, TaskRelationSnapshot>();
       for (const issue of issues) {
-        for (const relation of await this.#relations(issue.snapshot.issue_id)) {
+        for (const relation of await this.#relations(issue.issueId)) {
           const current = relations.get(relation.relation_id);
           if (current && (
             current.revision !== relation.revision
@@ -671,7 +724,7 @@ export class LinearQueries {
           relations.set(relation.relation_id, relation);
         }
       }
-      const issueIds = new Set(issues.map(({ snapshot }) => snapshot.issue_id));
+      const issueIds = new Set(issues.map(({ issueId }) => issueId));
       for (const relation of relations.values()) {
         if (!issueIds.has(relation.source_issue_id) || !issueIds.has(relation.target_issue_id)) {
           fail("linear_external_relation");
@@ -679,8 +732,13 @@ export class LinearQueries {
       }
       return parseTaskSnapshot({
         root_id: parsedRootId,
-        issues: issues.map(({ snapshot }) => snapshot).sort((left, right) => left.issue_id.localeCompare(right.issue_id)),
+        workflow_state_map: await this.#workflowStateMap(),
+        issues: issues.map((issue) => normalizedIssue(issue, stateNames, labelNames))
+          .sort((left, right) => left.issue_id.localeCompare(right.issue_id)),
         relations: [...relations.values()].sort((left, right) => left.relation_id.localeCompare(right.relation_id)),
+        resource_creation_evidence: [],
+        issue_history: [],
+        issue_record_observations: [],
       });
     });
   }
@@ -699,7 +757,10 @@ export class LinearQueries {
   }
 
   #relations(issueId: TaskIssueId): Promise<readonly TaskRelationSnapshot[]> {
-    return this.#all((cursor) => this.client.listRelations(issueId, cursor, INTERNAL_PAGE_SIZE), parseRelation);
+    return this.#all(
+      (cursor) => this.client.listRelations(issueId, cursor, INTERNAL_PAGE_SIZE),
+      (entry) => parseRelation(entry, this.#serviceActorId),
+    );
   }
 
   async #stateNames(): Promise<ReadonlyMap<string, string>> {
@@ -714,6 +775,36 @@ export class LinearQueries {
       names.set(state.state_id, state.name);
     }
     return names;
+  }
+
+  async #workflowStateMap(): Promise<TaskWorkflowStateMap> {
+    const states = await this.#all(
+      (cursor) => this.client.listStates(this.#teamId, cursor, INTERNAL_PAGE_SIZE),
+      parseState,
+    );
+    const byName = new Map<string, StateRecord>();
+    for (const state of states) {
+      if (state.team_id !== this.#teamId) fail("linear_team_mismatch");
+      if (state.archived) continue;
+      if (byName.has(state.name)) fail("linear_duplicate_state_name");
+      byName.set(state.name, state);
+    }
+    const stateId = (name: TaskWorkflowStatus) => byName.get(name)?.state_id
+      ?? fail("linear_missing_workflow_state");
+    const fields = {
+      team_id: this.#teamId,
+      todo_state_id: stateId("Todo"),
+      draft_state_id: stateId("Draft"),
+      in_progress_state_id: stateId("In Progress"),
+      awaiting_acceptance_state_id: stateId("Awaiting Acceptance"),
+      in_review_state_id: stateId("In Review"),
+      done_state_id: stateId("Done"),
+      succeeded_state_id: stateId("Succeeded"),
+      rejected_state_id: stateId("Rejected"),
+      failed_state_id: stateId("Failed"),
+      canceled_state_id: stateId("Canceled"),
+    };
+    return parseTaskWorkflowStateMap({ ...fields, revision: canonicalTaskRevision(fields) });
   }
 
   async #labelNames(): Promise<ReadonlyMap<string, string>> {
@@ -751,7 +842,7 @@ export class LinearQueries {
   }
 
   #assertUniqueIssues(issues: readonly LinearIssueRecord[]): void {
-    if (new Set(issues.map(({ snapshot }) => snapshot.issue_id)).size !== issues.length) {
+    if (new Set(issues.map(({ issueId }) => issueId)).size !== issues.length) {
       fail("linear_duplicate_issue_identity");
     }
   }

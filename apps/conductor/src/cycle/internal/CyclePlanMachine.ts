@@ -11,7 +11,7 @@ import {
   type TaskIssueId,
   type TaskStateId,
 } from "../../contracts/identity.js";
-import type { TaskIssueSnapshot } from "../../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../../contracts/task-management.js";
 import type { GitWorkspaceInterface } from "../../git/api/GitWorkspaceInterface.js";
 import { parseMarkdownText } from "../../contracts/validation.js";
 import {
@@ -556,7 +556,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
       )).output);
       this.#assertActive(epoch);
       const createdPlanDescription = parseMarkdownText(
-        createdPlan.description,
+        createdPlan.description_markdown,
         "created_plan_description_missing",
       );
       const createdPlanId = parseStageIssueId(createdPlan.issue_id);

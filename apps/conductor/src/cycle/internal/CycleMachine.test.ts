@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -17,7 +18,11 @@ import {
   type CycleAdvanceRequest,
   type CycleAdvanceResult,
 } from "../../contracts/cycle.js";
-import { parseTaskSnapshot } from "../../contracts/observation.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  parseTaskSnapshot,
+} from "../../contracts/task-management.js";
 import { parseTaskWorkflowIdentities } from "../../task-management/api/TaskManageCapability.js";
 import type { CycleMachineInterface } from "../api/CycleMachineInterface.js";
 import { CycleMachineHost } from "./CycleMachine.js";
@@ -149,6 +154,16 @@ const planGraph = parseSealedExecutionGraph({
 }, cycleId);
 const workIssueId = parseStageIssueId("WORK-HOST");
 const verifyIssueId = parseStageIssueId("VERIFY-HOST");
+const completeRelationFields = {
+  relation_id: "REL-HOST",
+  provider_created_at: "2026-08-01T00:00:00.000Z",
+  provider_updated_at: "2026-08-01T00:00:00.000Z",
+  creation_actor_id: "actor:agent",
+  creation_evidence_id: "evidence:REL-HOST",
+  type: "blocks",
+  source_issue_id: workIssueId,
+  target_issue_id: verifyIssueId,
+} as const;
 const completeGraph = parseSealedExecutionGraph({
   plan_issue: sealedPlan,
   work_issues: [{
@@ -169,7 +184,7 @@ const completeGraph = parseSealedExecutionGraph({
   },
   relations: [{
     relation_id: "REL-HOST",
-    revision: "revision:relation:sealed",
+    revision: canonicalTaskRevision(completeRelationFields),
     prerequisite_issue_id: workIssueId,
     dependent_issue_id: verifyIssueId,
   }],
@@ -193,56 +208,89 @@ const workflow = parseTaskWorkflowIdentities({
   },
   stage_states: {
     todo: "state:stage:todo",
-    in_progress: "state:stage:in-progress",
+    in_progress: "state:cycle:in-progress",
     done: "state:stage:done",
-    failed: "state:stage:failed",
-    canceled: "state:stage:canceled",
+    failed: "state:cycle:failed",
+    canceled: "state:cycle:canceled",
   },
 });
 
+const issueTimestamp = (token: string) => new Date(
+  Date.parse("2026-08-01T00:00:00.000Z")
+    + Number.parseInt(createHash("sha256").update(token).digest("hex").slice(0, 8), 16),
+).toISOString();
+
+function taskIssue(fields: Record<string, unknown>, token: string) {
+  const canonicalFields = { ...fields, provider_updated_at: issueTimestamp(token) };
+  return parseTaskIssueSnapshotChange({ ...canonicalFields, revision: canonicalTaskRevision(canonicalFields) });
+}
+
+function stageRevision(
+  stage: { readonly issue_id: string; readonly kind: "plan" | "work" | "verify"; readonly title: string; readonly description_markdown: string },
+  status: "todo" | "in_progress" | "done" | "failed" | "canceled",
+  token: string,
+) {
+  return taskIssue({
+    issue_id: stage.issue_id, provider_created_at: "2026-08-01T00:00:00.000Z",
+    creation_actor_id: "actor:agent", kind: stage.kind, status_id: workflow.stage_states[status],
+    status: status === "todo" ? "Todo" : status === "in_progress" ? "In Progress"
+      : status === "done" ? "Done" : status === "failed" ? "Failed" : "Canceled",
+    title: stage.title, description_markdown: stage.description_markdown, parent_issue_id: cycleId,
+    label_ids: [workflow.labels[stage.kind]], delegate_id: null, priority: null, archived: false, trashed: false,
+  }, token).revision;
+}
+
+const semanticCycleStatus = (status: keyof typeof workflow.cycle_states) => ({
+  draft: "Draft",
+  in_progress: "In Progress",
+  awaiting_acceptance: "Awaiting Acceptance",
+  succeeded: "Succeeded",
+  rejected: "Rejected",
+  failed: "Failed",
+  canceled: "Canceled",
+} as const)[status];
+
 function taskSnapshot(
   status: keyof typeof workflow.cycle_states,
-  revision = "revision:cycle:current",
+  revisionToken = "revision:cycle:current",
   includeSecondDraft = false,
 ) {
+  const createdAt = "2026-08-01T00:00:00.000Z";
+  const root = taskIssue({
+    issue_id: rootId, provider_created_at: createdAt, creation_actor_id: "actor:agent", kind: "root",
+    status_id: workflow.cycle_states.in_progress, status: "In Progress", title: "Root host",
+    description_markdown: rootDescription, parent_issue_id: null, label_ids: [workflow.labels.root],
+    delegate_id: "actor:agent", priority: 1, archived: false, trashed: false,
+  }, "root:current");
+  const cycle = taskIssue({
+    issue_id: cycleId, provider_created_at: createdAt, creation_actor_id: "actor:agent", kind: "cycle",
+    status_id: workflow.cycle_states[status], status: semanticCycleStatus(status), title: "Cycle host",
+    description_markdown: cycleDescription, parent_issue_id: rootId, label_ids: [workflow.labels.cycle],
+    delegate_id: null, priority: 1, archived: false, trashed: false,
+  }, revisionToken);
+  const stateFields = {
+    team_id: "team:cycle-host", todo_state_id: workflow.stage_states.todo,
+    draft_state_id: workflow.cycle_states.draft, in_progress_state_id: workflow.cycle_states.in_progress,
+    awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+    in_review_state_id: "state:in-review", done_state_id: workflow.stage_states.done,
+    succeeded_state_id: workflow.cycle_states.succeeded, rejected_state_id: workflow.cycle_states.rejected,
+    failed_state_id: workflow.cycle_states.failed, canceled_state_id: workflow.cycle_states.canceled,
+  } as const;
   return parseTaskSnapshot({
     root_id: rootId,
+    workflow_state_map: { ...stateFields, revision: canonicalTaskRevision(stateFields) },
     issues: [
-      {
-        issue_id: rootId,
-        revision: "revision:root:current",
-        status: "state:root:in-progress",
-        title: "Root host",
-        description: rootDescription,
-        parent_id: null,
-        labels: [workflow.labels.root],
-        delegate_id: "actor:agent",
-        priority: 1,
-      },
-      {
-        issue_id: cycleId,
-        revision,
-        status: workflow.cycle_states[status],
-        title: "Cycle host",
-        description: cycleDescription,
-        parent_id: rootId,
-        labels: [workflow.labels.cycle],
-        delegate_id: null,
-        priority: 1,
-      },
-      ...(includeSecondDraft ? [{
-        issue_id: "CYCLE-OTHER",
-        revision: "revision:cycle:other",
-        status: workflow.cycle_states.draft,
-        title: "Other Cycle",
-        description: cycleDescription,
-        parent_id: rootId,
-        labels: [workflow.labels.cycle],
-        delegate_id: null,
-        priority: 1,
-      }] : []),
+      root,
+      cycle,
+      ...(includeSecondDraft ? [taskIssue({
+        issue_id: "CYCLE-OTHER", provider_created_at: createdAt, creation_actor_id: "actor:agent", kind: "cycle",
+        status_id: workflow.cycle_states.draft, status: "Draft", title: "Other Cycle",
+        description_markdown: cycleDescription, parent_issue_id: rootId, label_ids: [workflow.labels.cycle],
+        delegate_id: null, priority: 1, archived: false, trashed: false,
+      }, "cycle:other")] : []),
     ],
     relations: [],
+    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
   });
 }
 
@@ -252,13 +300,15 @@ function snapshot(
   cycleSpecification = specification,
 ): CycleAdvanceRequest {
   const correlation = parseCorrelationId(correlationId);
+  const observedCycleRevision = taskSnapshot("in_progress", cycleRevision).issues
+    .find(({ issue_id }) => String(issue_id) === String(cycleId))!.revision;
   return parseCycleExecutionSnapshot({
     schema_version: 1,
     root_id: rootId,
     cycle_id: cycleId,
     runtime_generation: generation,
     correlation_id: correlation,
-    cycle_revision: cycleRevision,
+    cycle_revision: observedCycleRevision,
     cycle_status: "in_progress",
     specification: cycleSpecification,
     plan_issue: null,
@@ -279,7 +329,7 @@ function snapshot(
     cycle_id: cycleId,
     runtime_generation: generation,
     correlation_id: correlation,
-    cycle_revision: parseTaskRevision(cycleRevision),
+    cycle_revision: observedCycleRevision,
     specification: cycleSpecification,
     sealed_graph: emptyGraph,
   });
@@ -299,7 +349,7 @@ function snapshotWithPlan(correlationId: string): CycleAdvanceRequest {
     specification: base.specification,
     plan_issue: {
       issue_id: sealedPlan.issue_id,
-      revision: "revision:plan:current",
+      revision: stageRevision(sealedPlan, "todo", "plan:current"),
       kind: sealedPlan.kind,
       title: sealedPlan.title,
       description_markdown: sealedPlan.description_markdown,
@@ -315,7 +365,7 @@ function snapshotWithPlan(correlationId: string): CycleAdvanceRequest {
     cycle_id: cycleId,
     runtime_generation: generation,
     correlation_id: correlation,
-    cycle_revision: parseTaskRevision("revision:cycle:current"),
+    cycle_revision: base.cycle_revision,
     specification,
     sealed_graph: planGraph,
   });
@@ -323,18 +373,20 @@ function snapshotWithPlan(correlationId: string): CycleAdvanceRequest {
 
 function awaitingAcceptanceSnapshot(correlationId: string): CycleAdvanceRequest {
   const base = snapshot(correlationId);
+  const awaitingCycleRevision = taskSnapshot("awaiting_acceptance").issues
+    .find(({ issue_id }) => String(issue_id) === String(cycleId))!.revision;
   return parseCycleExecutionSnapshot({
     schema_version: base.schema_version,
     root_id: base.root_id,
     cycle_id: base.cycle_id,
     runtime_generation: base.runtime_generation,
     correlation_id: base.correlation_id,
-    cycle_revision: base.cycle_revision,
+    cycle_revision: awaitingCycleRevision,
     cycle_status: "awaiting_acceptance",
     specification: base.specification,
     plan_issue: {
       issue_id: sealedPlan.issue_id,
-      revision: "revision:plan:done",
+      revision: stageRevision(sealedPlan, "done", "revision:plan:done"),
       kind: sealedPlan.kind,
       title: sealedPlan.title,
       description_markdown: sealedPlan.description_markdown,
@@ -343,7 +395,7 @@ function awaitingAcceptanceSnapshot(correlationId: string): CycleAdvanceRequest 
     },
     sealed_work_issues: [{
       issue_id: completeGraph.work_issues[0]!.issue_id,
-      revision: "revision:work:done",
+      revision: stageRevision(completeGraph.work_issues[0]!, "done", "revision:work:done"),
       kind: completeGraph.work_issues[0]!.kind,
       title: completeGraph.work_issues[0]!.title,
       description_markdown: completeGraph.work_issues[0]!.description_markdown,
@@ -352,7 +404,7 @@ function awaitingAcceptanceSnapshot(correlationId: string): CycleAdvanceRequest 
     }],
     verify_issue: {
       issue_id: completeGraph.verify_issue!.issue_id,
-      revision: "revision:verify:done",
+      revision: stageRevision(completeGraph.verify_issue!, "done", "revision:verify:done"),
       kind: completeGraph.verify_issue!.kind,
       title: completeGraph.verify_issue!.title,
       description_markdown: completeGraph.verify_issue!.description_markdown,
@@ -366,7 +418,7 @@ function awaitingAcceptanceSnapshot(correlationId: string): CycleAdvanceRequest 
     cycle_id: cycleId,
     runtime_generation: generation,
     correlation_id: parseCorrelationId(correlationId),
-    cycle_revision: base.cycle_revision,
+    cycle_revision: awaitingCycleRevision,
     specification,
     sealed_graph: completeGraph,
   });
@@ -381,25 +433,37 @@ function awaitingAcceptanceTaskSnapshot() {
       ...base.issues,
       ...[execution.plan_issue, ...execution.sealed_work_issues, execution.verify_issue]
         .filter((stage) => stage !== null)
-        .map((stage) => ({
+        .map((stage) => taskIssue({
           issue_id: stage!.issue_id,
-          revision: stage!.revision,
-          status: workflow.stage_states[stage!.status],
+          provider_created_at: "2026-08-01T00:00:00.000Z",
+          creation_actor_id: "actor:agent",
+          kind: stage!.kind,
+          status_id: workflow.stage_states[stage!.status],
+          status: stage!.status === "todo" ? "Todo" : stage!.status === "in_progress" ? "In Progress"
+            : stage!.status === "done" ? "Done" : stage!.status === "failed" ? "Failed" : "Canceled",
           title: stage!.title,
-          description: stage!.description_markdown,
-          parent_id: cycleId,
-          labels: [workflow.labels[stage!.kind]],
+          description_markdown: stage!.description_markdown,
+          parent_issue_id: cycleId,
+          label_ids: [workflow.labels[stage!.kind]],
           delegate_id: null,
           priority: null,
-        })),
+          archived: false,
+          trashed: false,
+        }, `revision:${stage!.kind}:${stage!.status}`)),
     ],
-    relations: execution.sealed_relations.map((relation) => ({
-      relation_id: relation.relation_id,
-      revision: relation.revision,
-      type: "blocks",
-      source_issue_id: relation.prerequisite_issue_id,
-      target_issue_id: relation.dependent_issue_id,
-    })),
+    relations: execution.sealed_relations.map((relation) => {
+      const fields = {
+        relation_id: relation.relation_id,
+        provider_created_at: "2026-08-01T00:00:00.000Z",
+        provider_updated_at: "2026-08-01T00:00:00.000Z",
+        creation_actor_id: "actor:agent",
+        creation_evidence_id: `evidence:${relation.relation_id}`,
+        type: "blocks",
+        source_issue_id: relation.prerequisite_issue_id,
+        target_issue_id: relation.dependent_issue_id,
+      };
+      return { ...fields, revision: canonicalTaskRevision(fields) };
+    }),
   });
 }
 
@@ -531,7 +595,10 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
   assert.equal(continuation.kind, "cycle_action");
   if (continuation.kind !== "cycle_action") return;
   assert.equal(continuation.request.correlation_id, "corr:continuation");
-  assert.equal(continuation.request.cycle_revision, "revision:cycle:next");
+  assert.equal(
+    continuation.request.cycle_revision,
+    snapshot("corr:continuation", "revision:cycle:next").cycle_revision,
+  );
   assert.equal((await host.run(continuation)).outcome, "no_action");
   assert.deepEqual(reads, ["corr:first", "corr:continuation"]);
 
@@ -611,17 +678,13 @@ test("Cycle host rejects a fresh Stage whose configured kind label does not matc
   const base = taskSnapshot("in_progress");
   const taskWithWrongStageKind = parseTaskSnapshot({
     ...base,
-    issues: [...base.issues, {
-      issue_id: planIssueId,
-      revision: "revision:plan:current",
-      status: workflow.stage_states.todo,
-      title: sealedPlan.title,
-      description: sealedPlan.description_markdown,
-      parent_id: cycleId,
-      labels: [workflow.labels.work],
-      delegate_id: null,
-      priority: 1,
-    }],
+    issues: [...base.issues, taskIssue({
+      issue_id: planIssueId, provider_created_at: "2026-08-01T00:00:00.000Z",
+      creation_actor_id: "actor:agent", kind: "work", status_id: workflow.stage_states.todo,
+      status: "Todo", title: sealedPlan.title, description_markdown: sealedPlan.description_markdown,
+      parent_issue_id: cycleId, label_ids: [workflow.labels.work], delegate_id: null,
+      priority: 1, archived: false, trashed: false,
+    }, "plan:current")],
   });
   const host = new CycleMachineHost({
     target: { root_id: rootId, runtime_generation: generation },

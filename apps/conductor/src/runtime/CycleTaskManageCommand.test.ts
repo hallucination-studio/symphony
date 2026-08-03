@@ -20,7 +20,8 @@ import {
   type CycleExecutionSnapshot,
   type CycleExecutionTarget,
 } from "../contracts/cycle.js";
-import type { TaskIssueSnapshot } from "../contracts/observation.js";
+import type { TaskIssueSnapshot } from "../contracts/task-management.js";
+import { parseMarkdownText } from "../contracts/validation.js";
 import { parseTaskMcpResult, TASK_MCP_CAPABILITIES, type CreateIssueCall, type CreateIssueCommentCall, type CreateRelationCall, type DeleteRelationCall, type GetIssueCall, type ListIssuesCall, type ListRelationsCall, type UpdateIssueCall } from "../task-management/mcp/TaskMcpSchemas.js";
 import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
@@ -65,6 +66,30 @@ const workflow = parseTaskWorkflowIdentities({
     canceled: "state:stage-canceled",
   },
 });
+
+function materializationIssue(fields: {
+  readonly issue_id: TaskIssueSnapshot["issue_id"];
+  readonly revision: TaskIssueSnapshot["revision"];
+  readonly status_id: TaskIssueSnapshot["status_id"];
+  readonly kind: "work" | "verify";
+  readonly title: string;
+  readonly description_markdown: string;
+  readonly label_ids: TaskIssueSnapshot["label_ids"];
+}): TaskIssueSnapshot {
+  return Object.freeze({
+    ...fields,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    status: "Todo",
+    description_markdown: parseMarkdownText(fields.description_markdown),
+    parent_issue_id: parseTaskIssueId(cycleId),
+    delegate_id: null,
+    priority: null,
+    archived: false,
+    trashed: false,
+  });
+}
 
 const rootDescription = [
   "# Root",
@@ -938,27 +963,23 @@ test("Cycle machine can materialize one exact relation between freshly read-back
     plan_issue: graphSource.plan_issue, work_issues: [], verify_issue: null, relations: [],
   }, cycleId);
   const planOnlySnapshot = snapshotWithGraph(planOnlyGraph);
-  const materializationIssues = [{
+  const materializationIssues = [materializationIssue({
     issue_id: parseTaskIssueId("WORK-NEW"),
     revision: parseTaskRevision("revision:work:new"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
+    kind: "work",
     title: "Materialized work",
-    description: "## Work\n\nPerform the approved work.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: [workflow.labels.work],
-    delegate_id: null,
-    priority: null,
-  }, {
+    description_markdown: "## Work\n\nPerform the approved work.",
+    label_ids: [workflow.labels.work],
+  }), materializationIssue({
     issue_id: parseTaskIssueId("VERIFY-NEW"),
     revision: parseTaskRevision("revision:verify:new"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
+    kind: "verify",
     title: "Materialized verify",
-    description: "## Verify\n\nVerify the approved work.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: [workflow.labels.verify],
-    delegate_id: null,
-    priority: null,
-  }];
+    description_markdown: "## Verify\n\nVerify the approved work.",
+    label_ids: [workflow.labels.verify],
+  })];
   const call = createMaterializedRelation();
   const relationRead: ListRelationsCall = {
     ...envelope("list_relations"),

@@ -4,8 +4,8 @@ import { parseObservationDigest, type ObservationDigest } from "../contracts/ide
 import type {
   ConcreteGitChange,
   GitSnapshot,
-  TaskSnapshot,
 } from "../contracts/observation.js";
+import type { TaskSnapshot } from "../contracts/task-management.js";
 import { canonicalTaskSnapshot } from "./TaskFacts.js";
 
 function canonicalGitSnapshot(snapshot: GitSnapshot) {

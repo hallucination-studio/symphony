@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseRootIssueId, parseTaskIssueId, type RootIssueId } from "../../contracts/identity.js";
-import { parseTaskSnapshot, type TaskChangeOriginEvidence, type TaskSnapshot } from "../../contracts/observation.js";
+import type { TaskChangeOriginEvidence } from "../../contracts/observation.js";
+import { canonicalTaskRevision, parseTaskSnapshot, type TaskIssueSnapshot, type TaskSnapshot } from "../../contracts/task-management.js";
 import { LinearObserver, type TaskObservationLog } from "./LinearObserver.js";
 import type { RootInventoryItem } from "./LinearQueries.js";
 
@@ -26,53 +27,77 @@ function snapshot(rootId: string, options: {
   const childId = `${rootId}:cycle`;
   const verifyId = `${rootId}:verify`;
   const delegateId = options.delegateId === undefined ? "actor:1" : options.delegateId;
+  const states = {
+    team_id: "team:observer", revision: `symphony:v1:${"0".repeat(64)}`,
+    todo_state_id: "state:todo", draft_state_id: "state:draft",
+    in_progress_state_id: "state:in-progress", awaiting_acceptance_state_id: "state:awaiting-acceptance",
+    in_review_state_id: "state:in-review", done_state_id: "state:done",
+    succeeded_state_id: "state:succeeded", rejected_state_id: "state:rejected",
+    failed_state_id: "state:failed", canceled_state_id: "state:canceled",
+  } as const;
+  const canonicalIssue = (input: {
+    readonly issue_id: string; readonly kind: TaskIssueSnapshot["kind"];
+    readonly status: TaskIssueSnapshot["status"]; readonly status_id: string;
+    readonly title: string; readonly parent_issue_id: string | null;
+    readonly label_ids: readonly string[]; readonly delegate_id: string | null; readonly priority: number;
+  }) => {
+    const fields = {
+      ...input, label_ids: [...input.label_ids].sort(), description_markdown: `# ${input.title}`,
+      provider_created_at: "2026-08-03T00:00:00.000Z",
+      provider_updated_at: "2026-08-03T00:00:00.000Z",
+      creation_actor_id: "actor:1", archived: false, trashed: false,
+    };
+    return { ...fields, revision: canonicalTaskRevision(fields) };
+  };
+  const childStatus = (options.childStatus ?? "Todo") as TaskIssueSnapshot["status"];
+  const childStateId = childStatus === "Done" ? states.done_state_id : states.todo_state_id;
   const issues = [
-    {
+    canonicalIssue({
       issue_id: rootId,
-      revision: `revision:${rootId}:${delegateId ?? "none"}`,
-      status: "state:in-progress",
+      kind: "root", status: "In Progress", status_id: states.in_progress_state_id,
       title: `Root ${rootId}`,
-      description: null,
-      parent_id: null,
-      labels: options.reordered ? ["label:queued", "label:root"] : ["label:root", "label:queued"],
+      parent_issue_id: null,
+      label_ids: options.reordered ? ["label:queued", "label:root"] : ["label:root", "label:queued"],
       delegate_id: delegateId,
       priority: 1,
-    },
-    {
+    }),
+    canonicalIssue({
       issue_id: childId,
-      revision: `revision:${childId}:${options.childStatus ?? "Todo"}`,
-      status: options.childStatus ?? "Todo",
+      kind: "cycle", status: childStatus, status_id: childStateId,
       title: `Cycle ${rootId}`,
-      description: null,
-      parent_id: rootId,
-      labels: ["label:cycle"],
+      parent_issue_id: rootId,
+      label_ids: ["label:cycle"],
       delegate_id: "actor:1",
       priority: 2,
-    },
-    ...(options.includeVerify ? [{
+    }),
+    ...(options.includeVerify ? [canonicalIssue({
       issue_id: verifyId,
-      revision: `revision:${verifyId}`,
-      status: "Todo",
+      kind: "verify", status: "Todo", status_id: states.todo_state_id,
       title: `Verify ${rootId}`,
-      description: null,
-      parent_id: childId,
-      labels: ["label:verify"],
+      parent_issue_id: childId,
+      label_ids: ["label:verify"],
       delegate_id: delegateId,
       priority: 2,
-    }] : []),
+    })] : []),
   ];
   const relationId = options.relationId ?? "relation:old";
-  const relations = [{
+  const relationFields = {
     relation_id: relationId,
-    revision: `revision:${relationId}`,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:1",
+    creation_evidence_id: `evidence:${relationId}`,
     type: "blocks",
     source_issue_id: childId,
     target_issue_id: options.includeVerify ? verifyId : rootId,
-  }];
+  };
+  const relations = [{ ...relationFields, revision: canonicalTaskRevision(relationFields) }];
   return parseTaskSnapshot({
     root_id: rootId,
+    workflow_state_map: states,
     issues: options.reordered ? [...issues].reverse() : issues,
     relations: options.reordered ? [...relations].reverse() : relations,
+    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
   });
 }
 

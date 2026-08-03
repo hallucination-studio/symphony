@@ -10,9 +10,8 @@ import {
 import {
   parseGitSnapshot,
   parseTaskObservationEvent,
-  parseTaskSnapshot,
-  type TaskSnapshot,
 } from "../contracts/observation.js";
+import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import type { RootTurnOutcome } from "../contracts/runtime.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";

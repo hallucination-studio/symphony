@@ -33,11 +33,9 @@ import {
 import type { LinearIssueRecordComment } from "../task-management/linear/LinearQueries.js";
 import { reduceCycleTransition } from "../cycle/internal/CycleTransition.js";
 import {
-  parseTaskSnapshot,
   type ConcreteTaskChange,
-  type TaskIssueSnapshot,
-  type TaskSnapshot,
 } from "../contracts/observation.js";
+import { parseTaskSnapshot, type TaskIssueSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import { taskSnapshotDigest, taskStringSetsEqual } from "../observation/TaskFacts.js";
 import type {
   TaskManageBoundaryExecution,
@@ -244,9 +242,9 @@ function assertRootedSnapshot(snapshot: TaskSnapshot): void {
     const visited = new Set<TaskIssueId>();
     let current = issue;
     while (current.issue_id !== rootIssueId) {
-      if (visited.has(current.issue_id) || current.parent_id === null) invalidBoundary();
+      if (visited.has(current.issue_id) || current.parent_issue_id === null) invalidBoundary();
       visited.add(current.issue_id);
-      const parent = issues.get(current.parent_id);
+      const parent = issues.get(current.parent_issue_id);
       if (parent === undefined) invalidBoundary();
       current = parent;
     }
@@ -255,7 +253,7 @@ function assertRootedSnapshot(snapshot: TaskSnapshot): void {
 
 function issueKind(issue: TaskIssueSnapshot, workflow: TaskWorkflowIdentities): RootTreeKind {
   const matches = Object.entries(workflow.labels)
-    .filter(([, labelId]) => issue.labels.includes(labelId))
+    .filter(([, labelId]) => issue.label_ids.includes(labelId))
     .map(([kind]) => kind as RootTreeKind);
   if (matches.length !== 1) invalidBoundary();
   return matches[0] as RootTreeKind;
@@ -263,32 +261,32 @@ function issueKind(issue: TaskIssueSnapshot, workflow: TaskWorkflowIdentities): 
 
 function assertWorkflowScope(scope: RootScope, workflow: TaskWorkflowIdentities): void {
   const root = scope.issues.get(scope.root_issue_id);
-  if (root === undefined || root.parent_id !== null || issueKind(root, workflow) !== "root") {
+  if (root === undefined || root.parent_issue_id !== null || issueKind(root, workflow) !== "root") {
     invalidBoundary();
   }
   let activeCycleCount = 0;
   for (const issue of scope.issues.values()) {
     if (issue.issue_id === scope.root_issue_id) continue;
-    if (issue.parent_id === scope.root_issue_id) {
+    if (issue.parent_issue_id === scope.root_issue_id) {
       if (issueKind(issue, workflow) !== "cycle") invalidBoundary();
-      if (!Object.values(workflow.cycle_states).some((stateId) => stateId === issue.status)) {
+      if (!Object.values(workflow.cycle_states).some((stateId) => stateId === issue.status_id)) {
         invalidBoundary();
       }
       if (
-        issue.status === workflow.cycle_states.draft
-        || issue.status === workflow.cycle_states.in_progress
-        || issue.status === workflow.cycle_states.awaiting_acceptance
+        issue.status_id === workflow.cycle_states.draft
+        || issue.status_id === workflow.cycle_states.in_progress
+        || issue.status_id === workflow.cycle_states.awaiting_acceptance
       ) activeCycleCount += 1;
       continue;
     }
-    const parent = issue.parent_id === null ? undefined : scope.issues.get(issue.parent_id);
+    const parent = issue.parent_issue_id === null ? undefined : scope.issues.get(issue.parent_issue_id);
     if (
       parent === undefined
-      || parent.parent_id !== scope.root_issue_id
+      || parent.parent_issue_id !== scope.root_issue_id
       || issueKind(parent, workflow) !== "cycle"
-      || parent.status === workflow.cycle_states.draft
+      || parent.status_id === workflow.cycle_states.draft
       || !["plan", "work", "verify"].includes(issueKind(issue, workflow))
-      || !Object.values(workflow.stage_states).some((stateId) => stateId === issue.status)
+      || !Object.values(workflow.stage_states).some((stateId) => stateId === issue.status_id)
     ) invalidBoundary();
   }
   if (activeCycleCount > 1) invalidBoundary();
@@ -373,13 +371,13 @@ function assertScopedIssue(
   created?: { readonly issue_id: TaskIssueId; readonly parent_id: TaskIssueId },
 ): void {
   if (created !== undefined && issue.issue_id === created.issue_id) {
-    if (issue.parent_id !== created.parent_id || !scope.issues.has(created.parent_id)) invalidBoundary();
+    if (issue.parent_issue_id !== created.parent_id || !scope.issues.has(created.parent_id)) invalidBoundary();
     return;
   }
   if (!scope.issues.has(issue.issue_id)) invalidBoundary();
   if (issue.issue_id === scope.root_issue_id) {
-    if (issue.parent_id !== null) invalidBoundary();
-  } else if (issue.parent_id === null || !scope.issues.has(issue.parent_id)) {
+    if (issue.parent_issue_id !== null) invalidBoundary();
+  } else if (issue.parent_issue_id === null || !scope.issues.has(issue.parent_issue_id)) {
     invalidBoundary();
   }
 }
@@ -558,7 +556,7 @@ export class RootTaskManageCommandBinding {
     const current = scope.issues.get(observedIssue.issue_id);
     if (current === undefined || issueKind(current, this.workflow) !== "cycle") return result;
     if (
-      current.status !== this.workflow.cycle_states.awaiting_acceptance
+      current.status_id !== this.workflow.cycle_states.awaiting_acceptance
       && !this.#isTerminalCycle(current)
     ) return result;
     const acceptanceScope = await this.#scope(call, "get_issue", execution);
@@ -606,7 +604,7 @@ export class RootTaskManageCommandBinding {
     return validateResult<ListChildrenResult>(value, call, (result) => {
       for (const issue of result.output.issues) {
         assertScopedIssue(scope, issue);
-        if (issue.parent_id !== call.input.parent_issue_id) invalidBoundary();
+        if (issue.parent_issue_id !== call.input.parent_issue_id) invalidBoundary();
       }
     });
   }
@@ -839,12 +837,12 @@ export class RootTaskManageCommandBinding {
 
   #activeCycles(scope: RootScope): readonly TaskIssueSnapshot[] {
     return [...scope.issues.values()].filter((issue) => (
-      issue.parent_id === scope.root_issue_id
+      issue.parent_issue_id === scope.root_issue_id
       && issueKind(issue, this.workflow) === "cycle"
       && (
-        issue.status === this.workflow.cycle_states.draft
-        || issue.status === this.workflow.cycle_states.in_progress
-        || issue.status === this.workflow.cycle_states.awaiting_acceptance
+        issue.status_id === this.workflow.cycle_states.draft
+        || issue.status_id === this.workflow.cycle_states.in_progress
+        || issue.status_id === this.workflow.cycle_states.awaiting_acceptance
       )
     ));
   }
@@ -852,7 +850,7 @@ export class RootTaskManageCommandBinding {
   #authorizeCreateIssue(scope: RootScope, call: CreateIssueCall): void {
     const root = scope.issues.get(scope.root_issue_id);
     const cycles = [...scope.issues.values()].filter((issue) => (
-      issue.parent_id === scope.root_issue_id
+      issue.parent_issue_id === scope.root_issue_id
       && issueKind(issue, this.workflow) === "cycle"
     ));
     if (root === undefined) diagnosticAuthorizationFailure("create_issue", "root_missing");
@@ -907,10 +905,10 @@ export class RootTaskManageCommandBinding {
   }
 
   #isTerminalCycle(issue: TaskIssueSnapshot): boolean {
-    return issue.status === this.workflow.cycle_states.succeeded
-      || issue.status === this.workflow.cycle_states.rejected
-      || issue.status === this.workflow.cycle_states.failed
-      || issue.status === this.workflow.cycle_states.canceled;
+    return issue.status_id === this.workflow.cycle_states.succeeded
+      || issue.status_id === this.workflow.cycle_states.rejected
+      || issue.status_id === this.workflow.cycle_states.failed
+      || issue.status_id === this.workflow.cycle_states.canceled;
   }
 
   async #authorizeUpdateIssue(
@@ -946,7 +944,7 @@ export class RootTaskManageCommandBinding {
       });
     }
     if (kind !== "cycle") return diagnosticAuthorizationFailure("update_issue", "target_kind_denied");
-    if (issue.status === this.workflow.cycle_states.draft) {
+    if (issue.status_id === this.workflow.cycle_states.draft) {
       const draftDescription = desiredKeys.length === 1
         && desiredKeys[0] === "description"
         && call.input.desired.description !== null;
@@ -962,7 +960,7 @@ export class RootTaskManageCommandBinding {
       }
       this.#observedIssues.delete(issue.issue_id);
       const definition = this.#rootDefinition(scope);
-      const description = draftDescription ? call.input.desired.description : issue.description;
+      const description = draftDescription ? call.input.desired.description : issue.description_markdown;
       if (typeof description !== "string") {
         diagnosticAuthorizationFailure("update_issue", "draft_description_missing");
       }
@@ -981,7 +979,7 @@ export class RootTaskManageCommandBinding {
       });
     }
     if (
-      issue.status !== this.workflow.cycle_states.awaiting_acceptance
+      issue.status_id !== this.workflow.cycle_states.awaiting_acceptance
       || desiredKeys.length !== 1
       || desiredKeys[0] !== "state_id"
       || (
@@ -1010,14 +1008,14 @@ export class RootTaskManageCommandBinding {
   #rootDefinition(scope: RootScope): RootDefinition {
     const root = scope.issues.get(scope.root_issue_id);
     const correlationId = this.correlationId;
-    if (root === undefined || root.description === null || correlationId === null) return callDenied();
+    if (root === undefined || root.description_markdown === null || correlationId === null) return callDenied();
     try {
       return parseRootDefinition({
         schema_version: 1,
         root_id: this.root_id,
         root_revision: root.revision,
         correlation_id: correlationId,
-        root_description_markdown: root.description,
+        root_description_markdown: root.description_markdown,
       }, {
         root_id: this.root_id,
         root_revision: root.revision,
@@ -1061,16 +1059,16 @@ export class RootTaskManageCommandBinding {
     if (issue === null) return invalidBoundary();
     const current = approvalScope.issues.get(issue.issue_id);
     if (current === undefined || !this.#sameIssue(current, issue)) return invalidBoundary();
-    if (issue.status === this.workflow.cycle_states.draft) return null;
+    if (issue.status_id === this.workflow.cycle_states.draft) return null;
     const draft = pending.draft;
     if (
-      issue.status !== this.workflow.cycle_states.in_progress
+      issue.status_id !== this.workflow.cycle_states.in_progress
       || issue.revision === draft.revision
       || issue.issue_id !== draft.issue_id
       || issue.title !== draft.title
-      || issue.description !== draft.description
-      || issue.parent_id !== draft.parent_id
-      || !this.#sameValues(issue.labels, draft.labels)
+      || issue.description_markdown !== draft.description_markdown
+      || issue.parent_issue_id !== draft.parent_issue_id
+      || !this.#sameValues(issue.label_ids, draft.label_ids)
       || issue.delegate_id !== draft.delegate_id
       || issue.priority !== draft.priority
     ) invalidBoundary();
@@ -1104,12 +1102,12 @@ export class RootTaskManageCommandBinding {
     if (
       issue.issue_id !== awaiting.issue_id
       || issue.revision === awaiting.revision
-      || issue.status !== pending.desired_state_id
+      || issue.status_id !== pending.desired_state_id
       || !this.#isTerminalCycle(issue)
       || issue.title !== awaiting.title
-      || issue.description !== awaiting.description
-      || issue.parent_id !== awaiting.parent_id
-      || !this.#sameValues(issue.labels, awaiting.labels)
+      || issue.description_markdown !== awaiting.description_markdown
+      || issue.parent_issue_id !== awaiting.parent_issue_id
+      || !this.#sameValues(issue.label_ids, awaiting.label_ids)
       || issue.delegate_id !== awaiting.delegate_id
       || issue.priority !== awaiting.priority
     ) invalidBoundary();
@@ -1128,7 +1126,7 @@ export class RootTaskManageCommandBinding {
     if (
       current === undefined
       || !this.#sameIssue(current, issue)
-      || [...scope.issues.values()].some(({ parent_id }) => parent_id === issue.issue_id)
+      || [...scope.issues.values()].some(({ parent_issue_id }) => parent_issue_id === issue.issue_id)
     ) return invalidBoundary();
     return current;
   }
@@ -1140,7 +1138,7 @@ export class RootTaskManageCommandBinding {
     execution: TaskManageBoundaryExecution,
   ): Promise<PreparedCycleApproval> {
     const draft = scope.issues.get(statusCall.input.issue_id);
-    if (draft?.description === null || draft?.description === undefined) return invalidBoundary();
+    if (draft?.description_markdown === undefined) return invalidBoundary();
     let prepared: PreparedCycleApproval;
     try {
       prepared = prepareCycleApproval({
@@ -1148,7 +1146,7 @@ export class RootTaskManageCommandBinding {
         cycle_id: draft.issue_id,
         cycle_revision: draft.revision,
         cycle_status: "Draft",
-        cycle_description_markdown: draft.description,
+        cycle_description_markdown: draft.description_markdown,
         root_definition: definition,
       });
     } catch {
@@ -1187,8 +1185,8 @@ export class RootTaskManageCommandBinding {
 
   #assertApprovedProjection(issue: TaskIssueSnapshot, prepared: PreparedCycleApproval): void {
     if (
-      issue.description !== prepared.specification.cycle_specification_markdown
-      || issue.status !== this.workflow.cycle_states.in_progress
+      issue.description_markdown !== prepared.specification.cycle_specification_markdown
+      || issue.status_id !== this.workflow.cycle_states.in_progress
       || issue.issue_id !== prepared.specification.cycle_id
     ) invalidBoundary();
   }
@@ -1216,7 +1214,7 @@ export class RootTaskManageCommandBinding {
       || cycle.cycle_status !== "awaiting_acceptance"
       || cycle.specification.root_id !== this.root_id
       || cycle.specification.cycle_id !== cycleId
-      || cycle.specification.cycle_description_markdown !== issue.description
+      || cycle.specification.cycle_description_markdown !== issue.description_markdown
       || cycle.git.head_branch !== createRootHeadBranch(this.root_id)
     ) invalidBoundary();
     const transition = reduceCycleTransition(cycle, {
@@ -1265,7 +1263,7 @@ export class RootTaskManageCommandBinding {
       ...(cycle.verify_issue === null ? [] : [cycle.verify_issue]),
     ];
     const taskStages = [...scope.issues.values()].filter(
-      ({ parent_id }) => parent_id === cycleTaskId,
+      ({ parent_issue_id }) => parent_issue_id === cycleTaskId,
     );
     if (taskStages.length !== stages.length) invalidBoundary();
     const stageIds = new Set<TaskIssueId>();
@@ -1274,11 +1272,11 @@ export class RootTaskManageCommandBinding {
       const taskStage = scope.issues.get(taskIssueId);
       if (
         taskStage === undefined
-        || taskStage.parent_id !== cycleTaskId
+        || taskStage.parent_issue_id !== cycleTaskId
         || taskStage.revision !== stage.revision
-        || taskStage.status !== this.workflow.stage_states[stage.status]
+        || taskStage.status_id !== this.workflow.stage_states[stage.status]
         || taskStage.title !== stage.title
-        || taskStage.description !== stage.description_markdown
+        || taskStage.description_markdown !== stage.description_markdown
         || issueKind(taskStage, this.workflow) !== stage.kind
       ) invalidBoundary();
       stageIds.add(taskIssueId);
@@ -1472,11 +1470,11 @@ export class RootTaskManageCommandBinding {
     const desired = call.input.desired;
     if (
       fresh.issue_id !== before.issue_id
-      || fresh.status !== (desired.state_id === undefined ? before.status : desired.state_id)
+      || fresh.status_id !== (desired.state_id === undefined ? before.status_id : desired.state_id)
       || fresh.title !== (desired.title === undefined ? before.title : desired.title)
-      || fresh.description !== (desired.description === undefined ? before.description : desired.description)
-      || fresh.parent_id !== (desired.parent_id === undefined ? before.parent_id : desired.parent_id)
-      || !this.#sameValues(fresh.labels, desired.label_ids ?? before.labels)
+      || fresh.description_markdown !== (desired.description === undefined ? before.description_markdown : desired.description)
+      || fresh.parent_issue_id !== (desired.parent_id === undefined ? before.parent_issue_id : desired.parent_id)
+      || !this.#sameValues(fresh.label_ids, desired.label_ids ?? before.label_ids)
       || fresh.delegate_id !== (desired.delegate_id === undefined ? before.delegate_id : desired.delegate_id)
       || fresh.priority !== (desired.priority === undefined ? before.priority : desired.priority)
     ) invalidBoundary();
@@ -1489,8 +1487,8 @@ export class RootTaskManageCommandBinding {
       || change.issue_id !== call.input.issue_id
       || change.field !== field
     ) invalidBoundary();
-    const beforeValue = field === "status" ? before.status : before.description;
-    const afterValue = field === "status" ? fresh.status : fresh.description;
+    const beforeValue = field === "status" ? before.status_id : before.description_markdown;
+    const afterValue = field === "status" ? fresh.status_id : fresh.description_markdown;
     if (change.before !== beforeValue || change.after !== afterValue) invalidBoundary();
   }
 
@@ -1504,11 +1502,11 @@ export class RootTaskManageCommandBinding {
   ): void {
     const desired = input.desired;
     if (
-      issue.parent_id !== input.parent_issue_id
-      || issue.status !== desired.state_id
+      issue.parent_issue_id !== input.parent_issue_id
+      || issue.status_id !== desired.state_id
       || issue.title !== desired.title
-      || issue.description !== desired.description
-      || !this.#sameValues(issue.labels, desired.label_ids)
+      || issue.description_markdown !== desired.description
+      || !this.#sameValues(issue.label_ids, desired.label_ids)
       || issue.delegate_id !== desired.delegate_id
       || issue.priority !== desired.priority
     ) invalidBoundary();
@@ -1522,11 +1520,11 @@ export class RootTaskManageCommandBinding {
     return (
       left.issue_id !== right.issue_id
       || left.revision !== right.revision
-      || left.status !== right.status
+      || left.status_id !== right.status_id
       || left.title !== right.title
-      || left.description !== right.description
-      || left.parent_id !== right.parent_id
-      || !this.#sameValues(left.labels, right.labels)
+      || left.description_markdown !== right.description_markdown
+      || left.parent_issue_id !== right.parent_issue_id
+      || !this.#sameValues(left.label_ids, right.label_ids)
       || left.delegate_id !== right.delegate_id
       || left.priority !== right.priority
     ) === false;

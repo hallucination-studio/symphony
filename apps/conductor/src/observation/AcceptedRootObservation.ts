@@ -14,8 +14,8 @@ import {
   type GitSnapshot,
   type RootBootstrap,
   type RootFactDiff,
-  type TaskSnapshot,
 } from "../contracts/observation.js";
+import type { TaskSnapshot } from "../contracts/task-management.js";
 import type { RuntimeTarget } from "../contracts/runtime.js";
 import type { RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import { gitSnapshotChanges, rootObservationDigest } from "./RootObservationFacts.js";

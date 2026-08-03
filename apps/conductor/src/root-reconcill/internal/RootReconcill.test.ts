@@ -26,10 +26,11 @@ import {
   parseGitSnapshot,
   parseRootBootstrap,
   parseRootFactDiff,
-  parseTaskSnapshot,
   type RootBootstrap,
   type RootFactDiff,
 } from "../../contracts/observation.js";
+import { parseTaskSnapshot } from "../../contracts/task-management.js";
+import { parseMarkdownText } from "../../contracts/validation.js";
 import { rootObservationDigest } from "../../observation/RootObservationFacts.js";
 import { RootTools, type DeclaredRootTool } from "../../runtime/RootTools.js";
 import { createRootGitReadTools } from "../../runtime/RootGitReadTools.js";
@@ -2176,7 +2177,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
     assert.equal(responses[0]?.success, true);
     assert.equal(currentTask.issues.some(({ issue_id }) => issue_id === cycleId), true);
     assert.equal(
-      currentTask.issues.find(({ issue_id }) => issue_id === parseTaskIssueId(rootId))?.description,
+      currentTask.issues.find(({ issue_id }) => issue_id === parseTaskIssueId(rootId))?.description_markdown,
       reconciledRootDescription,
     );
   } finally {
@@ -2374,13 +2375,16 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
       ? rootRevision
       : descriptionUpdate ? cycleCorrectedRevision : cycleApprovedRevision;
     const field = descriptionUpdate ? "description" : "status";
-    const beforeValue = descriptionUpdate ? before.description : before.status;
+    const beforeValue = descriptionUpdate ? before.description_markdown : before.status_id;
     const afterValue = descriptionUpdate ? call.input.desired.description : call.input.desired.state_id;
     const fresh = {
       ...before,
       revision,
-      description: descriptionUpdate ? call.input.desired.description ?? null : before.description,
-      status: statusUpdate ? call.input.desired.state_id ?? before.status : before.status,
+      description_markdown: descriptionUpdate
+        ? parseMarkdownText(call.input.desired.description ?? "# Empty")
+        : before.description_markdown,
+      status_id: statusUpdate ? call.input.desired.state_id ?? before.status_id : before.status_id,
+      status: statusUpdate ? "In Progress" as const : before.status,
     };
     currentTask = parseTaskSnapshot({
       ...currentTask,
@@ -2549,7 +2553,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
       correctedCycleDraftDescription,
     ]);
     const sealed = currentTask.issues.find(({ issue_id }) => issue_id === cycleId);
-    assert.equal(sealed?.description, correctedCycleDraftDescription);
+    assert.equal(sealed?.description_markdown, correctedCycleDraftDescription);
     assert.equal(sealed?.revision, cycleApprovedRevision);
     assert.equal(f.toolLogs.length, 8);
   } finally {

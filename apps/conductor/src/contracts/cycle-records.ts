@@ -340,8 +340,7 @@ const APPROVAL_ANCHOR_KEYS = [
   "delivery_invalidation_record_id", "specification_seal_digest", "workspace_base_revision",
 ] as const;
 
-export function parseCycleApprovalRecord(value: unknown, specification: CycleSpecification): CycleApprovalRecord {
-  if (specification.specification_seal_digest === null) throw new Error("unsealed_cycle_specification");
+function parseCycleApprovalRecordShape(value: unknown): CycleApprovalRecord {
   const record = asRecord(value);
   assertExactKeys(record, [...COMMON_RECORD_KEYS, "record_kind", ...APPROVAL_ANCHOR_KEYS]);
   if (record.record_kind !== "cycle_approval") throw new Error("invalid_contract_variant");
@@ -362,6 +361,13 @@ export function parseCycleApprovalRecord(value: unknown, specification: CycleSpe
     specification_seal_digest: parseDigest(record.specification_seal_digest),
     workspace_base_revision: parseDigest(record.workspace_base_revision),
   });
+  if (parsed.basis_status !== "Draft") throw new Error("cycle_approval_source_status_mismatch");
+  return parsed;
+}
+
+export function parseCycleApprovalRecord(value: unknown, specification: CycleSpecification): CycleApprovalRecord {
+  if (specification.specification_seal_digest === null) throw new Error("unsealed_cycle_specification");
+  const parsed = parseCycleApprovalRecordShape(value);
   const expected: Record<string, unknown> = {
     record_id: specification.approval_record_id,
     issue_id: specification.cycle_id,
@@ -371,7 +377,6 @@ export function parseCycleApprovalRecord(value: unknown, specification: CycleSpe
   if (Object.entries(expected).some(([key, expectedValue]) => parsed[key as keyof typeof parsed] !== expectedValue)) {
     throw new Error("cycle_approval_anchor_mismatch");
   }
-  if (parsed.basis_status !== "Draft") throw new Error("cycle_approval_source_status_mismatch");
   return parsed;
 }
 
@@ -498,7 +503,7 @@ export interface SealedCycleBasis {
   readonly approval_record: CycleApprovalRecord;
 }
 
-export function parsePlanGraphManifest(value: unknown, basis: SealedCycleBasis): PlanGraphManifest {
+export function parsePlanGraphManifest(value: unknown, basis?: SealedCycleBasis): PlanGraphManifest {
   const record = asRecord(value);
   assertExactKeys(record, [
     "cycle_id", "approval_record_id", "specification_seal_digest", "plan_issue_id", "plan",
@@ -511,19 +516,6 @@ export function parsePlanGraphManifest(value: unknown, basis: SealedCycleBasis):
   );
   const verify = parseVerifyNode(record.verify_node);
   const relations = parseArray(record.relations, parseManifestRelation, MAX_RECORD_ITEMS);
-  const specification = basis.specification;
-  if (specification.specification_seal_digest === null) throw new Error("unsealed_cycle_specification");
-  const anchorMismatch = record.cycle_id !== specification.cycle_id
-    || record.approval_record_id !== basis.approval_record.record_id
-    || record.specification_seal_digest !== specification.specification_seal_digest
-    || record.plan_issue_id !== specification.plan_issue_id
-    || plan.issue_id !== specification.plan_issue_id
-    || plan.parent_issue_id !== specification.cycle_id
-    || plan.completion_record_id !== specification.plan_completion_record_id
-    || plan.invalidation_record_id !== specification.plan_invalidation_record_id
-    || verify.parent_issue_id !== specification.cycle_id
-    || record.verify_issue_id !== verify.issue_id;
-  if (anchorMismatch) throw new Error("manifest_anchor_mismatch");
   assertUnique(works.map(({ issue_id }) => issue_id), "duplicate_manifest_work_issue");
   assertUnique(works.map(({ approved_work_group_id }) => approved_work_group_id), "duplicate_manifest_work_group");
   assertUnique(
@@ -539,50 +531,61 @@ export function parsePlanGraphManifest(value: unknown, basis: SealedCycleBasis):
   if (!sameOrdered(orderedIds, works.map(({ issue_id }) => issue_id))) {
     throw new Error("manifest_work_order_mismatch");
   }
-  const groups = new Map(specification.approved_work_groups.map((group) => [group.work_group_id, group]));
-  if (works.length !== groups.size) throw new Error("manifest_work_group_cover_mismatch");
-  for (const work of works) {
-    const group = groups.get(work.approved_work_group_id);
-    if (
-      group === undefined
-      || work.parent_issue_id !== specification.cycle_id
-      || !sameOrdered(work.directive_ids, group.directive_ids)
-    ) throw new Error("manifest_work_group_cover_mismatch");
-  }
-  const workPosition = new Map(works.map((work, index) => [work.approved_work_group_id, index]));
-  for (const group of specification.approved_work_groups) {
-    const position = workPosition.get(group.work_group_id);
-    if (
-      position === undefined
-      || group.depends_on_work_group_ids.some((dependency) => {
+  if (basis !== undefined) {
+    const specification = basis.specification;
+    if (specification.specification_seal_digest === null) throw new Error("unsealed_cycle_specification");
+    const anchorMismatch = record.cycle_id !== specification.cycle_id
+      || record.approval_record_id !== basis.approval_record.record_id
+      || record.specification_seal_digest !== specification.specification_seal_digest
+      || record.plan_issue_id !== specification.plan_issue_id
+      || plan.issue_id !== specification.plan_issue_id
+      || plan.parent_issue_id !== specification.cycle_id
+      || plan.completion_record_id !== specification.plan_completion_record_id
+      || plan.invalidation_record_id !== specification.plan_invalidation_record_id
+      || verify.parent_issue_id !== specification.cycle_id
+      || record.verify_issue_id !== verify.issue_id;
+    if (anchorMismatch) throw new Error("manifest_anchor_mismatch");
+    const groups = new Map(specification.approved_work_groups.map((group) => [group.work_group_id, group]));
+    if (works.length !== groups.size) throw new Error("manifest_work_group_cover_mismatch");
+    for (const work of works) {
+      const group = groups.get(work.approved_work_group_id);
+      if (group === undefined || work.parent_issue_id !== specification.cycle_id
+        || !sameOrdered(work.directive_ids, group.directive_ids)) {
+        throw new Error("manifest_work_group_cover_mismatch");
+      }
+    }
+    const workPosition = new Map(works.map((work, index) => [work.approved_work_group_id, index]));
+    for (const group of specification.approved_work_groups) {
+      const position = workPosition.get(group.work_group_id);
+      if (position === undefined || group.depends_on_work_group_ids.some((dependency) => {
         const dependencyPosition = workPosition.get(dependency);
         return dependencyPosition === undefined || dependencyPosition >= position;
-      })
-    ) throw new Error("manifest_work_order_not_topological");
-  }
-  if (!sameOrdered(verify.directive_ids, specification.verify_directives.map(({ directive_id }) => directive_id))) {
-    throw new Error("manifest_verify_directive_mismatch");
-  }
-  const workByGroup = new Map(works.map((work) => [work.approved_work_group_id, work]));
-  const expectedRelations = new Set<string>();
-  for (const group of specification.approved_work_groups) {
-    const target = workByGroup.get(group.work_group_id);
-    if (target === undefined) throw new Error("manifest_work_group_cover_mismatch");
-    for (const dependencyId of group.depends_on_work_group_ids) {
-      const source = workByGroup.get(dependencyId);
-      if (source === undefined) throw new Error("manifest_work_group_cover_mismatch");
-      expectedRelations.add(`work_dependency|${dependencyId}|${group.work_group_id}|${source.issue_id}|${target.issue_id}`);
+      })) throw new Error("manifest_work_order_not_topological");
     }
-    expectedRelations.add(`verify_barrier|${group.work_group_id}|${target.issue_id}|${verify.issue_id}`);
+    if (!sameOrdered(verify.directive_ids, specification.verify_directives.map(({ directive_id }) => directive_id))) {
+      throw new Error("manifest_verify_directive_mismatch");
+    }
+    const workByGroup = new Map(works.map((work) => [work.approved_work_group_id, work]));
+    const expectedRelations = new Set<string>();
+    for (const group of specification.approved_work_groups) {
+      const target = workByGroup.get(group.work_group_id);
+      if (target === undefined) throw new Error("manifest_work_group_cover_mismatch");
+      for (const dependencyId of group.depends_on_work_group_ids) {
+        const source = workByGroup.get(dependencyId);
+        if (source === undefined) throw new Error("manifest_work_group_cover_mismatch");
+        expectedRelations.add(`work_dependency|${dependencyId}|${group.work_group_id}|${source.issue_id}|${target.issue_id}`);
+      }
+      expectedRelations.add(`verify_barrier|${group.work_group_id}|${target.issue_id}|${verify.issue_id}`);
+    }
+    const observedRelations = relations.map((relation) => relation.relation_role === "work_dependency"
+      ? `${relation.relation_role}|${String(relation.prerequisite_work_group_id)}|${String(relation.dependent_work_group_id)}|${relation.source_issue_id}|${relation.target_issue_id}`
+      : `${relation.relation_role}|${String(relation.prerequisite_work_group_id)}|${relation.source_issue_id}|${relation.target_issue_id}`);
+    if (observedRelations.length !== expectedRelations.size
+      || new Set(observedRelations).size !== observedRelations.length
+      || observedRelations.some((key) => !expectedRelations.has(key))) {
+      throw new Error("manifest_relation_set_mismatch");
+    }
   }
-  const observedRelations = relations.map((relation) => relation.relation_role === "work_dependency"
-    ? `${relation.relation_role}|${String(relation.prerequisite_work_group_id)}|${String(relation.dependent_work_group_id)}|${relation.source_issue_id}|${relation.target_issue_id}`
-    : `${relation.relation_role}|${String(relation.prerequisite_work_group_id)}|${relation.source_issue_id}|${relation.target_issue_id}`);
-  if (
-    observedRelations.length !== expectedRelations.size
-    || new Set(observedRelations).size !== observedRelations.length
-    || observedRelations.some((key) => !expectedRelations.has(key))
-  ) throw new Error("manifest_relation_set_mismatch");
   return Object.freeze({
     cycle_id: parseTaskIssueId(record.cycle_id),
     approval_record_id: parseIdentifier(record.approval_record_id),
@@ -700,7 +703,6 @@ function parsePlanCompletion(
   const record = asRecord(value);
   const outcome = parseEnum(record.outcome, ["completed", "failed", "canceled"] as const);
   if (outcome === "completed") {
-    if (basis === undefined) throw new Error("plan_completion_basis_required");
     assertExactKeys(record, [
       "outcome", "instruction_digest", "manifest", "graph_seal_digest", "traceability_by_issue_id_markdown",
     ]);
@@ -758,6 +760,11 @@ export function parseStageCompletionRecord(
   stageKind: "plan",
   basis?: SealedCycleBasis,
 ): StageCompletionRecord & { readonly completion: PlanCompletion };
+export function parseStageCompletionRecord(
+  value: unknown,
+  stageKind: StageKind,
+  basis?: SealedCycleBasis,
+): StageCompletionRecord;
 export function parseStageCompletionRecord(
   value: unknown,
   stageKind: StageKind,
@@ -1657,3 +1664,29 @@ export type TaskIssueRecord =
   | CycleInvalidationRecord
   | DeliveryCompletionRecord
   | DeliveryInvalidationRecord;
+
+export function parseTaskIssueRecord(value: unknown): TaskIssueRecord {
+  const record = asRecord(value);
+  const kind = parseEnum(record.record_kind, [
+    "root_family_invalidation", "cycle_approval", "stage_completion", "stage_invalidation",
+    "cycle_completion", "cycle_invalidation", "delivery_completion", "delivery_invalidation",
+  ] as const);
+  switch (kind) {
+    case "root_family_invalidation": return parseRootFamilyInvalidationRecord(value);
+    case "cycle_approval": return parseCycleApprovalRecordShape(value);
+    case "stage_invalidation": return parseStageInvalidationRecord(value);
+    case "cycle_completion": return parseCycleCompletionRecord(value);
+    case "cycle_invalidation": return parseCycleInvalidationRecord(value);
+    case "delivery_completion": return parseDeliveryCompletionRecord(value);
+    case "delivery_invalidation": return parseDeliveryInvalidationRecord(value);
+    case "stage_completion": {
+      const completion = asRecord(record.completion);
+      const stageKind: StageKind = "conclusion" in completion
+        ? "verify"
+        : "workspace_parent_revision" in completion
+          ? "work"
+          : "plan";
+      return parseStageCompletionRecord(value, stageKind);
+    }
+  }
+}

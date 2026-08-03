@@ -14,11 +14,13 @@ import {
   type StageExecutionSnapshot,
 } from "../contracts/cycle.js";
 import {
-  parseTaskIssueSnapshot,
   type ConcreteTaskChange,
+} from "../contracts/observation.js";
+import {
+  parseTaskIssueSnapshotChange,
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
-} from "../contracts/observation.js";
+} from "../contracts/task-management.js";
 import type {
   TaskManageBoundaryExecution,
   TaskManageCommandInterface,
@@ -200,7 +202,7 @@ function hasOnlyKindLabel(
   workflow: TaskWorkflowIdentities,
 ): boolean {
   const kindLabels = Object.entries(workflow.labels)
-    .filter(([, labelId]) => issue.labels.includes(labelId))
+    .filter(([, labelId]) => issue.label_ids.includes(labelId))
     .map(([kind]) => kind);
   return kindLabels.length === 1 && kindLabels[0] === expected;
 }
@@ -305,7 +307,7 @@ export class CycleTaskManageCommandBinding {
     return validateResult<ListChildrenResult>(value, call, (result) => {
       for (const issue of result.output.issues) {
         this.#assertScopedIssue(issue);
-        if (issue.parent_id !== call.input.parent_issue_id) invalidBoundary();
+        if (issue.parent_issue_id !== call.input.parent_issue_id) invalidBoundary();
       }
     });
   }
@@ -620,11 +622,11 @@ export class CycleTaskManageCommandBinding {
     }
     if (issue.issue_id === parseTaskIssueId(this.#snapshot.cycle_id)) {
       const statusValid = allowStatusDrift
-        ? Object.values(this.#workflow.cycle_states).some((stateId) => stateId === issue.status)
-        : issue.status === (statusOverride ?? cycleStateId(this.#snapshot.cycle_status, this.#workflow));
+        ? Object.values(this.#workflow.cycle_states).some((stateId) => stateId === issue.status_id)
+        : issue.status_id === (statusOverride ?? cycleStateId(this.#snapshot.cycle_status, this.#workflow));
       if (
-        issue.parent_id !== parseTaskIssueId(this.#snapshot.root_id)
-        || issue.description !== this.#snapshot.specification.cycle_description_markdown
+        issue.parent_issue_id !== parseTaskIssueId(this.#snapshot.root_id)
+        || issue.description_markdown !== this.#snapshot.specification.cycle_description_markdown
         || !hasOnlyKindLabel(issue, "cycle", this.#workflow)
         || !statusValid
       ) invalidBoundary();
@@ -635,25 +637,25 @@ export class CycleTaskManageCommandBinding {
     if (materialized !== undefined) {
       if (
         issue.revision !== materialized.revision
-        || issue.status !== materialized.status
+        || issue.status_id !== materialized.status_id
         || issue.title !== materialized.title
-        || issue.description !== materialized.description
-        || issue.parent_id !== materialized.parent_id
-        || issue.labels.length !== materialized.labels.length
-        || issue.labels.some((label, index) => label !== materialized.labels[index])
+        || issue.description_markdown !== materialized.description_markdown
+        || issue.parent_issue_id !== materialized.parent_issue_id
+        || issue.label_ids.length !== materialized.label_ids.length
+        || issue.label_ids.some((label, index) => label !== materialized.label_ids[index])
         || issue.delegate_id !== materialized.delegate_id
         || issue.priority !== materialized.priority
       ) invalidBoundary();
       return;
     }
     const statusValid = allowStatusDrift
-      ? Object.values(this.#workflow.stage_states).some((stateId) => stateId === issue.status)
-      : issue.status === (statusOverride ?? stageStateId(stage?.status ?? "todo", this.#workflow));
+      ? Object.values(this.#workflow.stage_states).some((stateId) => stateId === issue.status_id)
+      : issue.status_id === (statusOverride ?? stageStateId(stage?.status ?? "todo", this.#workflow));
     if (
       stage === undefined
       || issue.title !== stage.title
-      || issue.description !== stage.description_markdown
-      || issue.parent_id !== parseTaskIssueId(this.#snapshot.cycle_id)
+      || issue.description_markdown !== stage.description_markdown
+      || issue.parent_issue_id !== parseTaskIssueId(this.#snapshot.cycle_id)
       || !hasOnlyKindLabel(issue, stage.kind, this.#workflow)
       || !statusValid
     ) invalidBoundary();
@@ -725,7 +727,7 @@ export class CycleTaskManageCommandBinding {
           if (target.kind !== "issue" || fresh.issue_id !== target.issue_id) invalidBoundary();
           if (result.output.outcome === "applied") {
             this.#assertCreatedIssue(call, fresh);
-          } else if (fresh.parent_id !== call.input.parent_issue_id) {
+          } else if (fresh.parent_issue_id !== call.input.parent_issue_id) {
             invalidBoundary();
           }
         } else if (call.function === "update_issue") {
@@ -755,12 +757,12 @@ export class CycleTaskManageCommandBinding {
   #assertCreatedIssueInput(input: CreateIssueCall["input"], issue: TaskIssueSnapshot): void {
     const desired = input.desired;
     if (
-      issue.parent_id !== input.parent_issue_id
+      issue.parent_issue_id !== input.parent_issue_id
       || issue.title !== desired.title
-      || issue.description !== desired.description
-      || issue.status !== desired.state_id
-      || issue.labels.length !== desired.label_ids.length
-      || issue.labels.some((label, index) => label !== desired.label_ids[index])
+      || issue.description_markdown !== desired.description
+      || issue.status_id !== desired.state_id
+      || issue.label_ids.length !== desired.label_ids.length
+      || issue.label_ids.some((label, index) => label !== desired.label_ids[index])
       || issue.delegate_id !== desired.delegate_id
       || issue.priority !== desired.priority
     ) invalidBoundary();
@@ -823,7 +825,7 @@ export class CycleTaskManageCommandBinding {
       && this.#snapshot.verify_issue === null
       && this.#snapshot.sealed_relations.length === 0;
     if (!graphHasOnlyPlan || values.length > 33) invalidBoundary();
-    const issues = values.map((value) => parseTaskIssueSnapshot(value));
+    const issues = values.map((value) => parseTaskIssueSnapshotChange(value));
     const byId = new Map(issues.map((issue) => [issue.issue_id, issue]));
     if (byId.size !== issues.length) invalidBoundary();
     let workCount = 0;
@@ -833,9 +835,9 @@ export class CycleTaskManageCommandBinding {
       const verify = hasOnlyKindLabel(issue, "verify", this.#workflow);
       if (
         (!work && !verify)
-        || issue.parent_id !== parseTaskIssueId(this.#snapshot.cycle_id)
-        || issue.status !== this.#workflow.stage_states.todo
-        || issue.description === null
+        || issue.parent_issue_id !== parseTaskIssueId(this.#snapshot.cycle_id)
+        || issue.status_id !== this.#workflow.stage_states.todo
+        || issue.description_markdown === null
         || issue.delegate_id !== null
         || issue.priority !== null
         || this.#stages.has(issue.issue_id)

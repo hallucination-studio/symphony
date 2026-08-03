@@ -63,15 +63,15 @@ export class RootFamilyGuard implements FamilyGuardInterface {
       this.options.workflow.cycle_states.awaiting_acceptance,
     ]);
     const cycles = observation.task.issues
-      .filter(({ parent_id, labels, status }) => parent_id === rootId
-        && labels.includes(this.options.workflow.labels.cycle)
-        && nonTerminalStates.has(status))
+      .filter(({ parent_issue_id, label_ids, status_id }) => parent_issue_id === rootId
+        && label_ids.includes(this.options.workflow.labels.cycle)
+        && nonTerminalStates.has(status_id))
       .sort((left, right) => left.issue_id.localeCompare(right.issue_id));
     if (cycles.length < 2) return "no_action";
-    const status = root.status === this.options.root_states.todo ? "Todo"
-      : root.status === this.options.root_states.in_progress ? "In Progress"
-      : root.status === this.options.root_states.in_review ? "In Review"
-      : root.status === this.options.root_states.done ? "Done"
+    const status = root.status_id === this.options.root_states.todo ? "Todo"
+      : root.status_id === this.options.root_states.in_progress ? "In Progress"
+      : root.status_id === this.options.root_states.in_review ? "In Review"
+      : root.status_id === this.options.root_states.done ? "Done"
       : null;
     if (status === null) throw new Error("family_guard_root_status_invalid");
     const id = recordId(observation.root_id);
@@ -82,7 +82,7 @@ export class RootFamilyGuard implements FamilyGuardInterface {
       identity_derivation_version: "root_family_v1",
       basis_issue_revision: canonicalTaskRevision(root),
       basis_status: status,
-      basis_document_digest: digest(root.description ?? ""),
+      basis_document_digest: digest(root.description_markdown ?? ""),
       invalidation_kind: "multiple_non_terminal_cycles",
       observed_task_snapshot_digest: digest(observation.task),
       observed_at: observation.observed_at,

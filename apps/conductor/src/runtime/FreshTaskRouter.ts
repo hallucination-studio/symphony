@@ -7,10 +7,9 @@ import {
 } from "../contracts/identity.js";
 import type {
   ConcreteTaskChange,
-  TaskIssueSnapshot,
   TaskChangeOriginEvidence,
-  TaskSnapshot,
 } from "../contracts/observation.js";
+import type { TaskIssueSnapshot, TaskSnapshot } from "../contracts/task-management.js";
 import type { TaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
 
 export type FreshRouteId =
@@ -99,7 +98,7 @@ function cycleStatus(
   workflow: TaskWorkflowIdentities,
 ): keyof TaskWorkflowIdentities["cycle_states"] | null {
   for (const [name, stateId] of Object.entries(workflow.cycle_states)) {
-    if (issue.status === stateId) return name as keyof TaskWorkflowIdentities["cycle_states"];
+    if (issue.status_id === stateId) return name as keyof TaskWorkflowIdentities["cycle_states"];
   }
   return null;
 }
@@ -144,7 +143,7 @@ function externallyTerminalized(
   return changes.some((change) => change.kind === "field_changed"
     && change.issue_id === cycle.issue_id
     && change.field === "status"
-    && change.after === cycle.status);
+    && change.after === cycle.status_id);
 }
 
 function mechanicalTaskChange(
@@ -165,7 +164,9 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
   const root = rootIssue(input.task);
   const rootId = parseTaskIssueId(input.task.root_id);
   const cycles = input.task.issues
-    .filter(({ parent_id, labels }) => parent_id === rootId && labels.includes(input.workflow.labels.cycle))
+    .filter(({ parent_issue_id, label_ids }) => (
+      parent_issue_id === rootId && label_ids.includes(input.workflow.labels.cycle)
+    ))
     .map((issue) => ({ issue, status: cycleStatus(issue, input.workflow) }));
   if (cycles.some(({ status }) => status === null)) throw new Error("cycle_routing_state_invalid");
   const nonTerminal = cycles.filter(({ status }) => status === "draft"
@@ -183,13 +184,13 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
     matches.push(match("WF-ROUTE-009", null));
   } else if (active !== undefined) {
     const stageIds = new Set(input.task.issues
-      .filter(({ parent_id }) => parent_id === active.issue.issue_id)
+      .filter(({ parent_issue_id }) => parent_issue_id === active.issue.issue_id)
       .map(({ issue_id }) => issue_id));
     const mutated = sealedMutation(input.task_changes, active.issue, stageIds, origins);
     if (externallyTerminalized(input.task_changes, active.issue)) {
       matches.push(match("WF-ROUTE-018", activeCycleId));
     }
-    if (root.status === input.root_states.done) {
+    if (root.status_id === input.root_states.done) {
       matches.push(match("WF-ROUTE-011", activeCycleId));
     }
     if (mutated) {
@@ -200,7 +201,7 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
     }
     if (
       !admitted
-      && root.status !== input.root_states.done
+      && root.status_id !== input.root_states.done
       && active.status !== "draft"
     ) {
       matches.push(match("WF-ROUTE-015", activeCycleId));
@@ -218,7 +219,7 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
     } else if (active.status === "awaiting_acceptance" && admitted) {
       matches.push(match("WF-ROUTE-007", activeCycleId));
     }
-  } else if (root.status === input.root_states.done) {
+  } else if (root.status_id === input.root_states.done) {
     matches.push(match("WF-ROUTE-013", null));
   } else if (admitted) {
     const terminal = cycles.at(-1);
@@ -228,7 +229,7 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
         matches.push(match("WF-ROUTE-018", terminalId));
       }
       matches.push(match("WF-ROUTE-008", terminalId));
-    } else if (root.status === input.root_states.todo || root.status === input.root_states.in_progress) {
+    } else if (root.status_id === input.root_states.todo || root.status_id === input.root_states.in_progress) {
       matches.push(match("WF-ROUTE-001", null));
     }
   }

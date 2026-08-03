@@ -14,10 +14,7 @@ import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import {
   parseRootDefinition,
 } from "../contracts/cycle.js";
-import {
-  parseTaskSnapshot,
-  type TaskSnapshot,
-} from "../contracts/observation.js";
+import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import type { TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   createTaskManageCallerAuthority,

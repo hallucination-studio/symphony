@@ -8,7 +8,8 @@ import {
   parseRuntimeGeneration,
   type RootIssueId,
 } from "../contracts/identity.js";
-import { parseGitSnapshot, parseTaskObservationEvent, parseTaskSnapshot } from "../contracts/observation.js";
+import { parseGitSnapshot, parseTaskObservationEvent } from "../contracts/observation.js";
+import { parseTaskSnapshot } from "../contracts/task-management.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";

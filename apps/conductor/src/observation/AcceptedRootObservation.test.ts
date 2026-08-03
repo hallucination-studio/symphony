@@ -10,11 +10,10 @@ import {
 import {
   parseGitSnapshot,
   parseTaskObservationEvent,
-  parseTaskSnapshot,
   type ConcreteTaskChange,
   type GitSnapshot,
-  type TaskSnapshot,
 } from "../contracts/observation.js";
+import { canonicalTaskRevision, parseTaskSnapshot, type TaskIssueSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import type { RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import { AcceptedRootObservation } from "./AcceptedRootObservation.js";
 import { rootObservationDigest } from "./RootObservationFacts.js";
@@ -40,53 +39,87 @@ interface TaskOptions {
 
 function task(options: TaskOptions = {}): TaskSnapshot {
   const delegateId = options.delegateId === undefined ? "actor:1" : options.delegateId;
+  const states = {
+    team_id: "team:accepted", revision: `symphony:v1:${"0".repeat(64)}`,
+    todo_state_id: "state:todo", draft_state_id: "state:draft",
+    in_progress_state_id: "state:in-progress", awaiting_acceptance_state_id: "state:awaiting-acceptance",
+    in_review_state_id: "state:in-review", done_state_id: "state:done",
+    succeeded_state_id: "state:succeeded", rejected_state_id: "state:rejected",
+    failed_state_id: "state:failed", canceled_state_id: "state:canceled",
+  } as const;
+  const canonicalIssue = (input: {
+    readonly issue_id: string; readonly kind: TaskIssueSnapshot["kind"];
+    readonly status: TaskIssueSnapshot["status"]; readonly status_id: string;
+    readonly title: string; readonly description_markdown: string;
+    readonly parent_issue_id: string | null; readonly label_ids: readonly string[];
+    readonly delegate_id: string | null; readonly priority: number; readonly updated?: boolean;
+  }) => {
+    const { updated, ...rest } = input;
+    const fields = {
+      ...rest, label_ids: [...rest.label_ids].sort(),
+      provider_created_at: "2026-08-03T00:00:00.000Z",
+      provider_updated_at: updated === true ? "2026-08-03T00:00:01.000Z" : "2026-08-03T00:00:00.000Z",
+      creation_actor_id: "actor:1", archived: false, trashed: false,
+    };
+    return { ...fields, revision: canonicalTaskRevision(fields) };
+  };
+  const childStatus = options.childStatus === "Done"
+    ? "Done"
+    : options.childStatus === "Verifying"
+      ? "In Review"
+      : "In Progress";
   const issues = [
-    {
+    canonicalIssue({
       issue_id: rootId,
-      revision: options.rootRevision ?? "revision:root:1",
-      status: "In Progress",
+      kind: "root", status: "In Progress", status_id: states.in_progress_state_id,
       title: "Deliver the requested change",
-      description: null,
-      parent_id: null,
-      labels: options.reordered ? ["symphony:queue", "symphony:kind/root"] : ["symphony:kind/root", "symphony:queue"],
+      description_markdown: "# Root",
+      parent_issue_id: null,
+      label_ids: options.reordered ? ["label:queue", "label:root"] : ["label:root", "label:queue"],
       delegate_id: delegateId,
       priority: 1,
-    },
-    {
+      updated: options.rootRevision !== undefined,
+    }),
+    canonicalIssue({
       issue_id: "LIN-2",
-      revision: `revision:cycle:${options.childStatus ?? "Executing"}`,
-      status: options.childStatus ?? "Executing",
+      kind: "cycle", status: childStatus,
+      status_id: childStatus === "Done" ? states.done_state_id : childStatus === "In Review" ? states.in_review_state_id : states.in_progress_state_id,
       title: "Cycle 1",
-      description: "Current attempt",
-      parent_id: rootId,
-      labels: ["symphony:kind/cycle"],
+      description_markdown: "# Cycle\n\nCurrent attempt",
+      parent_issue_id: rootId,
+      label_ids: ["label:cycle"],
       delegate_id: "actor:1",
       priority: 2,
-    },
-    ...(options.includeVerify ? [{
+    }),
+    ...(options.includeVerify ? [canonicalIssue({
       issue_id: "LIN-3",
-      revision: "revision:verify:1",
-      status: "Todo",
+      kind: "verify", status: "Todo", status_id: states.todo_state_id,
       title: "Verify",
-      description: null,
-      parent_id: "LIN-2",
-      labels: ["symphony:kind/verify"],
+      description_markdown: "# Verify",
+      parent_issue_id: "LIN-2",
+      label_ids: ["label:verify"],
       delegate_id: null,
       priority: 3,
-    }] : []),
+    })] : []),
   ];
   const relationId = options.relationId ?? "relation:1";
-  const relations = [{
+  const relationFields = {
     relation_id: relationId,
-    revision: `revision:${relationId}`,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:1",
+    creation_evidence_id: `evidence:${relationId}`,
     type: "blocks",
     source_issue_id: "LIN-2",
     target_issue_id: options.includeVerify ? "LIN-3" : rootId,
-  }];
+  };
+  const relations = [{ ...relationFields, revision: canonicalTaskRevision(relationFields) }];
   return parseTaskSnapshot({
     root_id: rootId,
+    workflow_state_map: states,
     issues: options.reordered ? [...issues].reverse() : issues,
     relations: options.reordered ? [...relations].reverse() : relations,
+    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
   });
 }
 
@@ -251,7 +284,7 @@ test("runtime diffs compare the latest complete snapshot with the accepted basel
     .filter((change) => change.kind === "field_changed")
     .map(({ issue_id, field, before, after }) => ({ issue_id, field, before, after })), [
     { issue_id: rootId, field: "delegate", before: "actor:1", after: null },
-    { issue_id: "LIN-2", field: "status", before: "Executing", after: "Done" },
+    { issue_id: "LIN-2", field: "status", before: "In Progress", after: "Done" },
   ]);
   assert.deepEqual(prepared.root_input.git_changes, [
     { kind: "head_changed", before: "a".repeat(40), after: "b".repeat(40) },

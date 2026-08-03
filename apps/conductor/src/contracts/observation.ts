@@ -8,8 +8,6 @@ import {
   parseSchemaVersion,
   parseTaskIssueId,
   parseTaskDigest,
-  parseTaskRelationId,
-  parseTaskRevision,
   type CorrelationId,
   type ObservationDigest,
   type RepositoryId,
@@ -19,10 +17,16 @@ import {
   type SchemaVersion,
   type TaskIssueId,
   type TaskDigest,
-  type TaskRelationId,
-  type TaskRevision,
 } from "./identity.js";
 import { assertRuntimeTarget, type RuntimeTarget } from "./runtime.js";
+import {
+  parseTaskIssueSnapshotChange,
+  parseTaskRelationSnapshot,
+  parseTaskSnapshot,
+  type TaskIssueSnapshot,
+  type TaskRelationSnapshot,
+  type TaskSnapshot,
+} from "./task-management.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString, parseEnum, parseStringArray } from "./validation.js";
 
 export const TASK_CHANGE_KINDS = [
@@ -32,32 +36,6 @@ export const TASK_FIELDS = [
   "status", "title", "description", "parent", "labels", "delegate", "priority",
 ] as const;
 export const PR_STATES = ["open", "closed", "merged"] as const;
-
-export interface TaskIssueSnapshot {
-  readonly issue_id: TaskIssueId;
-  readonly revision: TaskRevision;
-  readonly status: string;
-  readonly title: string;
-  readonly description: string | null;
-  readonly parent_id: TaskIssueId | null;
-  readonly labels: readonly string[];
-  readonly delegate_id: string | null;
-  readonly priority: number | null;
-}
-
-export interface TaskRelationSnapshot {
-  readonly relation_id: TaskRelationId;
-  readonly revision: TaskRevision;
-  readonly type: string;
-  readonly source_issue_id: TaskIssueId;
-  readonly target_issue_id: TaskIssueId;
-}
-
-export interface TaskSnapshot {
-  readonly root_id: RootIssueId;
-  readonly issues: readonly TaskIssueSnapshot[];
-  readonly relations: readonly TaskRelationSnapshot[];
-}
 
 export interface TaskObservationEvent {
   readonly schema_version: SchemaVersion;
@@ -159,63 +137,6 @@ function parsePriority(value: unknown): number | null {
   return value as number;
 }
 
-export function parseTaskIssueSnapshot(value: unknown): TaskIssueSnapshot {
-  const record = asRecord(value);
-  assertExactKeys(record, [
-    "issue_id", "revision", "status", "title", "description", "parent_id", "labels", "delegate_id", "priority",
-  ]);
-  return Object.freeze({
-    issue_id: parseTaskIssueId(record.issue_id),
-    revision: parseTaskRevision(record.revision),
-    status: parseBoundedString(record.status, "invalid_task_status", 128),
-    title: parseText(record.title, "invalid_task_title", 1_024),
-    description: parseNullable(record.description, (entry) => parseText(entry, "invalid_task_description", 100_000)),
-    parent_id: parseNullable(record.parent_id, parseTaskIssueId),
-    labels: parseStringArray(record.labels, (entry) => parseBoundedString(entry, "invalid_task_label", 256), 256),
-    delegate_id: parseNullable(record.delegate_id, (entry) => parseBoundedString(entry, "invalid_task_delegate", 256)),
-    priority: parsePriority(record.priority),
-  });
-}
-
-export function parseTaskRelationSnapshot(value: unknown): TaskRelationSnapshot {
-  const record = asRecord(value);
-  assertExactKeys(record, ["relation_id", "revision", "type", "source_issue_id", "target_issue_id"]);
-  const relation = Object.freeze({
-    relation_id: parseTaskRelationId(record.relation_id),
-    revision: parseTaskRevision(record.revision),
-    type: parseBoundedString(record.type, "invalid_task_relation_type", 128),
-    source_issue_id: parseTaskIssueId(record.source_issue_id),
-    target_issue_id: parseTaskIssueId(record.target_issue_id),
-  });
-  if (relation.source_issue_id === relation.target_issue_id) throw new Error("self_task_relation");
-  return relation;
-}
-
-export function parseTaskSnapshot(value: unknown): TaskSnapshot {
-  const record = asRecord(value);
-  assertExactKeys(record, ["root_id", "issues", "relations"]);
-  const rootId = parseRootIssueId(record.root_id);
-  const taskRootId = parseTaskIssueId(rootId);
-  const issues = parseArray(record.issues, parseTaskIssueSnapshot);
-  const issueIds = new Set(issues.map(({ issue_id }) => issue_id));
-  if (issueIds.size !== issues.length) throw new Error("duplicate_issue_identity");
-  if (!issueIds.has(taskRootId)) throw new Error("missing_root_identity");
-  for (const issue of issues) {
-    if (issue.issue_id === taskRootId && issue.parent_id !== null) throw new Error("root_parent_forbidden");
-    if (issue.parent_id !== null && !issueIds.has(issue.parent_id)) throw new Error("unknown_parent_identity");
-  }
-  const relations = parseArray(record.relations, parseTaskRelationSnapshot);
-  if (new Set(relations.map(({ relation_id }) => relation_id)).size !== relations.length) {
-    throw new Error("duplicate_relation_identity");
-  }
-  for (const relation of relations) {
-    if (!issueIds.has(relation.source_issue_id) || !issueIds.has(relation.target_issue_id)) {
-      throw new Error("unknown_relation_endpoint");
-    }
-  }
-  return Object.freeze({ root_id: rootId, issues, relations });
-}
-
 function parsePullRequest(value: unknown): PullRequestSnapshot {
   const record = asRecord(value);
   assertExactKeys(record, ["provider", "repository_id", "base_branch", "head_branch", "state", "head_revision", "url"]);
@@ -288,7 +209,7 @@ export function parseConcreteTaskChange(value: unknown): ConcreteTaskChange {
   const kind = parseEnum(record.kind, TASK_CHANGE_KINDS);
   if (kind === "issue_created" || kind === "issue_archived") {
     assertExactKeys(record, ["kind", "issue"]);
-    return Object.freeze({ kind, issue: parseTaskIssueSnapshot(record.issue) });
+    return Object.freeze({ kind, issue: parseTaskIssueSnapshotChange(record.issue) });
   }
   if (kind === "relation_added" || kind === "relation_removed") {
     assertExactKeys(record, ["kind", "relation"]);

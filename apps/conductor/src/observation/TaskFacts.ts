@@ -3,37 +3,55 @@ import { createHash } from "node:crypto";
 import { parseTaskDigest, type TaskDigest } from "../contracts/identity.js";
 import type {
   ConcreteTaskChange,
+} from "../contracts/observation.js";
+import type {
   TaskIssueSnapshot,
   TaskRelationSnapshot,
   TaskSnapshot,
-} from "../contracts/observation.js";
+} from "../contracts/task-management.js";
+
+type CanonicalValue = null | boolean | number | string | readonly CanonicalValue[] | {
+  readonly [key: string]: CanonicalValue;
+};
+
+function canonicalValue(value: unknown): CanonicalValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (typeof value !== "object") throw new Error("invalid_task_digest_value");
+  return Object.freeze(Object.fromEntries(Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, canonicalValue(entry)])));
+}
 
 export function canonicalTaskSnapshot(snapshot: TaskSnapshot) {
-  return {
+  return canonicalValue({
     root_id: snapshot.root_id,
+    workflow_state_map: snapshot.workflow_state_map,
     issues: [...snapshot.issues]
       .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
       .map((issue) => ({
-        issue_id: issue.issue_id,
-        revision: issue.revision,
-        status: issue.status,
-        title: issue.title,
-        description: issue.description,
-        parent_id: issue.parent_id,
-        labels: [...issue.labels].sort(),
-        delegate_id: issue.delegate_id,
-        priority: issue.priority,
+        ...issue,
+        label_ids: [...issue.label_ids].sort(),
       })),
     relations: [...snapshot.relations]
       .sort((left, right) => left.relation_id.localeCompare(right.relation_id))
-      .map((relation) => ({
-        relation_id: relation.relation_id,
-        revision: relation.revision,
-        type: relation.type,
-        source_issue_id: relation.source_issue_id,
-        target_issue_id: relation.target_issue_id,
+      .map((relation) => ({ ...relation })),
+    resource_creation_evidence: [...snapshot.resource_creation_evidence]
+      .sort((left, right) => left.evidence_id.localeCompare(right.evidence_id)),
+    issue_history: [...snapshot.issue_history]
+      .sort((left, right) => left.history_id.localeCompare(right.history_id))
+      .map((entry) => ({
+        ...entry,
+        changed_fields: [...entry.changed_fields].sort(),
+        added_label_ids: [...entry.added_label_ids].sort(),
+        removed_label_ids: [...entry.removed_label_ids].sort(),
+        relation_changes: [...entry.relation_changes]
+          .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
       })),
-  };
+    issue_record_observations: [...snapshot.issue_record_observations]
+      .sort((left, right) => left.record_id.localeCompare(right.record_id)),
+  });
 }
 
 export function taskSnapshotDigest(snapshot: TaskSnapshot): TaskDigest {
@@ -55,22 +73,22 @@ export function taskIssueChanges(before: TaskIssueSnapshot, after: TaskIssueSnap
   if (before.title !== after.title) {
     changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "title", before: before.title, after: after.title });
   }
-  if (before.description !== after.description) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "description", before: before.description, after: after.description });
+  if (before.description_markdown !== after.description_markdown) {
+    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "description", before: before.description_markdown, after: after.description_markdown });
   }
   if (before.status !== after.status) {
     changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "status", before: before.status, after: after.status });
   }
-  if (before.parent_id !== after.parent_id) {
-    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "parent", before: before.parent_id, after: after.parent_id });
+  if (before.parent_issue_id !== after.parent_issue_id) {
+    changes.push({ kind: "field_changed", issue_id: after.issue_id, field: "parent", before: before.parent_issue_id, after: after.parent_issue_id });
   }
-  if (!taskStringSetsEqual(before.labels, after.labels)) {
+  if (!taskStringSetsEqual(before.label_ids, after.label_ids)) {
     changes.push({
       kind: "field_changed",
       issue_id: after.issue_id,
       field: "labels",
-      before: [...before.labels].sort(),
-      after: [...after.labels].sort(),
+      before: [...before.label_ids].sort(),
+      after: [...after.label_ids].sort(),
     });
   }
   if (before.delegate_id !== after.delegate_id) {

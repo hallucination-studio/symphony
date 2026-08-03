@@ -47,9 +47,14 @@ import {
 } from "../../performer/api/StagePerformerInterface.js";
 import type {
   GitSnapshot,
-  TaskIssueSnapshot,
-  TaskRelationSnapshot,
 } from "../../contracts/observation.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  parseTaskRelationSnapshot,
+  type TaskIssueSnapshot,
+  type TaskRelationSnapshot,
+} from "../../contracts/task-management.js";
 import type { MutationResult } from "../../contracts/mutation.js";
 import { parseMarkdownText } from "../../contracts/validation.js";
 import {
@@ -109,6 +114,81 @@ const workflow = parseTaskWorkflowIdentities({
     canceled: "state:stage-canceled",
   },
 });
+
+const ISSUE_TIMESTAMP = "2026-08-03T00:00:00.000Z";
+
+function workflowStatus(statusId: TaskIssueSnapshot["status_id"]): TaskIssueSnapshot["status"] {
+  const entries = [
+    [workflow.cycle_states.draft, "Draft"],
+    [workflow.cycle_states.in_progress, "In Progress"],
+    [workflow.cycle_states.awaiting_acceptance, "Awaiting Acceptance"],
+    [workflow.cycle_states.succeeded, "Succeeded"],
+    [workflow.cycle_states.rejected, "Rejected"],
+    [workflow.cycle_states.failed, "Failed"],
+    [workflow.cycle_states.canceled, "Canceled"],
+    [workflow.stage_states.todo, "Todo"],
+    [workflow.stage_states.in_progress, "In Progress"],
+    [workflow.stage_states.done, "Done"],
+    [workflow.stage_states.failed, "Failed"],
+    [workflow.stage_states.canceled, "Canceled"],
+  ] as const;
+  const match = entries.find(([candidate]) => candidate === statusId);
+  if (match === undefined) throw new Error("unknown_test_workflow_status");
+  return match[1];
+}
+
+function issueKind(labelIds: readonly string[]): TaskIssueSnapshot["kind"] {
+  const entry = Object.entries(workflow.labels).find(([, labelId]) => labelIds.includes(labelId));
+  if (entry === undefined) throw new Error("unknown_test_issue_kind");
+  return entry[0] as TaskIssueSnapshot["kind"];
+}
+
+interface TaskIssueFixture {
+  readonly issue_id: TaskIssueSnapshot["issue_id"];
+  readonly revision: TaskIssueSnapshot["revision"];
+  readonly status_id: TaskIssueSnapshot["status_id"];
+  readonly title: string;
+  readonly description_markdown: string;
+  readonly parent_issue_id: TaskIssueSnapshot["parent_issue_id"];
+  readonly label_ids: TaskIssueSnapshot["label_ids"];
+  readonly delegate_id: string | null;
+  readonly priority: number | null;
+}
+
+function taskIssue(fields: TaskIssueFixture): TaskIssueSnapshot {
+  const { revision: revisionToken, ...input } = fields;
+  const normalized = {
+    ...input,
+    description_markdown: parseMarkdownText(fields.description_markdown),
+    provider_created_at: ISSUE_TIMESTAMP,
+    provider_updated_at: new Date(
+      Date.parse(ISSUE_TIMESTAMP)
+        + Number.parseInt(createHash("sha256").update(revisionToken).digest("hex").slice(0, 8), 16),
+    ).toISOString(),
+    creation_actor_id: "actor:symphony",
+    kind: issueKind(fields.label_ids),
+    status: workflowStatus(fields.status_id),
+    archived: false,
+    trashed: false,
+  };
+  return parseTaskIssueSnapshotChange({ ...normalized, revision: canonicalTaskRevision(normalized) });
+}
+
+function taskRelation(fields: Pick<TaskRelationSnapshot,
+  "relation_id" | "revision" | "type" | "source_issue_id" | "target_issue_id">): TaskRelationSnapshot {
+  const { revision: revisionToken, ...input } = fields;
+  const normalized = {
+    ...input,
+    provider_created_at: ISSUE_TIMESTAMP,
+    provider_updated_at: new Date(
+      Date.parse(ISSUE_TIMESTAMP)
+        + Number.parseInt(createHash("sha256").update(revisionToken).digest("hex").slice(0, 8), 16),
+    ).toISOString(),
+    creation_actor_id: "actor:symphony",
+    creation_evidence_id: `evidence:${fields.relation_id}`,
+  };
+  return parseTaskRelationSnapshot({ ...normalized, revision: canonicalTaskRevision(normalized) });
+}
 
 const rootDescription = [
   "# Root",
@@ -425,7 +505,7 @@ function requestWithGraph(
     revision: issue.revision,
     kind,
     title: issue.title,
-    description_markdown: issue.description,
+    description_markdown: issue.description_markdown,
     parent_cycle_id: cycleId,
     status,
   });
@@ -547,7 +627,7 @@ function appliedIssueResult(
       issue_id: issue.issue_id,
       field: "status" as const,
       before: beforeStatus ?? workflow.stage_states.todo,
-      after: issue.status,
+      after: issue.status_id,
     }];
   const value = {
     ...resultEnvelope(call),
@@ -586,14 +666,14 @@ function appliedRelationResult(call: CreateRelationCall, relation: TaskRelationS
 
 function issueFromCreate(call: CreateIssueCall, issueId: string, revision: string): TaskIssueSnapshot {
   void issueId;
-  return Object.freeze({
+  return taskIssue({
     issue_id: call.input.issue_id,
     revision: parseTaskRevision(revision),
-    status: call.input.desired.state_id,
+    status_id: call.input.desired.state_id,
     title: call.input.desired.title,
-    description: call.input.desired.description,
-    parent_id: call.input.parent_issue_id,
-    labels: call.input.desired.label_ids,
+    description_markdown: call.input.desired.description ?? "",
+    parent_issue_id: call.input.parent_issue_id,
+    label_ids: call.input.desired.label_ids,
     delegate_id: call.input.desired.delegate_id,
     priority: call.input.desired.priority,
   });
@@ -629,8 +709,8 @@ function materializedRequest(
   changeFirstWorkTitle = false,
   planStatus: "in_progress" | "done" = "in_progress",
   planRevision = planStatus === "done"
-    ? "revision:plan:done"
-    : `symphony:v1:${"1".repeat(64)}`,
+    ? planStatusIssue("done", "revision:plan:done").revision
+    : planStatusIssue("in_progress", "revision:plan:started-materialized").revision,
 ): CycleAdvanceRequest {
   const [contracts, runtime, verify] = createdIssues;
   assert.notEqual(contracts, undefined);
@@ -648,7 +728,7 @@ function materializedRequest(
       sealed_revision: issue.revision,
       kind: "work",
       title: issue.title,
-      description_markdown: issue.description,
+      description_markdown: issue.description_markdown,
       parent_cycle_id: cycleId,
     })),
     verify_issue: {
@@ -656,7 +736,7 @@ function materializedRequest(
       sealed_revision: verify!.revision,
       kind: "verify",
       title: verify!.title,
-      description_markdown: verify!.description,
+      description_markdown: verify!.description_markdown,
       parent_cycle_id: cycleId,
     },
     relations: createdRelations.map((relation) => ({
@@ -678,57 +758,57 @@ function planStatusIssue(
   status: "in_progress" | "done" | "failed" | "canceled",
   revision: string,
 ): TaskIssueSnapshot {
-  return Object.freeze({
+  return taskIssue({
     issue_id: parseTaskIssueId(planSource.issue_id),
     revision: parseTaskRevision(revision),
-    status: workflow.stage_states[status],
+    status_id: workflow.stage_states[status],
     title: planSource.title,
-    description: planSource.description_markdown,
-    parent_id: parseTaskIssueId(cycleId),
-    labels: [workflow.labels.plan],
+    description_markdown: planSource.description_markdown,
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: [workflow.labels.plan],
     delegate_id: null,
     priority: null,
   });
 }
 
 function failedCycleIssue(revision: string): TaskIssueSnapshot {
-  return Object.freeze({
+  return taskIssue({
     issue_id: parseTaskIssueId(cycleId),
     revision: parseTaskRevision(revision),
-    status: workflow.cycle_states.failed,
+    status_id: workflow.cycle_states.failed,
     title: "Approved Cycle",
-    description: specification.cycle_description_markdown,
-    parent_id: parseTaskIssueId(rootId),
-    labels: [workflow.labels.cycle],
+    description_markdown: specification.cycle_description_markdown,
+    parent_issue_id: parseTaskIssueId(rootId),
+    label_ids: [workflow.labels.cycle],
     delegate_id: null,
     priority: null,
   });
 }
 
 function singleWorkGraph() {
-  const work = Object.freeze({
+  const work = taskIssue({
     issue_id: parseTaskIssueId("WORK-ONLY"),
     revision: parseTaskRevision("revision:work:only:sealed"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: "Execute one Work item",
-    description: "## Work\n\nExecute the one sealed Work item.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.work]),
+    description_markdown: "## Work\n\nExecute the one sealed Work item.",
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.work]),
     delegate_id: null,
     priority: null,
   });
-  const verify = Object.freeze({
+  const verify = taskIssue({
     issue_id: parseTaskIssueId("VERIFY-ONLY"),
     revision: parseTaskRevision("revision:verify:only:sealed"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: "Verify one Work item",
-    description: "## Verify\n\nVerify the sealed Work item.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.verify]),
+    description_markdown: "## Verify\n\nVerify the sealed Work item.",
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.verify]),
     delegate_id: null,
     priority: null,
   });
-  const relation = Object.freeze({
+  const relation = taskRelation({
     relation_id: parseTaskRelationId("REL-WORK-ONLY"),
     revision: parseTaskRevision("revision:relation:work:only"),
     type: "blocks" as const,
@@ -742,7 +822,7 @@ function singleWorkGraph() {
       sealed_revision: work.revision,
       kind: "work",
       title: work.title,
-      description_markdown: work.description,
+      description_markdown: work.description_markdown,
       parent_cycle_id: cycleId,
     }],
     verify_issue: {
@@ -750,7 +830,7 @@ function singleWorkGraph() {
       sealed_revision: verify.revision,
       kind: "verify",
       title: verify.title,
-      description_markdown: verify.description,
+      description_markdown: verify.description_markdown,
       parent_cycle_id: cycleId,
     },
     relations: [{
@@ -823,10 +903,10 @@ interface ControlledCommitVerifyOptions {
 
 function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
   const fixture = singleWorkGraph();
-  const doneWork = Object.freeze({
+  const doneWork = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:only:done:controlled-verify"),
-    status: workflow.stage_states.done,
+    status_id: workflow.stage_states.done,
   });
   const repositoryId = parseRepositoryId("repo:controlled-commit-verify");
   const deliveryIdentity = createDeliveryIdentity({
@@ -889,19 +969,20 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
         : desired === workflow.stage_states.done
           ? "done"
           : "failed";
-      verifyRevision = parseTaskRevision(`revision:verify:controlled:${verifyStatus}`);
       events.push(`verify_${verifyStatus}`);
-      return appliedIssueResult(call, {
+      const issue = taskIssue({
         issue_id: parseTaskIssueId(initial.verify_issue!.issue_id),
-        revision: verifyRevision,
-        status: workflow.stage_states[verifyStatus],
+        revision: parseTaskRevision(`revision:verify:controlled:${verifyStatus}`),
+        status_id: workflow.stage_states[verifyStatus],
         title: initial.verify_issue!.title,
-        description: initial.verify_issue!.description_markdown,
-        parent_id: parseTaskIssueId(cycleId),
-        labels: [workflow.labels.verify],
+        description_markdown: initial.verify_issue!.description_markdown,
+        parent_issue_id: parseTaskIssueId(cycleId),
+        label_ids: [workflow.labels.verify],
         delegate_id: null,
         priority: null,
-      }, before);
+      });
+      verifyRevision = issue.revision;
+      return appliedIssueResult(call, issue, before);
     }
     assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
     const before = workflow.cycle_states[cycleStatus];
@@ -909,21 +990,20 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
     cycleStatus = desired === workflow.cycle_states.awaiting_acceptance
       ? "awaiting_acceptance"
       : "failed";
-    cycleRevision = parseTaskRevision(`symphony:v1:${cycleStatus === "awaiting_acceptance"
-      ? "7".repeat(64)
-      : "8".repeat(64)}`);
     events.push(`cycle_${cycleStatus}`);
-    return appliedIssueResult(call, {
+    const issue = taskIssue({
       issue_id: parseTaskIssueId(cycleId),
-      revision: cycleRevision,
-      status: workflow.cycle_states[cycleStatus],
+      revision: parseTaskRevision(`revision:cycle:controlled:${cycleStatus}`),
+      status_id: workflow.cycle_states[cycleStatus],
       title: "Approved Cycle",
-      description: specification.cycle_description_markdown,
-      parent_id: parseTaskIssueId(rootId),
-      labels: [workflow.labels.cycle],
+      description_markdown: specification.cycle_description_markdown,
+      parent_issue_id: parseTaskIssueId(rootId),
+      label_ids: [workflow.labels.cycle],
       delegate_id: null,
       priority: null,
-    }, before);
+    });
+    cycleRevision = issue.revision;
+    return appliedIssueResult(call, issue, before);
   };
 
   const commitOutcome = options.commit_outcome ?? "applied";
@@ -1211,17 +1291,7 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
   manager.create_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
     calls.push(call);
-    const issue = {
-      issue_id: call.input.issue_id,
-      revision: "revision:plan:created",
-      status: workflow.stage_states.todo,
-      title: call.input.desired.title,
-      description: call.input.desired.description,
-      parent_id: cycleId,
-      labels: [workflow.labels.plan],
-      delegate_id: null,
-      priority: null,
-    };
+    const issue = issueFromCreate(call, call.input.issue_id, "revision:plan:created");
     return parseTaskMcpResult({
       schema_version: call.schema_version,
       function: call.function,
@@ -1330,32 +1400,32 @@ test("active admission loss persists Stage-first cancellation and projects Cycle
     if (call.input.issue_id === parseTaskIssueId(request.plan_issue!.issue_id)) {
       assert.equal(call.input.desired.state_id, workflow.stage_states.canceled);
       events.push("stage_canceled");
-      return appliedIssueResult(call, {
+      return appliedIssueResult(call, taskIssue({
         ...request.plan_issue!,
         issue_id: parseTaskIssueId(request.plan_issue!.issue_id),
         revision: parseTaskRevision("revision:plan:canceled:admission"),
-        status: workflow.stage_states.canceled,
-        description: request.plan_issue!.description_markdown,
-        parent_id: parseTaskIssueId(cycleId),
-        labels: [workflow.labels.plan],
+        status_id: workflow.stage_states.canceled,
+        description_markdown: request.plan_issue!.description_markdown,
+        parent_issue_id: parseTaskIssueId(cycleId),
+        label_ids: [workflow.labels.plan],
         delegate_id: null,
         priority: null,
-      }, workflow.stage_states.in_progress);
+      }), workflow.stage_states.in_progress);
     }
     assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
     assert.equal(call.input.desired.state_id, workflow.cycle_states.canceled);
     events.push("cycle_canceled");
-    return appliedIssueResult(call, {
+    return appliedIssueResult(call, taskIssue({
       issue_id: parseTaskIssueId(cycleId),
       revision: parseTaskRevision("revision:cycle:canceled:admission"),
-      status: workflow.cycle_states.canceled,
+      status_id: workflow.cycle_states.canceled,
       title: "Approved Cycle",
-      description: specification.cycle_description_markdown,
-      parent_id: parseTaskIssueId(rootId),
-      labels: [workflow.labels.cycle],
+      description_markdown: specification.cycle_description_markdown,
+      parent_issue_id: parseTaskIssueId(rootId),
+      label_ids: [workflow.labels.cycle],
       delegate_id: null,
       priority: null,
-    }, workflow.cycle_states.in_progress);
+    }), workflow.cycle_states.in_progress);
   };
   const machine = new CyclePlanMachine({
     sealed_basis_reader: sealedBasisReader,
@@ -1487,31 +1557,31 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
     const state = call.input.desired.state_id;
     if (state === workflow.stage_states.in_progress) {
       events.push("plan_in_progress");
-      return appliedIssueResult(call, {
+      return appliedIssueResult(call, taskIssue({
         issue_id: parseTaskIssueId(planSource.issue_id),
-        revision: parseTaskRevision(`symphony:v1:${"1".repeat(64)}`),
-        status: workflow.stage_states.in_progress,
+        revision: parseTaskRevision("revision:plan:started-materialized"),
+        status_id: workflow.stage_states.in_progress,
         title: planSource.title,
-        description: planSource.description_markdown,
-        parent_id: parseTaskIssueId(cycleId),
-        labels: [workflow.labels.plan],
+        description_markdown: planSource.description_markdown,
+        parent_issue_id: parseTaskIssueId(cycleId),
+        label_ids: [workflow.labels.plan],
         delegate_id: null,
         priority: null,
-      });
+      }));
     }
     assert.equal(state, workflow.stage_states.done);
     events.push("plan_done");
-    return appliedIssueResult(call, {
+    return appliedIssueResult(call, taskIssue({
       issue_id: parseTaskIssueId(planSource.issue_id),
       revision: parseTaskRevision("revision:plan:done"),
-      status: workflow.stage_states.done,
+      status_id: workflow.stage_states.done,
       title: planSource.title,
-      description: planSource.description_markdown,
-      parent_id: parseTaskIssueId(cycleId),
-      labels: [workflow.labels.plan],
+      description_markdown: planSource.description_markdown,
+      parent_issue_id: parseTaskIssueId(cycleId),
+      label_ids: [workflow.labels.plan],
       delegate_id: null,
       priority: null,
-    }, workflow.stage_states.in_progress);
+    }), workflow.stage_states.in_progress);
   };
   manager.create_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
@@ -1531,7 +1601,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
   };
   manager.create_relation = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
-    const relation = Object.freeze({
+    const relation = taskRelation({
       relation_id: call.input.relation_id,
       revision: parseTaskRevision(`revision:relation:${createdRelations.length + 1}`),
       type: "blocks",
@@ -1632,29 +1702,29 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
     plan_title: planSource.title,
     plan_instruction_markdown: planSource.description_markdown,
   });
-  const workIssues = built.manifest.ordered_work_nodes.map((node, index) => Object.freeze({
+  const workIssues = built.manifest.ordered_work_nodes.map((node, index) => taskIssue({
     issue_id: node.issue_id,
     revision: parseTaskRevision(`revision:record:work:${index}`),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: node.title,
-    description: built.instructions_by_issue_id[node.issue_id]!,
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.work]),
+    description_markdown: built.instructions_by_issue_id[node.issue_id]!,
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.work]),
     delegate_id: null,
     priority: null,
   }));
-  const verifyIssue = Object.freeze({
+  const verifyIssue = taskIssue({
     issue_id: built.manifest.verify_issue_id,
     revision: parseTaskRevision("revision:record:verify"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: built.manifest.verify_node.title,
-    description: built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.verify]),
+    description_markdown: built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.verify]),
     delegate_id: null,
     priority: null,
   });
-  const relations = built.manifest.relations.map((relation, index) => Object.freeze({
+  const relations = built.manifest.relations.map((relation, index) => taskRelation({
     relation_id: parseTaskRelationId(relation.relation_id),
     revision: parseTaskRevision(`revision:record:relation:${index}`),
     type: "blocks" as const,
@@ -1668,7 +1738,7 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
       sealed_revision: issue.revision,
       kind: "work" as const,
       title: issue.title,
-      description_markdown: issue.description,
+      description_markdown: issue.description_markdown,
       parent_cycle_id: cycleId,
     })),
     verify_issue: {
@@ -1676,7 +1746,7 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
       sealed_revision: verifyIssue.revision,
       kind: "verify",
       title: verifyIssue.title,
-      description_markdown: verifyIssue.description,
+      description_markdown: verifyIssue.description_markdown,
       parent_cycle_id: cycleId,
     },
     relations: relations.map((relation) => ({
@@ -1757,10 +1827,10 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
     verify_issue: verifyIssue,
   });
   const planRecord = await writer.persistCompleted(planSnapshot, basis, built, execution);
-  const startedWork = Object.freeze({
+  const startedWork = taskIssue({
     ...workIssues[0]!,
     revision: parseTaskRevision(`symphony:v1:${"2".repeat(64)}`),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
   const workSnapshot = requestWithGraph(graph, {
     plan_status: "done",
@@ -1784,15 +1854,15 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
     sanitized_summary_markdown: parseMarkdownText("Work handoff is normalized."),
   };
   const workRecord = await writer.persistWork(workSnapshot, basis, built, workResult, execution);
-  const doneWorkIssues = workIssues.map((issue, index) => Object.freeze({
+  const doneWorkIssues = workIssues.map((issue, index) => taskIssue({
     ...issue,
     revision: parseTaskRevision(`revision:record:work:done:${index}`),
-    status: workflow.stage_states.done,
+    status_id: workflow.stage_states.done,
   }));
-  const startedVerify = Object.freeze({
+  const startedVerify = taskIssue({
     ...verifyIssue,
     revision: parseTaskRevision(`symphony:v1:${"3".repeat(64)}`),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
   const verifySnapshot = requestWithGraph(graph, {
     plan_status: "done",
@@ -1861,7 +1931,7 @@ for (const scenario of [
     const result = await fixture.machine.advance(planOnlyRequest(), LIVE_EXECUTION);
 
     assert.equal(result.outcome, "terminal_failed");
-    assert.equal(result.to_cycle_revision, parseTaskRevision("revision:cycle:failed"));
+    assert.equal(result.to_cycle_revision, failedCycleIssue("revision:cycle:failed").revision);
     assert.equal(fixture.performerCreates(), 1);
     assert.equal(fixture.createCount(), scenario[1]);
     assert.deepEqual(fixture.events.slice(-3), [
@@ -1930,7 +2000,7 @@ test("a structurally valid but changed aggregate read-back fails before Plan Don
   manager.create_relation = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
     const index = createdRelations.length + 1;
-    const relation = Object.freeze({
+    const relation = taskRelation({
       relation_id: call.input.relation_id,
       revision: parseTaskRevision(`revision:relation:readback:${index}`),
       type: "blocks",
@@ -2173,30 +2243,30 @@ test("restart continues an exact persisted Plan manifest without rerunning Plan 
     plan_instruction_markdown: planSource.description_markdown,
   });
   const issues: TaskIssueSnapshot[] = [
-    ...built.manifest.ordered_work_nodes.map((node, index) => Object.freeze({
+    ...built.manifest.ordered_work_nodes.map((node, index) => taskIssue({
       issue_id: parseTaskIssueId(node.issue_id),
       revision: parseTaskRevision(`revision:restart:work:${index}`),
-      status: workflow.stage_states.todo,
+      status_id: workflow.stage_states.todo,
       title: node.title,
-      description: built.instructions_by_issue_id[node.issue_id]!,
-      parent_id: parseTaskIssueId(cycleId),
-      labels: Object.freeze([workflow.labels.work]),
+      description_markdown: built.instructions_by_issue_id[node.issue_id]!,
+      parent_issue_id: parseTaskIssueId(cycleId),
+      label_ids: Object.freeze([workflow.labels.work]),
       delegate_id: null,
       priority: null,
     })),
-    Object.freeze({
+    taskIssue({
       issue_id: parseTaskIssueId(built.manifest.verify_issue_id),
       revision: parseTaskRevision("revision:restart:verify"),
-      status: workflow.stage_states.todo,
+      status_id: workflow.stage_states.todo,
       title: built.manifest.verify_node.title,
-      description: built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
-      parent_id: parseTaskIssueId(cycleId),
-      labels: Object.freeze([workflow.labels.verify]),
+      description_markdown: built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
+      parent_issue_id: parseTaskIssueId(cycleId),
+      label_ids: Object.freeze([workflow.labels.verify]),
       delegate_id: null,
       priority: null,
     }),
   ];
-  const relations = built.manifest.relations.map((relation, index) => Object.freeze({
+  const relations = built.manifest.relations.map((relation, index) => taskRelation({
     relation_id: parseTaskRelationId(relation.relation_id),
     revision: parseTaskRevision(`revision:restart:relation:${index}`),
     type: "blocks" as const,
@@ -2254,22 +2324,22 @@ for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
     ? "fresh complete Awaiting Acceptance ignores lost live context"
     : `lost ${lostPhase} execution context closes active status and fails the Cycle`, async () => {
     const fixture = singleWorkGraph();
-    const doneWork = Object.freeze({
+    const doneWork = taskIssue({
       ...fixture.work,
       revision: parseTaskRevision("revision:work:only:done-before-restart"),
-      status: workflow.stage_states.done,
+      status_id: workflow.stage_states.done,
     });
     const verifyStatus = lostPhase === "verify" ? "in_progress" : "done";
-    const currentVerify = Object.freeze({
+    const currentVerify = taskIssue({
       ...fixture.verify,
       revision: parseTaskRevision(`revision:verify:only:${verifyStatus}-before-restart`),
-      status: workflow.stage_states[verifyStatus],
+      status_id: workflow.stage_states[verifyStatus],
     });
     const currentWork = lostPhase === "work"
-      ? Object.freeze({
+      ? taskIssue({
         ...fixture.work,
         revision: parseTaskRevision("revision:work:only:in-progress-before-restart"),
-        status: workflow.stage_states.in_progress,
+        status_id: workflow.stage_states.in_progress,
       })
       : doneWork;
     const current = requestWithGraph(fixture.graph, {
@@ -2297,11 +2367,11 @@ for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
       }
       const stage = lostPhase === "work" ? currentWork : currentVerify;
       events.push(`${lostPhase}_failed`);
-      return appliedIssueResult(call, {
+      return appliedIssueResult(call, taskIssue({
         ...stage,
         revision: parseTaskRevision(`revision:${lostPhase}:failed-after-restart`),
-        status: workflow.stage_states.failed,
-      }, workflow.stage_states.in_progress);
+        status_id: workflow.stage_states.failed,
+      }), workflow.stage_states.in_progress);
     };
     const machine = new CyclePlanMachine({
     sealed_basis_reader: sealedBasisReader,
@@ -2329,15 +2399,15 @@ for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
 
 test("restart projects a persisted Work completion without repeating the Work turn", async () => {
   const fixture = singleWorkGraph();
-  const activeWork = Object.freeze({
+  const activeWork = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:projection:active"),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
-  const doneWork = Object.freeze({
+  const doneWork = taskIssue({
     ...activeWork,
     revision: parseTaskRevision("revision:work:projection:done"),
-    status: workflow.stage_states.done,
+    status_id: workflow.stage_states.done,
   });
   const active = requestWithGraph(fixture.graph, {
     plan_status: "done",
@@ -2387,40 +2457,40 @@ test("restart projects a persisted Work completion without repeating the Work tu
 });
 
 test("ready Work advances in persisted manifest order through separate turns on one Cycle performer", async () => {
-  const workB = Object.freeze({
+  const workB = taskIssue({
     issue_id: parseTaskIssueId("WORK-B"),
     revision: parseTaskRevision("revision:work:b:sealed"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: "Second ready Work",
-    description: "## Work\n\nRun second after the identity-first ready Work.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.work]),
+    description_markdown: "## Work\n\nRun second after the identity-first ready Work.",
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.work]),
     delegate_id: null,
     priority: null,
   });
-  const workA = Object.freeze({
+  const workA = taskIssue({
     issue_id: parseTaskIssueId("WORK-A"),
     revision: parseTaskRevision("revision:work:a:sealed"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: "First ready Work",
-    description: "## Work\n\nRun this identity-first ready Work.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.work]),
+    description_markdown: "## Work\n\nRun this identity-first ready Work.",
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.work]),
     delegate_id: null,
     priority: null,
   });
-  const verify = Object.freeze({
+  const verify = taskIssue({
     issue_id: parseTaskIssueId("VERIFY-WORK"),
     revision: parseTaskRevision("revision:verify:sealed"),
-    status: workflow.stage_states.todo,
+    status_id: workflow.stage_states.todo,
     title: "Verify Work",
-    description: "## Verify\n\nVerify both Work items.",
-    parent_id: parseTaskIssueId(cycleId),
-    labels: Object.freeze([workflow.labels.verify]),
+    description_markdown: "## Verify\n\nVerify both Work items.",
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: Object.freeze([workflow.labels.verify]),
     delegate_id: null,
     priority: null,
   });
-  const relations = [workB, workA].map((work, index) => Object.freeze({
+  const relations = [workB, workA].map((work, index) => taskRelation({
     relation_id: parseTaskRelationId(`REL-WORK-${index + 1}`),
     revision: parseTaskRevision(`revision:relation:work:${index + 1}`),
     type: "blocks" as const,
@@ -2434,7 +2504,7 @@ test("ready Work advances in persisted manifest order through separate turns on 
       sealed_revision: work.revision,
       kind: "work" as const,
       title: work.title,
-      description_markdown: work.description,
+      description_markdown: work.description_markdown,
       parent_cycle_id: cycleId,
     })),
     verify_issue: {
@@ -2442,7 +2512,7 @@ test("ready Work advances in persisted manifest order through separate turns on 
       sealed_revision: verify.revision,
       kind: "verify",
       title: verify.title,
-      description_markdown: verify.description,
+      description_markdown: verify.description_markdown,
       parent_cycle_id: cycleId,
     },
     relations: relations.map((relation) => ({
@@ -2458,25 +2528,25 @@ test("ready Work advances in persisted manifest order through separate turns on 
     work_issues: [workB, workA],
     verify_issue: verify,
   });
-  const startedA = Object.freeze({
+  const startedA = taskIssue({
     ...workA,
     revision: parseTaskRevision("revision:work:a:started"),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
-  const doneA = Object.freeze({
+  const doneA = taskIssue({
     ...workA,
     revision: parseTaskRevision("revision:work:a:done"),
-    status: workflow.stage_states.done,
+    status_id: workflow.stage_states.done,
   });
-  const startedB = Object.freeze({
+  const startedB = taskIssue({
     ...workB,
     revision: parseTaskRevision("revision:work:b:started"),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
-  const doneB = Object.freeze({
+  const doneB = taskIssue({
     ...workB,
     revision: parseTaskRevision("revision:work:b:done"),
-    status: workflow.stage_states.done,
+    status_id: workflow.stage_states.done,
   });
   const afterB = requestWithGraph(graph, {
     plan_status: "done",
@@ -2716,16 +2786,16 @@ test("ready Work advances in persisted manifest order through separate turns on 
 for (const scenario of ["failed", "canceled", "invalid"] as const) {
   test(`${scenario} Work output closes the Work status and fails the Cycle`, async () => {
     const fixture = singleWorkGraph();
-    const started = Object.freeze({
+    const started = taskIssue({
       ...fixture.work,
       revision: parseTaskRevision(`revision:work:only:started:${scenario}`),
-      status: workflow.stage_states.in_progress,
+      status_id: workflow.stage_states.in_progress,
     });
     const terminalStatus = scenario === "canceled" ? "canceled" : "failed";
-    const terminal = Object.freeze({
+    const terminal = taskIssue({
       ...fixture.work,
       revision: parseTaskRevision(`revision:work:only:${terminalStatus}:${scenario}`),
-      status: workflow.stage_states[terminalStatus],
+      status_id: workflow.stage_states[terminalStatus],
     });
     const events: string[] = [];
     const manager = unexpectedManager();
@@ -2821,12 +2891,12 @@ for (const scenario of ["failed", "canceled", "invalid"] as const) {
 
 test("a mismatched aggregate Work status read-back fails before performer creation", async () => {
   const fixture = singleWorkGraph();
-  const appliedStart = Object.freeze({
+  const appliedStart = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:only:started:applied"),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
-  const changedStart = Object.freeze({
+  const changedStart = taskIssue({
     ...appliedStart,
     revision: parseTaskRevision("revision:work:only:started:changed"),
   });
@@ -2877,15 +2947,15 @@ test("a mismatched aggregate Work status read-back fails before performer creati
 
 test("a cross-Cycle Work performer is closed before any turn and fails the current Cycle", async () => {
   const fixture = singleWorkGraph();
-  const started = Object.freeze({
+  const started = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:only:started:cross-cycle"),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
-  const failed = Object.freeze({
+  const failed = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:only:failed:cross-cycle"),
-    status: workflow.stage_states.failed,
+    status_id: workflow.stage_states.failed,
   });
   const events: string[] = [];
   const manager = unexpectedManager();
@@ -2991,10 +3061,10 @@ test("retirement revokes an active Work Task boundary before its provider effect
 
 test("retirement closes the active Work performer and fences its late result from Task effects", async () => {
   const fixture = singleWorkGraph();
-  const started = Object.freeze({
+  const started = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:only:started:retired"),
-    status: workflow.stage_states.in_progress,
+    status_id: workflow.stage_states.in_progress,
   });
   const events: string[] = [];
   let releaseWork: (() => void) | undefined;
@@ -3118,10 +3188,10 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
   assert.equal(dirty.workspace_state, "dirty");
 
   const fixture = singleWorkGraph();
-  const doneWork = Object.freeze({
+  const doneWork = taskIssue({
     ...fixture.work,
     revision: parseTaskRevision("revision:work:only:done:commit-verify"),
-    status: workflow.stage_states.done,
+    status_id: workflow.stage_states.done,
   });
   const initial = bindCycleAdvanceRequest({
     ...fixture.snapshot(doneWork, "done"),
@@ -3152,40 +3222,42 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
       verifyStatus = call.input.desired.state_id === workflow.stage_states.in_progress
         ? "in_progress"
         : "done";
-      verifyRevision = parseTaskRevision(
-        verifyStatus === "in_progress"
-          ? "revision:verify:started:commit-verify"
-          : "revision:verify:done:commit-verify",
-      );
       events.push(`verify_${verifyStatus}`);
-      return appliedIssueResult(call, {
+      const issue = taskIssue({
         issue_id: parseTaskIssueId(initial.verify_issue!.issue_id),
-        revision: verifyRevision,
-        status: workflow.stage_states[verifyStatus],
+        revision: parseTaskRevision(
+          verifyStatus === "in_progress"
+            ? "revision:verify:started:commit-verify"
+            : "revision:verify:done:commit-verify",
+        ),
+        status_id: workflow.stage_states[verifyStatus],
         title: initial.verify_issue!.title,
-        description: initial.verify_issue!.description_markdown,
-        parent_id: parseTaskIssueId(cycleId),
-        labels: [workflow.labels.verify],
+        description_markdown: initial.verify_issue!.description_markdown,
+        parent_issue_id: parseTaskIssueId(cycleId),
+        label_ids: [workflow.labels.verify],
         delegate_id: null,
         priority: null,
-      }, before);
+      });
+      verifyRevision = issue.revision;
+      return appliedIssueResult(call, issue, before);
     }
     assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
     assert.equal(call.input.desired.state_id, workflow.cycle_states.awaiting_acceptance);
     cycleStatus = "awaiting_acceptance";
-    cycleRevision = parseTaskRevision("revision:cycle:awaiting-acceptance:commit-verify");
     events.push("cycle_awaiting_acceptance");
-    return appliedIssueResult(call, {
+    const issue = taskIssue({
       issue_id: parseTaskIssueId(cycleId),
-      revision: cycleRevision,
-      status: workflow.cycle_states.awaiting_acceptance,
+      revision: parseTaskRevision("revision:cycle:awaiting-acceptance:commit-verify"),
+      status_id: workflow.cycle_states.awaiting_acceptance,
       title: "Approved Cycle",
-      description: specification.cycle_description_markdown,
-      parent_id: parseTaskIssueId(rootId),
-      labels: [workflow.labels.cycle],
+      description_markdown: specification.cycle_description_markdown,
+      parent_issue_id: parseTaskIssueId(rootId),
+      label_ids: [workflow.labels.cycle],
       delegate_id: null,
       priority: null,
-    }, workflow.cycle_states.in_progress);
+    });
+    cycleRevision = issue.revision;
+    return appliedIssueResult(call, issue, workflow.cycle_states.in_progress);
   };
   const gitWorkspace: GitWorkspaceInterface = {
     prepare: (request) => workspace.prepare(request),

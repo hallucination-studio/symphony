@@ -13,7 +13,7 @@ import {
 import type {
   TaskIssueSnapshot,
   TaskRelationSnapshot,
-} from "../../contracts/observation.js";
+} from "../../contracts/task-management.js";
 import type {
   TaskManageCallerIssuer,
   TaskWorkflowIdentities,
@@ -117,8 +117,8 @@ function appliedRelation(output: TaskMutationOutput): TaskRelationSnapshot {
 }
 
 function description(issue: TaskIssueSnapshot): string {
-  if (issue.description === null) throw new Error("materialized_issue_description_missing");
-  return issue.description;
+  if (issue.description_markdown === null) throw new Error("materialized_issue_description_missing");
+  return issue.description_markdown;
 }
 
 function expectedGraph(
@@ -162,31 +162,35 @@ function expectedGraph(
   }, request.cycle_id);
 }
 
-function sameIssue(actual: TaskIssueSnapshot, expected: TaskIssueSnapshot): boolean {
+type ExpectedStageIssue = Pick<TaskIssueSnapshot,
+  "issue_id" | "revision" | "status_id" | "title" | "description_markdown" |
+  "parent_issue_id" | "label_ids" | "delegate_id" | "priority">;
+
+function sameIssue(actual: ExpectedStageIssue, expected: ExpectedStageIssue): boolean {
   return actual.issue_id === expected.issue_id
     && actual.revision === expected.revision
     && actual.title === expected.title
-    && actual.description === expected.description
-    && actual.parent_id === expected.parent_id
-    && actual.status === expected.status
+    && actual.description_markdown === expected.description_markdown
+    && actual.parent_issue_id === expected.parent_issue_id
+    && actual.status_id === expected.status_id
     && actual.delegate_id === expected.delegate_id
     && actual.priority === expected.priority
-    && actual.labels.length === expected.labels.length
-    && actual.labels.every((label, index) => label === expected.labels[index]);
+    && actual.label_ids.length === expected.label_ids.length
+    && actual.label_ids.every((label, index) => label === expected.label_ids[index]);
 }
 
 function stageIssue(
   stage: NonNullable<CycleAdvanceRequest["plan_issue"]>,
   workflow: TaskWorkflowIdentities,
-): TaskIssueSnapshot {
+): ExpectedStageIssue {
   return Object.freeze({
     issue_id: parseTaskIssueId(stage.issue_id),
     revision: stage.revision,
-    status: workflow.stage_states[stage.status],
+    status_id: workflow.stage_states[stage.status],
     title: stage.title,
-    description: stage.description_markdown,
-    parent_id: parseTaskIssueId(stage.parent_cycle_id),
-    labels: Object.freeze([workflow.labels[stage.kind]]),
+    description_markdown: stage.description_markdown,
+    parent_issue_id: parseTaskIssueId(stage.parent_cycle_id),
+    label_ids: Object.freeze([workflow.labels[stage.kind]]),
     delegate_id: null,
     priority: null,
   });

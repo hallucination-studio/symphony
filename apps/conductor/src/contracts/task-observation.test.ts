@@ -5,44 +5,79 @@ import { parseRootIssueId, parseRuntimeGeneration } from "./identity.js";
 import {
   parseRootBootstrap,
   parseTaskObservationEvent,
-  parseTaskSnapshot,
 } from "./observation.js";
+import { canonicalTaskRevision, parseTaskSnapshot } from "./task-management.js";
+
+const observedAt = "2026-07-30T10:00:00.000Z";
+const workflowStateMap = {
+  team_id: "team:1",
+  revision: `symphony:v1:${"1".repeat(64)}`,
+  todo_state_id: "state:todo",
+  draft_state_id: "state:draft",
+  in_progress_state_id: "state:in-progress",
+  awaiting_acceptance_state_id: "state:awaiting-acceptance",
+  in_review_state_id: "state:in-review",
+  done_state_id: "state:done",
+  succeeded_state_id: "state:succeeded",
+  rejected_state_id: "state:rejected",
+  failed_state_id: "state:failed",
+  canceled_state_id: "state:canceled",
+} as const;
+
+function issue(fields: {
+  readonly issue_id: string;
+  readonly kind: "root" | "cycle";
+  readonly status_id: string;
+  readonly status: "In Progress";
+  readonly title: string;
+  readonly description_markdown: string;
+  readonly parent_issue_id: string | null;
+  readonly label_ids: readonly string[];
+  readonly priority: number;
+}) {
+  const canonicalFields = {
+    ...fields,
+    provider_created_at: observedAt,
+    provider_updated_at: observedAt,
+    creation_actor_id: "actor:1",
+    delegate_id: "actor:1",
+    archived: false,
+    trashed: false,
+  };
+  return { ...canonicalFields, revision: canonicalTaskRevision(canonicalFields) };
+}
 
 const task = {
   root_id: "LIN-1",
+  workflow_state_map: workflowStateMap,
   issues: [
-    {
+    issue({
       issue_id: "LIN-1",
-      revision: "revision:root:1",
+      kind: "root",
+      status_id: workflowStateMap.in_progress_state_id,
       status: "In Progress",
       title: "Deliver the requested change",
-      description: null,
-      parent_id: null,
-      labels: ["symphony:kind/root"],
-      delegate_id: "actor:1",
+      description_markdown: "# Root\n\nDeliver the requested change.",
+      parent_issue_id: null,
+      label_ids: ["label:root"],
       priority: 1,
-    },
-    {
+    }),
+    issue({
       issue_id: "LIN-2",
-      revision: "revision:cycle:1",
-      status: "Executing",
+      kind: "cycle",
+      status_id: workflowStateMap.in_progress_state_id,
+      status: "In Progress",
       title: "Cycle 1",
-      description: "Current attempt",
-      parent_id: "LIN-1",
-      labels: ["symphony:kind/cycle"],
-      delegate_id: "actor:1",
+      description_markdown: "# Cycle\n\nCurrent attempt.",
+      parent_issue_id: "LIN-1",
+      label_ids: ["label:cycle"],
       priority: 2,
-    },
+    }),
   ],
-  relations: [
-    {
-      relation_id: "relation:1",
-      revision: "revision:relation:1",
-      type: "blocks",
-      source_issue_id: "LIN-1",
-      target_issue_id: "LIN-2",
-    },
-  ],
+  relations: [],
+  resource_creation_evidence: [],
+  issue_history: [],
+  issue_record_observations: [],
 };
 
 const git = {
@@ -169,8 +204,7 @@ test("TaskObservationEvent rejects provider, runtime, incomplete, and non-adjace
 test("TaskSnapshot contains only a complete normalized issue and relation graph", () => {
   const snapshot = parseTaskSnapshot(task);
 
-  assert.equal(snapshot.issues[1]?.parent_id, "LIN-1");
-  assert.equal(snapshot.relations[0]?.source_issue_id, "LIN-1");
+  assert.equal(snapshot.issues[1]?.parent_issue_id, "LIN-1");
   assert.ok(Object.isFrozen(snapshot.issues));
   assert.throws(
     () => parseTaskSnapshot({ ...task, provider: { sdk: true } }),
@@ -186,7 +220,10 @@ test("TaskSnapshot contains only a complete normalized issue and relation graph"
   );
   assert.throws(
     () => parseTaskSnapshot({ ...task, issues: task.issues.map((issue, index) => index === 1
-      ? { ...issue, parent_id: "LIN-99" }
+      ? (() => {
+        const { revision: _revision, ...fields } = { ...issue, parent_issue_id: "LIN-99" };
+        return { ...fields, revision: canonicalTaskRevision(fields) };
+      })()
       : issue) }),
     /unknown_parent_identity/u,
   );

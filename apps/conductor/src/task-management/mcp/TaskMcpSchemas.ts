@@ -19,13 +19,15 @@ import {
   type TaskStateId,
 } from "../../contracts/identity.js";
 import {
-  parseTaskIssueSnapshot,
-  parseTaskRelationSnapshot,
   parseConcreteTaskChange,
   type ConcreteTaskChange,
+} from "../../contracts/observation.js";
+import {
+  parseTaskIssueSnapshotChange,
+  parseTaskRelationSnapshot,
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
-} from "../../contracts/observation.js";
+} from "../../contracts/task-management.js";
 import { assertRuntimeTarget, type RuntimeTarget } from "../../contracts/runtime.js";
 import { asRecord, assertExactKeys, parseArray, parseBoundedString, parseEnum, parseStringArray } from "../../contracts/validation.js";
 
@@ -555,7 +557,7 @@ function parseMutationOutput(value: unknown, call: TaskMcpMutationCall): TaskMut
   let freshResource: TaskIssueSnapshot | TaskRelationSnapshot | null = null;
   if (record.fresh_resource !== null) {
     freshResource = mutationTarget.kind === "issue"
-      ? parseTaskIssueSnapshot(record.fresh_resource)
+      ? parseTaskIssueSnapshotChange(record.fresh_resource)
       : parseTaskRelationSnapshot(record.fresh_resource);
     const resourceMatches = mutationTarget.kind === "issue"
       ? "issue_id" in freshResource && freshResource.issue_id === mutationTarget.issue_id
@@ -721,17 +723,17 @@ export function parseTaskMcpResult(value: unknown, call: TaskMcpCall): TaskMcpRe
     const output = asRecord(record.output);
     assertExactKeys(output, ["issue"]);
     return Object.freeze({ ...parseCallEnvelope(record, call.function, call), output: Object.freeze({
-      issue: output.issue === null ? null : parseTaskIssueSnapshot(output.issue),
+      issue: output.issue === null ? null : parseTaskIssueSnapshotChange(output.issue),
     }) });
   }
   if (call.function === "list_issues") {
-    const page = parsePageOutput(record.output, "issues", parseTaskIssueSnapshot, call.input.page_size);
+    const page = parsePageOutput(record.output, "issues", parseTaskIssueSnapshotChange, call.input.page_size);
     return Object.freeze({ ...parseCallEnvelope(record, call.function, call), output: Object.freeze({
       issues: page.items, next_cursor: page.next_cursor,
     }) });
   }
   if (call.function === "list_children") {
-    const page = parsePageOutput(record.output, "issues", parseTaskIssueSnapshot, call.input.page_size);
+    const page = parsePageOutput(record.output, "issues", parseTaskIssueSnapshotChange, call.input.page_size);
     return Object.freeze({ ...parseCallEnvelope(record, call.function, call), output: Object.freeze({
       issues: page.items, next_cursor: page.next_cursor,
     }) });

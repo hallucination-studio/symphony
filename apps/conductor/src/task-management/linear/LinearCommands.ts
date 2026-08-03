@@ -8,9 +8,8 @@ import {
 } from "../../contracts/identity.js";
 import {
   type ConcreteTaskChange,
-  type TaskIssueSnapshot,
-  type TaskRelationSnapshot,
 } from "../../contracts/observation.js";
+import type { TaskIssueSnapshot, TaskRelationSnapshot } from "../../contracts/task-management.js";
 import { parseBoundedString } from "../../contracts/validation.js";
 import { taskIssueChanges } from "../../observation/TaskFacts.js";
 import type { TaskManageBoundaryExecution } from "../api/TaskManageCommandInterface.js";
@@ -258,7 +257,7 @@ export class LinearCommands {
     const matches = !after.archived
       && !after.trashed
       && after.creatorId === this.#serviceActorId
-      && after.snapshot.parent_id === call.input.parent_issue_id
+      && after.snapshot.parent_issue_id === call.input.parent_issue_id
       && linearIssueMatches(after.snapshot, {
         title: call.input.desired.title,
         description: call.input.desired.description,

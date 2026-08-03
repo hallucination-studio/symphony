@@ -9,9 +9,8 @@ import {
 } from "../contracts/identity.js";
 import {
   parseGitSnapshot,
-  parseTaskSnapshot,
-  type TaskSnapshot,
 } from "../contracts/observation.js";
+import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { LinearObserver } from "../task-management/linear/LinearObserver.js";
