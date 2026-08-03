@@ -26,6 +26,7 @@ import type { LinearQueryClient } from "./LinearQueries.js";
 const RELATION_CURSOR_PREFIX = "relation:";
 type IssueCreateInput = Parameters<LinearClient["createIssue"]>[0];
 type IssueUpdateInput = Parameters<LinearClient["updateIssue"]>[1];
+type CommentCreateInput = Parameters<LinearClient["createComment"]>[0];
 
 function projectedPage<T, U>(connection: {
   readonly nodes: readonly T[];
@@ -289,6 +290,15 @@ export class LinearSdkQueryClient implements LinearQueryClient, LinearCommandCli
       priority: input.priority,
     };
     return mutationReceipt(await this.client.createIssue(sdkInput));
+  }
+
+  async createIssueComment(input: { readonly id: string; readonly issue_id: string; readonly body_markdown: string }) {
+    const sdkInput: CommentCreateInput = {
+      id: input.id,
+      issueId: input.issue_id,
+      body: input.body_markdown,
+    };
+    return mutationReceipt(await this.client.createComment(sdkInput));
   }
 
   async updateIssue(issueId: string, input: LinearUpdateIssueInput): Promise<unknown> {

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   parseTaskIssueId,
   parseTaskRelationId,
@@ -18,6 +20,8 @@ import {
   type ArchiveIssueResult,
   type CreateIssueCall,
   type CreateIssueResult,
+  type CreateIssueCommentCall,
+  type CreateIssueCommentResult,
   type CreateRelationCall,
   type CreateRelationResult,
   type DeleteRelationCall,
@@ -26,6 +30,7 @@ import {
   type TaskMcpMutationResult,
   type TaskMutationOutput,
   type TaskMutationTarget,
+  type TaskCommentResource,
   type UpdateIssueCall,
   type UpdateIssueDesired,
   type UpdateIssueResult,
@@ -79,11 +84,18 @@ export interface LinearCreateRelationInput {
   readonly target_issue_id: string;
 }
 
+export interface LinearCreateIssueCommentInput {
+  readonly id: string;
+  readonly issue_id: string;
+  readonly body_markdown: string;
+}
+
 export interface LinearCommandClient {
   getIssue(issueId: string): Promise<unknown>;
   readIssue(issueId: string): Promise<unknown>;
   listRelations(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
   createIssue(input: LinearCreateIssueInput): Promise<unknown>;
+  createIssueComment(input: LinearCreateIssueCommentInput): Promise<unknown>;
   updateIssue(issueId: string, input: LinearUpdateIssueInput): Promise<unknown>;
   archiveIssue(issueId: string): Promise<unknown>;
   createRelation(input: LinearCreateRelationInput): Promise<unknown>;
@@ -105,7 +117,7 @@ interface LinearMutationEvidence {
   readonly comments: readonly LinearIssueCommentEvidence[];
 }
 
-function resultEnvelope(call: TaskMcpMutationCall) {
+function resultEnvelope(call: TaskMcpMutationCall | CreateIssueCommentCall) {
   return {
     schema_version: call.schema_version,
     function: call.function,
@@ -134,22 +146,74 @@ export class LinearCommands {
   }
 
   execute(call: CreateIssueCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueResult>;
+  execute(call: CreateIssueCommentCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueCommentResult>;
   execute(call: UpdateIssueCall, execution: TaskManageBoundaryExecution): Promise<UpdateIssueResult>;
   execute(call: ArchiveIssueCall, execution: TaskManageBoundaryExecution): Promise<ArchiveIssueResult>;
   execute(call: CreateRelationCall, execution: TaskManageBoundaryExecution): Promise<CreateRelationResult>;
   execute(call: DeleteRelationCall, execution: TaskManageBoundaryExecution): Promise<DeleteRelationResult>;
   execute(call: TaskMcpMutationCall, execution: TaskManageBoundaryExecution): Promise<TaskMcpMutationResult>;
   async execute(
-    call: TaskMcpMutationCall,
+    call: TaskMcpMutationCall | CreateIssueCommentCall,
     execution: TaskManageBoundaryExecution,
-  ): Promise<TaskMcpMutationResult> {
+  ): Promise<TaskMcpMutationResult | CreateIssueCommentResult> {
     switch (call.function) {
       case "create_issue": return this.#createIssue(call, execution);
       case "update_issue": return this.#updateIssue(call, execution);
       case "archive_issue": return this.#archiveIssue(call, execution);
+      case "create_issue_comment": return this.#createIssueComment(call, execution);
       case "create_relation": return this.#createRelation(call, execution);
       case "delete_relation": return this.#deleteRelation(call, execution);
     }
+  }
+
+  async #createIssueComment(
+    call: CreateIssueCommentCall,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<CreateIssueCommentResult> {
+    const issue = await this.#preconditionIssue(call.input.issue_id);
+    if (issue === null) return this.#commentResult(call, "not_applied", null, "fresh_precondition_unavailable");
+    if (issue.snapshot.revision !== call.input.expected_issue_revision) {
+      return this.#commentResult(call, "stale_before_effect", null, "fresh_precondition_mismatch");
+    }
+    let before: readonly LinearIssueCommentEvidence[];
+    try {
+      before = await this.evidenceReader.readIssueComments(call.input.issue_id);
+      this.#assertUniqueComments(before, call.input.issue_id);
+    } catch {
+      return this.#commentResult(call, "not_applied", null, "fresh_precondition_unavailable");
+    }
+    const existing = before.find(({ comment_id }) => comment_id === call.input.comment_id);
+    if (existing !== undefined) {
+      return this.#commentResult(call, "stale_before_effect", this.#commentResource(existing), "fresh_precondition_mismatch");
+    }
+
+    const provider = await this.#effect(execution, () => this.client.createIssueComment({
+      id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      body_markdown: call.input.body_markdown,
+    }));
+    let after: readonly LinearIssueCommentEvidence[];
+    try {
+      after = await this.evidenceReader.readIssueComments(call.input.issue_id);
+      this.#assertUniqueComments(after, call.input.issue_id);
+    } catch {
+      return this.#commentResult(call, "conflict_observed", null, "fresh_readback_unavailable");
+    }
+    const created = after.find(({ comment_id }) => comment_id === call.input.comment_id);
+    const expectedDigest = createHash("sha256").update(call.input.body_markdown, "utf8").digest("hex");
+    const exact = created !== undefined
+      && created.actor_id === this.#serviceActorId
+      && created.provider_archived_at === null
+      && created.provider_edited_at === null
+      && created.provider_updated_at === created.provider_created_at
+      && created.body_digest === expectedDigest
+      && this.#onlyExpectedCommentAdded(before, after, call.input.comment_id);
+    const fresh = created === undefined ? null : this.#commentResource(created);
+    if (exact && provider !== "rejected") return this.#commentResult(call, "applied", fresh, null);
+    const reason = provider === "rejected"
+      ? "provider_rejected_with_unexpected_readback"
+      : created === undefined ? "fresh_postcondition_mismatch" : "unexpected_post_effect_evidence";
+    return this.#commentResult(call, "conflict_observed", fresh, reason);
   }
 
   async #createIssue(call: CreateIssueCall, execution: TaskManageBoundaryExecution): Promise<CreateIssueResult> {
@@ -501,6 +565,51 @@ export class LinearCommands {
     const beforeComments = new Map(before.comments.map((entry) => [entry.comment_id, JSON.stringify(entry)]));
     if (beforeComments.size !== after.comments.length) return true;
     return after.comments.some((entry) => beforeComments.get(entry.comment_id) !== JSON.stringify(entry));
+  }
+
+  #assertUniqueComments(comments: readonly LinearIssueCommentEvidence[], issueId: TaskIssueId): void {
+    const ids = new Set<string>();
+    for (const comment of comments) {
+      if (comment.issue_id !== issueId || ids.has(comment.comment_id)) throw new Error("linear_comment_identity_mismatch");
+      ids.add(comment.comment_id);
+    }
+  }
+
+  #onlyExpectedCommentAdded(
+    before: readonly LinearIssueCommentEvidence[],
+    after: readonly LinearIssueCommentEvidence[],
+    commentId: string,
+  ): boolean {
+    if (after.length !== before.length + 1) return false;
+    const afterById = new Map(after.map((comment) => [comment.comment_id, JSON.stringify(comment)]));
+    return before.every((comment) => afterById.get(comment.comment_id) === JSON.stringify(comment))
+      && after.filter((comment) => comment.comment_id === commentId).length === 1;
+  }
+
+  #commentResource(comment: LinearIssueCommentEvidence): TaskCommentResource {
+    return Object.freeze({ ...comment, issue_id: parseTaskIssueId(comment.issue_id) });
+  }
+
+  #commentResult(
+    call: CreateIssueCommentCall,
+    outcome: CreateIssueCommentResult["output"]["outcome"],
+    freshComment: TaskCommentResource | null,
+    reason: string | null,
+  ): CreateIssueCommentResult {
+    return parseTaskMcpResult({
+      ...resultEnvelope(call),
+      output: Object.freeze({
+        outcome,
+        effect_may_have_occurred: outcome === "applied" || outcome === "conflict_observed",
+        target: Object.freeze({
+          kind: "comment",
+          comment_id: call.input.comment_id,
+          issue_id: call.input.issue_id,
+        }),
+        fresh_comment: freshComment,
+        sanitized_reason: reason,
+      }),
+    }, call);
   }
 
   async #readRelation(issueId: TaskIssueId, relationId: TaskRelationId): Promise<TaskRelationSnapshot | null> {

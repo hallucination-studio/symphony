@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -29,6 +30,10 @@ import {
   type SealedExecutionGraph,
 } from "../../contracts/cycle.js";
 import {
+  parseCycleApprovalRecord,
+  parseCycleSpecification as parseRecordCycleSpecification,
+} from "../../contracts/cycle-records.js";
+import {
   parsePlanResult,
   parseVerifyResult,
   parseWorkResult,
@@ -45,11 +50,13 @@ import type {
   TaskRelationSnapshot,
 } from "../../contracts/observation.js";
 import type { MutationResult } from "../../contracts/mutation.js";
+import { parseMarkdownText } from "../../contracts/validation.js";
 import {
   createTaskManageCallerAuthority,
   parseTaskWorkflowIdentities,
 } from "../../task-management/api/TaskManageCapability.js";
 import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
+import type { LinearIssueRecordComment } from "../../task-management/linear/LinearQueries.js";
 import {
   parseTaskMcpResult,
   type CreateIssueCall,
@@ -64,6 +71,8 @@ import type { GitWorkspaceInterface } from "../../git/api/GitWorkspaceInterface.
 import { GitWorktree } from "../../git/internal/GitWorktree.js";
 import { bindCycleAdvanceRequest } from "./CycleMachine.js";
 import { CyclePlanMachine } from "./CyclePlanMachine.js";
+import { buildPlanGraphManifest, type BuiltPlanGraphManifest } from "./PlanGraphManifest.js";
+import { PlanCompletionRecordWriter } from "./PlanCompletionRecord.js";
 
 const exec = promisify(execFile);
 
@@ -190,6 +199,105 @@ const specification = sealCycleSpecification({
   root_adr_markdown: rootDefinition.root_adr_markdown,
   status: "in_progress",
 }, rootDefinition, specificationTarget);
+const recordDigest = (character: string): string => character.repeat(64);
+const recordSpecification = parseRecordCycleSpecification({
+  cycle_id: cycleId,
+  root_id: rootId,
+  predecessor_cycle_issue_id: null,
+  predecessor_terminal_record_id: "first_cycle",
+  approval_record_id: "22222222-2222-4222-8222-222222222222",
+  plan_issue_id: "33333333-3333-4333-8333-333333333333",
+  plan_completion_record_id: "44444444-4444-4444-8444-444444444444",
+  plan_invalidation_record_id: "55555555-5555-4555-8555-555555555555",
+  cycle_completion_record_id: "66666666-6666-4666-8666-666666666666",
+  cycle_invalidation_record_id: "77777777-7777-4777-8777-777777777777",
+  delivery_completion_record_id: "88888888-8888-4888-8888-888888888888",
+  delivery_invalidation_record_id: "99999999-9999-4999-8999-999999999999",
+  identity_derivation_version: "symphony-identity:v1",
+  workspace_base_revision: recordDigest("a"),
+  root_definition_revision: `symphony:v1:${recordDigest("b")}`,
+  cycle_specification_markdown: cycleDescription,
+  root_adr_markdown: rootDefinition.root_adr_markdown,
+  execution_directives: [
+    { directive_id: "contracts", instruction_markdown: "Implement the approved contracts.", depends_on_directive_ids: [], acceptance_criterion_ids: ["ac:contracts"] },
+    { directive_id: "runtime", instruction_markdown: "Wire the approved runtime behavior.", depends_on_directive_ids: ["contracts"], acceptance_criterion_ids: ["ac:runtime"] },
+  ],
+  approved_work_groups: [
+    { work_group_id: "contracts", directive_ids: ["contracts"], depends_on_work_group_ids: [] },
+    { work_group_id: "runtime", directive_ids: ["runtime"], depends_on_work_group_ids: ["contracts"] },
+  ],
+  verify_directives: [
+    { directive_id: "verify", instruction_markdown: "Verify every sealed acceptance criterion.", acceptance_criterion_ids: ["ac:contracts", "ac:runtime"] },
+  ],
+  specification_seal_digest: recordDigest("c"),
+});
+const recordApproval = parseCycleApprovalRecord({
+  record_id: recordSpecification.approval_record_id,
+  revision: `symphony:v1:${recordDigest("d")}`,
+  issue_id: recordSpecification.cycle_id,
+  cycle_id: recordSpecification.cycle_id,
+  actor_id: "actor:symphony",
+  created_at: "2026-08-02T01:00:00.000Z",
+  updated_at: "2026-08-02T01:00:00.000Z",
+  archived_at: null,
+  basis_issue_revision: `symphony:v1:${recordDigest("e")}`,
+  basis_status: "Draft",
+  basis_document_digest: recordDigest("f"),
+  record_kind: "cycle_approval",
+  identity_derivation_version: recordSpecification.identity_derivation_version,
+  predecessor_cycle_issue_id: null,
+  predecessor_terminal_record_id: "first_cycle",
+  plan_issue_id: recordSpecification.plan_issue_id,
+  plan_completion_record_id: recordSpecification.plan_completion_record_id,
+  plan_invalidation_record_id: recordSpecification.plan_invalidation_record_id,
+  cycle_completion_record_id: recordSpecification.cycle_completion_record_id,
+  cycle_invalidation_record_id: recordSpecification.cycle_invalidation_record_id,
+  delivery_completion_record_id: recordSpecification.delivery_completion_record_id,
+  delivery_invalidation_record_id: recordSpecification.delivery_invalidation_record_id,
+  specification_seal_digest: recordSpecification.specification_seal_digest,
+  workspace_base_revision: recordSpecification.workspace_base_revision,
+}, recordSpecification);
+const sealedBasisReader = Object.freeze({
+  readSealedCycleBasis: async () => Object.freeze({
+    specification: recordSpecification,
+    approval_record: recordApproval,
+  }),
+});
+const planCompletionRecordWriter = Object.freeze({
+  persistCompleted: async () => undefined,
+  persistPlanTerminal: async () => undefined,
+  readCompleted: async (snapshot: CycleAdvanceRequest) => snapshot.plan_issue?.status === "done"
+    ? (() => {
+      const built = buildPlanGraphManifest({
+        basis: { specification: recordSpecification, approval_record: recordApproval },
+        ordered_work_group_ids: ["contracts", "runtime"],
+        plan_title: snapshot.plan_issue.title,
+        plan_instruction_markdown: snapshot.plan_issue.description_markdown,
+      });
+      const orderedStages = [...snapshot.sealed_work_issues];
+      if (
+        orderedStages.length === built.manifest.ordered_work_nodes.length
+        && orderedStages.every((stage) => built.manifest.ordered_work_issue_ids.includes(parseTaskIssueId(stage.issue_id)))
+      ) return built;
+      const nodes = orderedStages.map((stage, index) => Object.freeze({
+        ...built.manifest.ordered_work_nodes[Math.min(index, built.manifest.ordered_work_nodes.length - 1)]!,
+        issue_id: parseTaskIssueId(stage.issue_id),
+      }));
+      return Object.freeze({
+        ...built,
+        manifest: Object.freeze({
+          ...built.manifest,
+          ordered_work_nodes: nodes,
+          ordered_work_issue_ids: nodes.map(({ issue_id }) => issue_id),
+        }),
+      }) as unknown as BuiltPlanGraphManifest;
+    })()
+    : null,
+  persistWork: async () => undefined,
+  persistVerify: async () => undefined,
+  persistPlanInvalidation: async () => undefined,
+  hasPlanInvalidation: async () => false,
+});
 const emptyGraph = parseSealedExecutionGraph({
   plan_issue: null,
   work_issues: [],
@@ -269,7 +377,7 @@ const unexpectedCommitVerifyDependencies = Object.freeze({
 });
 
 const planSource = Object.freeze({
-  issue_id: parseStageIssueId("PLAN-CREATED"),
+  issue_id: parseStageIssueId(recordSpecification.plan_issue_id),
   sealed_revision: parseTaskRevision("revision:plan:created"),
   kind: "plan" as const,
   title: "Plan approved Cycle",
@@ -490,23 +598,7 @@ function completedPerformer(events: string[]): PlanPerformerInterface {
         cycle_revision: request.cycle_revision,
         correlation_id: request.correlation_id,
         outcome: "completed",
-        plan_summary_markdown: "## Plan Summary\n\nImplement contracts before runtime wiring.",
-        work_items: [{
-          local_key: "contracts",
-          title: "Implement contracts",
-          description_markdown: "## Work\n\nImplement the approved contracts.",
-          depends_on_local_keys: [],
-        }, {
-          local_key: "runtime",
-          title: "Wire runtime",
-          description_markdown: "## Work\n\nWire the approved runtime behavior.",
-          depends_on_local_keys: ["contracts"],
-        }],
-        verify: {
-          title: "Verify approved Cycle",
-          description_markdown: "## Verify\n\nVerify every sealed acceptance criterion.",
-        },
-        traceability_markdown: "## Traceability\n\nContracts and runtime map to Verify evidence.",
+        ordered_work_group_ids: ["contracts", "runtime"],
         sanitized_reason: null,
       }, request);
     },
@@ -519,7 +611,9 @@ function materializedRequest(
   createdRelations: readonly TaskRelationSnapshot[],
   changeFirstWorkTitle = false,
   planStatus: "in_progress" | "done" = "in_progress",
-  planRevision = planStatus === "done" ? "revision:plan:done" : "revision:plan:started",
+  planRevision = planStatus === "done"
+    ? "revision:plan:done"
+    : `symphony:v1:${"1".repeat(64)}`,
 ): CycleAdvanceRequest {
   const [contracts, runtime, verify] = createdIssues;
   assert.notEqual(contracts, undefined);
@@ -859,6 +953,8 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
     },
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -942,6 +1038,7 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
   const manager = unexpectedManager();
   let createCount = 0;
   let firstCreatedIssueId: TaskIssueId | null = null;
+  let planInvalidated = false;
   manager.update_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
     if (call.input.issue_id === parseTaskIssueId(cycleId)) {
@@ -995,7 +1092,20 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
   };
   const performer = completedPerformer(events);
   let performerCreates = 0;
-  const machine = new CyclePlanMachine({
+  const recordWriter = Object.freeze({
+    ...planCompletionRecordWriter,
+    persistPlanInvalidation: async () => {
+      events.push("persist_plan_invalidation");
+      planInvalidated = true;
+    },
+    hasPlanInvalidation: async () => {
+      events.push("read_plan_invalidation");
+      return planInvalidated;
+    },
+  });
+  const createMachine = () => new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: recordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1012,7 +1122,8 @@ function materializationFailureFixture(mode: MaterializationFailureMode) {
   });
   return {
     events,
-    machine,
+    machine: createMachine(),
+    createMachine,
     performerCreates: () => performerCreates,
     createCount: () => createCount,
   };
@@ -1055,6 +1166,8 @@ test("empty approved Cycle creates exactly one Plan Issue before Plan runs", asy
     }, call);
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1098,6 +1211,8 @@ test("lost empty execution fails before Plan creation", async () => {
     );
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1142,6 +1257,8 @@ test("the exact Plan returned by creation is sealed before Plan execution", asyn
   };
   let performerCreates = 0;
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1170,7 +1287,44 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
   const createIssueIds: TaskIssueId[] = [];
   const createdIssues: TaskIssueSnapshot[] = [];
   const createdRelations: TaskRelationSnapshot[] = [];
+  const recordComments: LinearIssueRecordComment[] = [];
   const manager = unexpectedManager();
+  manager.create_issue_comment = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    events.push("persist_plan_completion_record");
+    const timestamp = "2026-08-02T02:00:00.000Z";
+    const bodyDigest = createHash("sha256").update(call.input.body_markdown, "utf8").digest("hex");
+    recordComments.push({
+      comment_id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      provider_created_at: timestamp,
+      provider_updated_at: timestamp,
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: bodyDigest,
+      body_markdown: call.input.body_markdown,
+    });
+    return parseTaskMcpResult({
+      ...resultEnvelope(call),
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: call.input.comment_id, issue_id: call.input.issue_id },
+        fresh_comment: {
+          comment_id: call.input.comment_id,
+          issue_id: call.input.issue_id,
+          provider_created_at: timestamp,
+          provider_updated_at: timestamp,
+          provider_edited_at: null,
+          provider_archived_at: null,
+          actor_id: "actor:symphony",
+          body_digest: bodyDigest,
+        },
+        sanitized_reason: null,
+      },
+    }, call);
+  };
   manager.update_issue = async (call, execution) => {
     callerAuthority.verifier.assert(execution.caller, call);
     if (call.input.issue_id === parseTaskIssueId(cycleId)) {
@@ -1188,7 +1342,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
       events.push("plan_in_progress");
       return appliedIssueResult(call, {
         issue_id: parseTaskIssueId(planSource.issue_id),
-        revision: parseTaskRevision("revision:plan:started"),
+        revision: parseTaskRevision(`symphony:v1:${"1".repeat(64)}`),
         status: workflow.stage_states.in_progress,
         title: planSource.title,
         description: planSource.description_markdown,
@@ -1250,6 +1404,21 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
   const performer = completedPerformer(events);
   let performerCreates = 0;
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: new PlanCompletionRecordWriter({
+      caller_issuer: callerAuthority.issuer,
+      workflow,
+      task_manager: manager,
+      record_reader: {
+        readIssueRecordComments: async () => recordComments,
+        readIssueCreationEvidence: async (issueId) => ({
+          issue_id: issueId,
+          provider_created_at: "2026-08-02T01:30:00.000Z",
+          actor_id: "actor:symphony",
+        }),
+      },
+      service_actor_id: "actor:symphony",
+    }),
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1267,7 +1436,7 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
 
   const result = await machine.advance(request, LIVE_EXECUTION);
 
-  assert.equal(result.outcome, "advanced");
+  assert.equal(result.outcome, "advanced", JSON.stringify(events));
   assert.equal(performerCreates, 1);
   assert.deepEqual(createdIssues.map(({ issue_id }) => issue_id), createIssueIds);
   const [contractsId, runtimeId, verifyId] = createIssueIds;
@@ -1286,8 +1455,9 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
     "create_performer",
     "plan",
     "close",
-    "create_Implement contracts",
-    "create_Wire runtime",
+    "persist_plan_completion_record",
+    "create_Work 1: contracts",
+    "create_Work 2: runtime",
     "create_Verify approved Cycle",
     `relate_${contractsId}_${runtimeId}`,
     `relate_${contractsId}_${verifyId}`,
@@ -1307,6 +1477,231 @@ test("completed Plan materializes one exact graph before Plan becomes Done", asy
   assert.equal(events.at(-1), "cycle_failed_after_graph_drift");
 });
 
+test("real Plan, Work, and Verify records persist exact fresh evidence in provider order", async () => {
+  const basis = Object.freeze({ specification: recordSpecification, approval_record: recordApproval });
+  const built = buildPlanGraphManifest({
+    basis,
+    ordered_work_group_ids: ["contracts", "runtime"],
+    plan_title: planSource.title,
+    plan_instruction_markdown: planSource.description_markdown,
+  });
+  const workIssues = built.manifest.ordered_work_nodes.map((node, index) => Object.freeze({
+    issue_id: node.issue_id,
+    revision: parseTaskRevision(`revision:record:work:${index}`),
+    status: workflow.stage_states.todo,
+    title: node.title,
+    description: built.instructions_by_issue_id[node.issue_id]!,
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.work]),
+    delegate_id: null,
+    priority: null,
+  }));
+  const verifyIssue = Object.freeze({
+    issue_id: built.manifest.verify_issue_id,
+    revision: parseTaskRevision("revision:record:verify"),
+    status: workflow.stage_states.todo,
+    title: built.manifest.verify_node.title,
+    description: built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
+    parent_id: parseTaskIssueId(cycleId),
+    labels: Object.freeze([workflow.labels.verify]),
+    delegate_id: null,
+    priority: null,
+  });
+  const relations = built.manifest.relations.map((relation, index) => Object.freeze({
+    relation_id: parseTaskRelationId(relation.relation_id),
+    revision: parseTaskRevision(`revision:record:relation:${index}`),
+    type: "blocks" as const,
+    source_issue_id: parseTaskIssueId(relation.source_issue_id),
+    target_issue_id: parseTaskIssueId(relation.target_issue_id),
+  }));
+  const graph = parseSealedExecutionGraph({
+    plan_issue: planSource,
+    work_issues: workIssues.map((issue) => ({
+      issue_id: parseStageIssueId(issue.issue_id),
+      sealed_revision: issue.revision,
+      kind: "work" as const,
+      title: issue.title,
+      description_markdown: issue.description,
+      parent_cycle_id: cycleId,
+    })),
+    verify_issue: {
+      issue_id: parseStageIssueId(verifyIssue.issue_id),
+      sealed_revision: verifyIssue.revision,
+      kind: "verify",
+      title: verifyIssue.title,
+      description_markdown: verifyIssue.description,
+      parent_cycle_id: cycleId,
+    },
+    relations: relations.map((relation) => ({
+      relation_id: relation.relation_id,
+      revision: relation.revision,
+      prerequisite_issue_id: parseStageIssueId(relation.source_issue_id),
+      dependent_issue_id: parseStageIssueId(relation.target_issue_id),
+    })),
+  }, cycleId);
+  const comments = new Map<TaskIssueId, LinearIssueRecordComment[]>();
+  const recordTimes = [
+    "2026-08-02T02:00:00.000Z",
+    "2026-08-02T04:00:00.000Z",
+    "2026-08-02T06:00:00.000Z",
+  ];
+  let recordIndex = 0;
+  const manager = unexpectedManager();
+  manager.create_issue_comment = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    const timestamp = recordTimes[recordIndex++];
+    assert.notEqual(timestamp, undefined);
+    const comment = Object.freeze({
+      comment_id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      provider_created_at: timestamp!,
+      provider_updated_at: timestamp!,
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: createHash("sha256").update(call.input.body_markdown, "utf8").digest("hex"),
+      body_markdown: call.input.body_markdown,
+    });
+    comments.set(call.input.issue_id, [...(comments.get(call.input.issue_id) ?? []), comment]);
+    return parseTaskMcpResult({
+      ...resultEnvelope(call),
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: call.input.comment_id, issue_id: call.input.issue_id },
+        fresh_comment: {
+          comment_id: comment.comment_id,
+          issue_id: comment.issue_id,
+          provider_created_at: comment.provider_created_at,
+          provider_updated_at: comment.provider_updated_at,
+          provider_edited_at: comment.provider_edited_at,
+          provider_archived_at: comment.provider_archived_at,
+          actor_id: comment.actor_id,
+          body_digest: comment.body_digest,
+        },
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  const creationTimes = new Map<TaskIssueId, string>([
+    [recordSpecification.plan_issue_id, "2026-08-02T01:30:00.000Z"],
+    [workIssues[0]!.issue_id, "2026-08-02T03:00:00.000Z"],
+    [verifyIssue.issue_id, "2026-08-02T05:00:00.000Z"],
+  ]);
+  const writer = new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: manager,
+    record_reader: {
+      readIssueRecordComments: async (issueId) => comments.get(issueId) ?? [],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: creationTimes.get(issueId) ?? "2026-08-02T03:00:00.000Z",
+        actor_id: "actor:symphony",
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+  const execution = Object.freeze({ assertActive: () => undefined });
+  const planSnapshot = requestWithGraph(graph, {
+    plan_status: "in_progress",
+    plan_revision: `symphony:v1:${"1".repeat(64)}`,
+    work_issues: workIssues,
+    verify_issue: verifyIssue,
+  });
+  const planRecord = await writer.persistCompleted(planSnapshot, basis, built, execution);
+  const startedWork = Object.freeze({
+    ...workIssues[0]!,
+    revision: parseTaskRevision(`symphony:v1:${"2".repeat(64)}`),
+    status: workflow.stage_states.in_progress,
+  });
+  const workSnapshot = requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: "revision:record:plan:done",
+    work_issues: [startedWork, workIssues[1]!],
+    work_statuses: ["in_progress", "todo"],
+    verify_issue: verifyIssue,
+  });
+  const workResult: WorkResult = {
+    schema_version: 1,
+    root_id: rootId,
+    runtime_generation: generation,
+    cycle_id: cycleId,
+    cycle_revision: workSnapshot.cycle_revision,
+    correlation_id: correlationId,
+    work_issue_id: parseStageIssueId(startedWork.issue_id),
+    work_issue_revision: startedWork.revision,
+    outcome: "completed",
+    workspace_changed: true,
+    checks: [{ check: "focused Work record", status: "passed", sanitized_summary_markdown: null }],
+    sanitized_summary_markdown: parseMarkdownText("Work handoff is normalized."),
+  };
+  const workRecord = await writer.persistWork(workSnapshot, basis, built, workResult, execution);
+  const doneWorkIssues = workIssues.map((issue, index) => Object.freeze({
+    ...issue,
+    revision: parseTaskRevision(`revision:record:work:done:${index}`),
+    status: workflow.stage_states.done,
+  }));
+  const startedVerify = Object.freeze({
+    ...verifyIssue,
+    revision: parseTaskRevision(`symphony:v1:${"3".repeat(64)}`),
+    status: workflow.stage_states.in_progress,
+  });
+  const verifySnapshot = requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: "revision:record:plan:done",
+    work_issues: doneWorkIssues,
+    work_statuses: ["done", "done"],
+    verify_issue: startedVerify,
+    verify_status: "in_progress",
+  });
+  const verifyResult: VerifyResult = {
+    schema_version: 1,
+    root_id: rootId,
+    runtime_generation: generation,
+    cycle_id: cycleId,
+    cycle_revision: verifySnapshot.cycle_revision,
+    correlation_id: correlationId,
+    verify_issue_id: parseStageIssueId(startedVerify.issue_id),
+    verify_issue_revision: startedVerify.revision,
+    revision: parseRevision("a".repeat(40)),
+    conclusion: "passed",
+    checks: [{ check: "focused Verify record", status: "passed", sanitized_summary_markdown: null }],
+    sanitized_summary_markdown: parseMarkdownText("Exact revision verified."),
+  };
+  const verifyRecord = await writer.persistVerify(verifySnapshot, basis, built, verifyResult, execution);
+
+  assert.equal("outcome" in planRecord.completion ? planRecord.completion.outcome : null, "completed");
+  assert.equal("outcome" in workRecord.completion ? workRecord.completion.outcome : null, "completed");
+  assert.equal("conclusion" in verifyRecord.completion ? verifyRecord.completion.conclusion : null, "passed");
+  assert.deepEqual(recordIndex, 3);
+
+  const invalidCreationWriter = (actorId: string, createdAt: string) => new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: manager,
+    record_reader: {
+      readIssueRecordComments: async (issueId) => comments.get(issueId) ?? [],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: createdAt,
+        actor_id: actorId,
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+  await assert.rejects(
+    invalidCreationWriter("actor:foreign", "2026-08-02T01:30:00.000Z")
+      .readCompleted(workSnapshot, basis),
+    /stage_creation_actor_mismatch/u,
+  );
+  await assert.rejects(
+    invalidCreationWriter("actor:symphony", recordApproval.created_at)
+      .readCompleted(workSnapshot, basis),
+    /plan_completion_record_order_invalid/u,
+  );
+});
+
 for (const scenario of [
   ["partial", 2],
   ["uncertain", 1],
@@ -1322,8 +1717,27 @@ for (const scenario of [
     assert.equal(result.to_cycle_revision, parseTaskRevision("revision:cycle:failed"));
     assert.equal(fixture.performerCreates(), 1);
     assert.equal(fixture.createCount(), scenario[1]);
-    assert.deepEqual(fixture.events.slice(-2), ["plan_failed", "cycle_failed"]);
+    assert.deepEqual(fixture.events.slice(-3), [
+      "persist_plan_invalidation",
+      "plan_failed",
+      "cycle_failed",
+    ]);
     assert.equal(fixture.events.includes("read_graph"), false);
+
+    const eventCountBeforeRestart = fixture.events.length;
+    const restarted = await fixture.createMachine().advance(
+      planOnlyRequest("in_progress", "revision:plan:started"),
+      LOST_EXECUTION,
+    );
+
+    assert.equal(restarted.outcome, "terminal_failed");
+    assert.equal(fixture.performerCreates(), 1);
+    assert.equal(fixture.createCount(), scenario[1]);
+    assert.deepEqual(fixture.events.slice(eventCountBeforeRestart), [
+      "read_plan_invalidation",
+      "plan_failed",
+      "cycle_failed",
+    ]);
   });
 }
 
@@ -1380,6 +1794,8 @@ test("a structurally valid but changed aggregate read-back fails before Plan Don
     return appliedRelationResult(call, relation);
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1451,6 +1867,8 @@ test("retirement closes Plan and fences its late output from graph and status ef
     },
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1520,16 +1938,18 @@ for (const outcome of ["failed", "canceled"] as const) {
           cycle_revision: planRequest.cycle_revision,
           correlation_id: planRequest.correlation_id,
           outcome,
-          plan_summary_markdown: null,
-          work_items: [],
-          verify: null,
-          traceability_markdown: null,
+          ordered_work_group_ids: [],
           sanitized_reason: `plan_${outcome}`,
         }, planRequest);
       },
       close: async () => { events.push("close"); },
     };
     const machine = new CyclePlanMachine({
+      sealed_basis_reader: sealedBasisReader,
+      plan_completion_record_writer: {
+        ...planCompletionRecordWriter,
+        persistPlanTerminal: async () => { events.push("persist_plan_terminal_record"); },
+      },
       workflow,
       caller_issuer: callerAuthority.issuer,
       task_manager: manager,
@@ -1546,6 +1966,7 @@ for (const outcome of ["failed", "canceled"] as const) {
       "plan_in_progress",
       "plan",
       "close",
+      "persist_plan_terminal_record",
       `plan_${outcome}`,
       "cycle_failed",
     ]);
@@ -1574,6 +1995,8 @@ test("an In Progress Plan after restart fails closed without creating a performe
     );
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1593,6 +2016,85 @@ test("an In Progress Plan after restart fails closed without creating a performe
   assert.equal(result.outcome, "terminal_failed");
   assert.equal(performerCreates, 0);
   assert.deepEqual(events, ["plan_failed", "cycle_failed"]);
+});
+
+test("restart continues an exact persisted Plan manifest without rerunning Plan or rewriting graph", async () => {
+  const built = buildPlanGraphManifest({
+    basis: { specification: recordSpecification, approval_record: recordApproval },
+    ordered_work_group_ids: ["contracts", "runtime"],
+    plan_title: planSource.title,
+    plan_instruction_markdown: planSource.description_markdown,
+  });
+  const issues: TaskIssueSnapshot[] = [
+    ...built.manifest.ordered_work_nodes.map((node, index) => Object.freeze({
+      issue_id: parseTaskIssueId(node.issue_id),
+      revision: parseTaskRevision(`revision:restart:work:${index}`),
+      status: workflow.stage_states.todo,
+      title: node.title,
+      description: built.instructions_by_issue_id[node.issue_id]!,
+      parent_id: parseTaskIssueId(cycleId),
+      labels: Object.freeze([workflow.labels.work]),
+      delegate_id: null,
+      priority: null,
+    })),
+    Object.freeze({
+      issue_id: parseTaskIssueId(built.manifest.verify_issue_id),
+      revision: parseTaskRevision("revision:restart:verify"),
+      status: workflow.stage_states.todo,
+      title: built.manifest.verify_node.title,
+      description: built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
+      parent_id: parseTaskIssueId(cycleId),
+      labels: Object.freeze([workflow.labels.verify]),
+      delegate_id: null,
+      priority: null,
+    }),
+  ];
+  const relations = built.manifest.relations.map((relation, index) => Object.freeze({
+    relation_id: parseTaskRelationId(relation.relation_id),
+    revision: parseTaskRevision(`revision:restart:relation:${index}`),
+    type: "blocks" as const,
+    source_issue_id: parseTaskIssueId(relation.source_issue_id),
+    target_issue_id: parseTaskIssueId(relation.target_issue_id),
+  }));
+  const request = materializedRequest(issues, relations);
+  const events: string[] = [];
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    events.push("plan_done");
+    return appliedIssueResult(
+      call,
+      planStatusIssue("done", "revision:plan:done-after-restart"),
+      workflow.stage_states.in_progress,
+    );
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: {
+      persistCompleted: async () => { throw new Error("unexpected_record_write"); },
+      persistPlanTerminal: async () => { throw new Error("unexpected_terminal_record_write"); },
+      readCompleted: async () => {
+        events.push("read_persisted_manifest");
+        return built;
+      },
+      persistWork: async () => undefined,
+      persistVerify: async () => undefined,
+      persistPlanInvalidation: async () => undefined,
+      hasPlanInvalidation: async () => false,
+    },
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_graph_write_readback"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan_performer"); } },
+  });
+
+  const result = await machine.advance(request, LOST_EXECUTION);
+
+  assert.equal(result.outcome, "advanced");
+  assert.deepEqual(events, ["read_persisted_manifest", "plan_done"]);
 });
 
 for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
@@ -1648,6 +2150,8 @@ for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
       }, workflow.stage_states.in_progress);
     };
     const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
       workflow,
       caller_issuer: callerAuthority.issuer,
       task_manager: manager,
@@ -1669,7 +2173,7 @@ for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
   });
 }
 
-test("ready Work advances in stable order through separate turns on one Cycle performer", async () => {
+test("ready Work advances in persisted manifest order through separate turns on one Cycle performer", async () => {
   const workB = Object.freeze({
     issue_id: parseTaskIssueId("WORK-B"),
     revision: parseTaskRevision("revision:work:b:sealed"),
@@ -1761,11 +2265,11 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
     revision: parseTaskRevision("revision:work:b:done"),
     status: workflow.stage_states.done,
   });
-  const afterA = requestWithGraph(graph, {
+  const afterB = requestWithGraph(graph, {
     plan_status: "done",
     plan_revision: "revision:plan:done",
-    work_issues: [workB, doneA],
-    work_statuses: ["todo", "done"],
+    work_issues: [doneB, workA],
+    work_statuses: ["done", "todo"],
     verify_issue: verify,
   });
   const events: string[] = [];
@@ -1799,22 +2303,26 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
   const reader = {
     read: async () => {
       readCount += 1;
+      const startedBSnapshot = requestWithGraph(graph, {
+        plan_status: "done",
+        plan_revision: "revision:plan:done",
+        work_issues: [startedB, workA],
+        work_statuses: ["in_progress", "todo"],
+        verify_issue: verify,
+      });
+      const startedASnapshot = requestWithGraph(graph, {
+        plan_status: "done",
+        plan_revision: "revision:plan:done",
+        work_issues: [doneB, startedA],
+        work_statuses: ["done", "in_progress"],
+        verify_issue: verify,
+      });
       const snapshots = [
-        requestWithGraph(graph, {
-          plan_status: "done",
-          plan_revision: "revision:plan:done",
-          work_issues: [workB, startedA],
-          work_statuses: ["todo", "in_progress"],
-          verify_issue: verify,
-        }),
-        afterA,
-        requestWithGraph(graph, {
-          plan_status: "done",
-          plan_revision: "revision:plan:done",
-          work_issues: [startedB, doneA],
-          work_statuses: ["in_progress", "done"],
-          verify_issue: verify,
-        }),
+        startedBSnapshot,
+        startedBSnapshot,
+        afterB,
+        startedASnapshot,
+        startedASnapshot,
         requestWithGraph(graph, {
           plan_status: "done",
           plan_revision: "revision:plan:done",
@@ -1825,7 +2333,10 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
       ];
       const snapshot = snapshots[readCount - 1];
       assert.notEqual(snapshot, undefined);
-      events.push(["read_started_a", "read_done_a", "read_started_b", "read_done_b"][readCount - 1]!);
+      events.push([
+        "read_started_b", "read_completion_b", "read_done_b",
+        "read_started_a", "read_completion_a", "read_done_a",
+      ][readCount - 1]!);
       return snapshot!;
     },
   };
@@ -1838,7 +2349,7 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
     work: async (request) => {
       workTurns += 1;
       events.push(`work_${request.work_issue_id}`);
-      const expected = workTurns === 1 ? startedA : startedB;
+      const expected = workTurns === 1 ? startedB : startedA;
       assert.equal(request.work_issue_id, parseStageIssueId(expected.issue_id));
       assert.equal(request.work_issue_revision, expected.revision);
       return parseWorkResult({
@@ -1860,6 +2371,8 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
   };
   let performerCreates = 0;
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -1887,31 +2400,34 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
 
   assert.equal(first.outcome, "advanced");
   assert.deepEqual(events, [
-    "work_a_in_progress",
-    "read_started_a",
+    "work_b_in_progress",
+    "read_started_b",
     "create_work_performer",
-    "work_WORK-A",
-    "work_a_done",
-    "read_done_a",
+    "work_WORK-B",
+    "read_completion_b",
+    "work_b_done",
+    "read_done_b",
   ]);
 
-  const second = await machine.advance(afterA, LIVE_EXECUTION);
+  const second = await machine.advance(afterB, LIVE_EXECUTION);
 
-  assert.equal(second.outcome, "advanced");
+  assert.equal(second.outcome, "advanced", JSON.stringify(events));
   assert.equal(performerCreates, 1);
   assert.equal(workTurns, 2);
   assert.deepEqual(events, [
-    "work_a_in_progress",
-    "read_started_a",
-    "create_work_performer",
-    "work_WORK-A",
-    "work_a_done",
-    "read_done_a",
     "work_b_in_progress",
     "read_started_b",
+    "create_work_performer",
     "work_WORK-B",
+    "read_completion_b",
     "work_b_done",
     "read_done_b",
+    "work_a_in_progress",
+    "read_started_a",
+    "work_WORK-A",
+    "read_completion_a",
+    "work_a_done",
+    "read_done_a",
     "close_work_performer",
   ]);
 
@@ -1921,6 +2437,48 @@ test("ready Work advances in stable order through separate turns on one Cycle pe
   assert.equal(gitReads, 0);
   assert.equal(workTurns, 2);
   assert.deepEqual(events.slice(eventCountBeforeReopen), ["cycle_failed_after_stage_reopen"]);
+
+  const persistedBThenA = await planCompletionRecordWriter.readCompleted(afterB);
+  assert.notEqual(persistedBThenA, null);
+  const [firstPersistedNode, secondPersistedNode] = persistedBThenA!.manifest.ordered_work_nodes;
+  assert.notEqual(firstPersistedNode, undefined);
+  assert.notEqual(secondPersistedNode, undefined);
+  const orderedWorkNodes = Object.freeze([secondPersistedNode!, firstPersistedNode!] as const);
+  const persistedAThenB = Object.freeze({
+    ...persistedBThenA!,
+    manifest: Object.freeze({
+      ...persistedBThenA!.manifest,
+      ordered_work_nodes: Object.freeze(orderedWorkNodes),
+      ordered_work_issue_ids: Object.freeze([
+        orderedWorkNodes[0].issue_id,
+        orderedWorkNodes[1].issue_id,
+      ] as const),
+    }),
+  });
+  const outOfOrderMachine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: {
+      ...planCompletionRecordWriter,
+      readCompleted: async () => persistedAThenB,
+    },
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_out_of_order_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+  const eventCountBeforeOutOfOrderRestart = events.length;
+
+  const outOfOrderRestart = await outOfOrderMachine.advance(afterB, LIVE_EXECUTION);
+
+  assert.equal(outOfOrderRestart.outcome, "terminal_failed");
+  assert.equal(workTurns, 2);
+  assert.deepEqual(
+    events.slice(eventCountBeforeOutOfOrderRestart),
+    ["cycle_failed_after_stage_reopen"],
+  );
 });
 
 for (const scenario of ["failed", "canceled", "invalid"] as const) {
@@ -1960,6 +2518,8 @@ for (const scenario of ["failed", "canceled", "invalid"] as const) {
     };
     let reads = 0;
     const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
       workflow,
       caller_issuer: callerAuthority.issuer,
       task_manager: manager,
@@ -1967,10 +2527,16 @@ for (const scenario of ["failed", "canceled", "invalid"] as const) {
       reader: {
         read: async () => {
           reads += 1;
-          events.push(reads === 1 ? "read_started" : `read_${terminalStatus}`);
-          return reads === 1
-            ? fixture.snapshot(started, "in_progress")
-            : fixture.snapshot(terminal, terminalStatus);
+          if (reads === 1) {
+            events.push("read_started");
+            return fixture.snapshot(started, "in_progress");
+          }
+          if (scenario !== "invalid" && reads === 2) {
+            events.push("read_completion");
+            return fixture.snapshot(started, "in_progress");
+          }
+          events.push(`read_${terminalStatus}`);
+          return fixture.snapshot(terminal, terminalStatus);
         },
       },
       plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
@@ -2012,6 +2578,7 @@ for (const scenario of ["failed", "canceled", "invalid"] as const) {
       "work_in_progress",
       "read_started",
       "work_turn",
+      ...(scenario === "invalid" ? [] : ["read_completion"]),
       `work_${terminalStatus}`,
       `read_${terminalStatus}`,
       "close_work_performer",
@@ -2048,6 +2615,8 @@ test("a mismatched aggregate Work status read-back fails before performer creati
   };
   let performerCreates = 0;
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -2107,6 +2676,8 @@ test("a cross-Cycle Work performer is closed before any turn and fails the curre
   };
   let reads = 0;
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -2166,6 +2737,8 @@ test("retirement revokes an active Work Task boundary before its provider effect
     throw new Error("unreachable_provider_effect");
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -2234,6 +2807,8 @@ test("retirement closes the active Work performer and fences its late result fro
     },
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -2422,6 +2997,8 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
     close: async () => { events.push("close_verify_performer"); },
   };
   const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: planCompletionRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,

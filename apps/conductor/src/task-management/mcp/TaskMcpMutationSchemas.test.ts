@@ -14,6 +14,7 @@ const target = {
 };
 const ISSUE_UUID = "11111111-1111-4111-8111-111111111111";
 const RELATION_UUID = "22222222-2222-4222-8222-222222222222";
+const COMMENT_UUID = "33333333-3333-4333-8333-333333333333";
 
 function envelope(functionName: keyof typeof TASK_MCP_CAPABILITIES) {
   return {
@@ -121,6 +122,41 @@ test("all five mutation calls require exact fresh preconditions", () => {
         /invalid_contract_keys/u,
       );
     }
+  }
+});
+
+test("create_issue_comment binds an exact absent record to one fresh issue basis", () => {
+  const input = {
+    comment_id: COMMENT_UUID,
+    issue_id: "LIN-2",
+    expected_issue_revision: "revision:2",
+    body_markdown: "<!-- symphony:record -->\n{\"record_kind\":\"stage_completion\"}",
+  };
+  const call = parseTaskMcpCall({
+    schema_version: 1,
+    function: "create_issue_comment",
+    root_id: "LIN-1",
+    runtime_generation: 4,
+    correlation_id: "corr:create-comment",
+    capability: "task_manage:create_issue_comment",
+    input,
+  }, target);
+
+  assert.deepEqual(call.input, input);
+  for (const forbidden of [
+    { ...input, created_at: "2026-07-30T00:00:00.000Z" },
+    { ...input, comment_id: "comment:generated-by-provider" },
+    { ...input, expected_comment_revision: "revision:comment:0" },
+  ]) {
+    assert.throws(() => parseTaskMcpCall({
+      schema_version: 1,
+      function: "create_issue_comment",
+      root_id: "LIN-1",
+      runtime_generation: 4,
+      correlation_id: "corr:create-comment",
+      capability: "task_manage:create_issue_comment",
+      input: forbidden,
+    }, target));
   }
 });
 

@@ -69,6 +69,12 @@ export interface LinearServiceActor {
   readonly app: true;
 }
 
+export interface LinearIssueCreationEvidence {
+  readonly issue_id: TaskIssueId;
+  readonly provider_created_at: string;
+  readonly actor_id: string | null;
+}
+
 export interface LinearIssueCommentEvidence {
   readonly comment_id: string;
   readonly issue_id: string;
@@ -78,6 +84,10 @@ export interface LinearIssueCommentEvidence {
   readonly provider_archived_at: string | null;
   readonly actor_id: string | null;
   readonly body_digest: string;
+}
+
+export interface LinearIssueRecordComment extends LinearIssueCommentEvidence {
+  readonly body_markdown: string;
 }
 
 export interface LinearIssueHistoryEvidence {
@@ -389,6 +399,19 @@ export class LinearQueries {
     });
   }
 
+  readIssueCreationEvidence(issueId: TaskIssueId): Promise<LinearIssueCreationEvidence> {
+    return this.#boundary(async () => {
+      const issue = await this.#issue(parseTaskIssueId(issueId));
+      this.#assertTeam([issue]);
+      if (issue.snapshot.issue_id !== issueId) fail("linear_issue_identity_mismatch");
+      return Object.freeze({
+        issue_id: issue.snapshot.issue_id,
+        provider_created_at: issue.createdAt,
+        actor_id: issue.creatorId,
+      });
+    });
+  }
+
   readIssueHistory(issueId: TaskIssueId): Promise<readonly LinearIssueHistoryEvidence[]> {
     return this.#boundary(async () => {
       const history = await this.#all(
@@ -427,6 +450,20 @@ export class LinearQueries {
           actor_id: comment.actor_id,
           body_digest: comment.body_digest,
         });
+      }));
+    });
+  }
+
+  readIssueRecordComments(issueId: TaskIssueId): Promise<readonly LinearIssueRecordComment[]> {
+    return this.#boundary(async () => {
+      const comments = await this.#all(
+        (cursor) => this.client.listIssueComments(issueId, cursor, INTERNAL_PAGE_SIZE),
+        parseComment,
+      );
+      this.#assertUnique(comments.map(({ comment_id }) => comment_id), "linear_duplicate_comment_identity");
+      return Object.freeze(comments.map((comment) => {
+        if (comment.issue_id !== issueId) fail("linear_comment_issue_mismatch");
+        return Object.freeze({ ...comment });
       }));
     });
   }
@@ -596,6 +633,7 @@ export class LinearQueries {
         this.#assertUniqueIssues(stages);
         for (const stage of stages) {
           if (stage.snapshot.parent_id !== cycle.snapshot.issue_id) fail("linear_stage_parent_mismatch");
+          if (stage.creatorId !== this.#serviceActorId) fail("linear_stage_creator_mismatch");
           if (!STAGE_KINDS.includes(issueKind(stage, labelNames) as typeof STAGE_KINDS[number])) {
             fail("linear_stage_kind_mismatch");
           }

@@ -18,7 +18,8 @@ import {
   parseTaskMcpCall,
   parseTaskMcpResult,
   type TaskMcpCall,
-  type TaskMcpFunction,
+  type TaskMcpMutationCall,
+  type TaskMcpPublicFunction,
   type TaskMcpResult,
   type TaskMutationTarget,
 } from "../task-management/mcp/TaskMcpSchemas.js";
@@ -87,7 +88,7 @@ function objectSchema(properties: JsonSchema, required = Object.keys(properties)
   return { type: "object", additionalProperties: false, properties, required, ...extra };
 }
 
-function taskInputSchema(functionName: TaskMcpFunction): JsonSchema {
+function taskInputSchema(functionName: TaskMcpPublicFunction): JsonSchema {
   switch (functionName) {
     case "get_issue": return objectSchema({ issue_id: IDENTITY_SCHEMA });
     case "list_issues":
@@ -156,7 +157,7 @@ const TASK_DESCRIPTIONS = Object.freeze({
   delete_relation: "Delete one exact relation using endpoint preconditions",
   list_states: "List Task Manager states with explicit cursor pagination",
   list_labels: "List Task Manager labels with explicit cursor pagination",
-} as const satisfies Record<TaskMcpFunction, string>);
+} as const satisfies Record<TaskMcpPublicFunction, string>);
 
 function deepFreeze<T>(value: T): T {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
@@ -174,7 +175,7 @@ function commonProperties(target: RuntimeTarget, capability: string): JsonSchema
   };
 }
 
-function taskSpec(functionName: TaskMcpFunction, target: RuntimeTarget): RootToolSpec {
+function taskSpec(functionName: TaskMcpPublicFunction, target: RuntimeTarget): RootToolSpec {
   const capability = TASK_MCP_CAPABILITIES[functionName];
   return deepFreeze({
     type: "function" as const,
@@ -338,7 +339,7 @@ type UnknownAcceptance =
 type RootToolBinder = (correlationId: CorrelationId) => readonly RootToolBinding[];
 const ROOT_TOOL_BINDERS = new WeakMap<object, RootToolBinder>();
 
-function isTaskMutation(call: TaskMcpCall): boolean {
+function isTaskMutation(call: TaskMcpCall): call is TaskMcpMutationCall {
   return call.function === "create_issue"
     || call.function === "update_issue"
     || call.function === "archive_issue"
@@ -350,7 +351,7 @@ export class RootTools {
   readonly target: RuntimeTarget;
   readonly specs: readonly RootToolSpec[];
   readonly #taskManager: RootTaskManageCommandBinding;
-  readonly #taskFunctions: ReadonlySet<TaskMcpFunction>;
+  readonly #taskFunctions: ReadonlySet<TaskMcpPublicFunction>;
   readonly #declaredTools: ReadonlyMap<string, DeclaredRootTool<unknown, unknown>>;
   #unknownAcceptance: UnknownAcceptance | null = null;
 
@@ -386,7 +387,7 @@ export class RootTools {
       declaredCapabilities.add(declaration.capability);
     }
 
-    const taskFunctions = new Set<TaskMcpFunction>();
+    const taskFunctions = new Set<TaskMcpPublicFunction>();
     const specs: RootToolSpec[] = [];
     const knownCapabilities = new Set<string>();
     for (const functionName of TASK_MCP_FUNCTIONS) {
@@ -437,7 +438,7 @@ export class RootTools {
     execution: RootToolExecution,
   ): Promise<unknown> {
     execution.assertActive();
-    if (this.#taskFunctions.has(toolName as TaskMcpFunction)) {
+    if (this.#taskFunctions.has(toolName as TaskMcpPublicFunction)) {
       let call: TaskMcpCall;
       try {
         call = parseTaskMcpCall(value, this.target);
@@ -510,6 +511,7 @@ export class RootTools {
   #observeTaskResult(call: TaskMcpCall, result: RootTaskToolResult): void {
     if ("outcome" in result.output && result.output.outcome === "conflict_observed") {
       const target = result.output.target;
+      if (target.kind === "comment") throw new RootToolFatalError("invalid_contract");
       this.#unknownAcceptance = target.kind === "issue"
         ? Object.freeze({ kind: "issue", target })
         : Object.freeze({ kind: "relation", target, next_cursor: null });

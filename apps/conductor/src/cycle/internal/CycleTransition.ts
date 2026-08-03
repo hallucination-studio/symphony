@@ -91,6 +91,8 @@ type GraphPhase =
     readonly kind: "full";
     readonly plan: StageExecutionSnapshot;
     readonly work: readonly StageExecutionSnapshot[];
+    readonly ready_work: readonly StageExecutionSnapshot[];
+    readonly status_order_valid: boolean;
     readonly verify: StageExecutionSnapshot;
   };
 
@@ -200,7 +202,31 @@ function validateGraph(request: CycleAdvanceRequest): GraphPhase | null {
     }
   }
   if (ordered.length !== work.length) return null;
-  return Object.freeze({ kind: "full", plan, work: Object.freeze(ordered), verify });
+  const active = work.filter(({ status }) => status === "in_progress");
+  let statusOrderValid = active.length <= 1;
+  for (const relation of relations) {
+    if (relation.dependent_issue_id === verify.issue_id) continue;
+    const prerequisite = byId.get(relation.prerequisite_issue_id);
+    const dependent = byId.get(relation.dependent_issue_id);
+    if (
+      prerequisite === undefined
+      || dependent === undefined
+      || ((dependent.status === "done" || dependent.status === "in_progress")
+        && prerequisite.status !== "done")
+    ) statusOrderValid = false;
+  }
+  const readyWork = ordered.filter((stage) => stage.status === "todo" && relations.every((relation) => (
+    relation.dependent_issue_id !== stage.issue_id
+    || byId.get(relation.prerequisite_issue_id)?.status === "done"
+  )));
+  return Object.freeze({
+    kind: "full",
+    plan,
+    work: Object.freeze(ordered),
+    ready_work: Object.freeze(readyWork),
+    status_order_valid: statusOrderValid,
+    verify,
+  });
 }
 
 function reducePlan(context: ReductionContext, plan: StageExecutionSnapshot): CycleTransition {
@@ -263,22 +289,19 @@ function reduceCompletedWork(
 
 function reduceFullGraph(context: ReductionContext, graph: Extract<GraphPhase, { kind: "full" }>): CycleTransition {
   if (graph.plan.status !== "done") return terminalFailure(context, "cycle_state_invalid");
+  if (!graph.status_order_valid) return terminalFailure(context, "cycle_state_invalid");
   const failedReason = failedWorkReason(graph.work);
   if (failedReason !== null) return terminalFailure(context, failedReason);
 
-  const firstIncomplete = graph.work.findIndex(({ status }) => status !== "done");
-  if (firstIncomplete === -1) return reduceCompletedWork(context, graph.verify);
+  if (graph.work.every(({ status }) => status === "done")) {
+    return reduceCompletedWork(context, graph.verify);
+  }
   if (graph.verify.status !== "todo") return terminalFailure(context, "cycle_state_invalid");
-
-  const remaining = graph.work.slice(firstIncomplete);
-  if (
-    remaining.slice(1).some(({ status }) => status !== "todo")
-    || (remaining[0]?.status !== "todo" && remaining[0]?.status !== "in_progress")
-  ) return terminalFailure(context, "cycle_state_invalid");
-
-  const next = remaining[0];
+  if (graph.work.some(({ status }) => status === "in_progress")) {
+    return noAction(context, "stage_in_progress");
+  }
+  const next = graph.ready_work[0];
   if (next === undefined) return terminalFailure(context, "execution_graph_invalid");
-  if (next.status === "in_progress") return noAction(context, "stage_in_progress");
   return Object.freeze({
     ...envelope(context),
     action: "run_work",

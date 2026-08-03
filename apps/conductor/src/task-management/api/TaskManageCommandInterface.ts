@@ -3,6 +3,8 @@ import type {
   ArchiveIssueResult,
   CreateIssueCall,
   CreateIssueResult,
+  CreateIssueCommentCall,
+  CreateIssueCommentResult,
   CreateRelationCall,
   CreateRelationResult,
   DeleteRelationCall,
@@ -39,6 +41,10 @@ export interface TaskManageCommandInterface {
   create_issue(call: CreateIssueCall, execution: TaskManageExecution): Promise<CreateIssueResult>;
   update_issue(call: UpdateIssueCall, execution: TaskManageExecution): Promise<UpdateIssueResult>;
   archive_issue(call: ArchiveIssueCall, execution: TaskManageExecution): Promise<ArchiveIssueResult>;
+  create_issue_comment?(
+    call: CreateIssueCommentCall,
+    execution: TaskManageExecution,
+  ): Promise<CreateIssueCommentResult>;
   list_relations(call: ListRelationsCall, execution: TaskManageExecution): Promise<ListRelationsResult>;
   create_relation(call: CreateRelationCall, execution: TaskManageExecution): Promise<CreateRelationResult>;
   delete_relation(call: DeleteRelationCall, execution: TaskManageExecution): Promise<DeleteRelationResult>;

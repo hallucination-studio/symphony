@@ -2,6 +2,7 @@ import type {
   CycleAdvanceRequest,
   StageExecutionSnapshot,
 } from "../../contracts/cycle.js";
+import type { SealedCycleBasis } from "../../contracts/cycle-records.js";
 import {
   parseTaskIssueId,
   type StageIssueId,
@@ -33,6 +34,7 @@ import {
   bindCycleAdvanceRequest,
   type FreshCycleExecutionReader,
 } from "./CycleMachine.js";
+import type { BuiltPlanGraphManifest } from "./PlanGraphManifest.js";
 
 interface PerformerOwner {
   readonly cycle: string;
@@ -51,6 +53,15 @@ export interface CycleWorkExecutorOptions {
   readonly task_manager: TaskManageCommandInterface;
   readonly reader: FreshCycleExecutionReader;
   readonly performer_factory: CycleWorkPerformerFactory;
+  readonly completion_writer: {
+    persistWork(
+      snapshot: CycleAdvanceRequest,
+      basis: SealedCycleBasis,
+      built: BuiltPlanGraphManifest,
+      result: WorkResult,
+      execution: { assertActive(): void },
+    ): Promise<unknown>;
+  };
 }
 
 export interface CycleWorkExecutionResult {
@@ -226,6 +237,7 @@ export class CycleWorkExecutor {
   readonly #reader: FreshCycleExecutionReader;
   readonly #taskManager: TaskManageCommandInterface;
   readonly #workflow: TaskWorkflowIdentities;
+  readonly #completionWriter: CycleWorkExecutorOptions["completion_writer"];
   readonly #owner = Object.freeze({});
   #active = false;
   #epoch = 0;
@@ -239,11 +251,14 @@ export class CycleWorkExecutor {
     this.#taskManager = options.task_manager;
     this.#reader = options.reader;
     this.#performerFactory = options.performer_factory;
+    this.#completionWriter = options.completion_writer;
   }
 
   async execute(
     request: CycleAdvanceRequest,
     workIssueId: StageIssueId,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
   ): Promise<CycleWorkExecutionResult> {
     if (this.#retired) throw new CycleWorkExecutionError(request);
     if (this.#active) throw new CycleWorkExecutionError(request);
@@ -280,8 +295,29 @@ export class CycleWorkExecutor {
       const rawResult = await performer.work(workRequest);
       this.#assertActive(epoch);
       const workResult = parseWorkResult(rawResult, workRequest);
+      const rawCompletionSnapshot = await this.#reader.read(Object.freeze({
+        root_id: current.root_id,
+        cycle_id: current.cycle_id,
+        runtime_generation: current.runtime_generation,
+        correlation_id: current.correlation_id,
+      }));
+      this.#assertActive(epoch);
+      if (rawCompletionSnapshot === null) throw new Error("work_completion_readback_missing");
+      current = bindCycleAdvanceRequest(rawCompletionSnapshot);
+      const completionWork = current.sealed_work_issues.find(({ issue_id }) => issue_id === workIssueId);
+      if (completionWork === undefined || completionWork.status !== "in_progress") {
+        throw new Error("work_completion_source_changed");
+      }
+      await this.#completionWriter.persistWork(
+        current,
+        basis,
+        built,
+        workResult,
+        Object.freeze({ assertActive: () => this.#assertActive(epoch) }),
+      );
+      this.#assertActive(epoch);
       terminalAttempted = true;
-      current = await this.#transition(current, startedWork, workResult.outcome === "completed"
+      current = await this.#transition(current, completionWork, workResult.outcome === "completed"
         ? "done"
         : workResult.outcome, epoch);
       if (

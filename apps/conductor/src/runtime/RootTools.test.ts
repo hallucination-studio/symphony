@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
   parseCorrelationId,
-  parseCycleIssueId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseTaskIssueId,
   parseTaskRevision,
 } from "../contracts/identity.js";
+import { deriveCycleUuid } from "../contracts/cycle-identities.js";
+import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import {
   parseRootDefinition,
-  sealCycleSpecification,
 } from "../contracts/cycle.js";
 import {
   parseTaskSnapshot,
@@ -38,10 +40,28 @@ import { createAcceptedRevisionAuthority } from "./RootAcceptedRevision.js";
 import { RootToolCallError, RootToolFatalError } from "./RootToolBoundary.js";
 
 const rootId = parseRootIssueId("LIN-1");
+const identityVersion = "symphony-identity:v1";
+const cycleTaskId = parseTaskIssueId(deriveCycleUuid(
+  identityVersion, "cycle_issue", rootId, "first_cycle", "first_cycle",
+));
+const derivedCycleId = (kind: string) => deriveCycleUuid(identityVersion, kind, cycleTaskId);
+const canonicalRootRevision = `symphony:v1:${"1".repeat(64)}`;
+const canonicalDraftRevision = `symphony:v1:${"2".repeat(64)}`;
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
 const callerAuthority = createTaskManageCallerAuthority();
 const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
+const recordComments = new WeakMap<TaskManageCommandInterface, Array<{
+  readonly comment_id: string;
+  readonly issue_id: ReturnType<typeof parseTaskIssueId>;
+  readonly provider_created_at: string;
+  readonly provider_updated_at: string;
+  readonly provider_edited_at: null;
+  readonly provider_archived_at: null;
+  readonly actor_id: string;
+  readonly body_markdown: string;
+  readonly body_digest: string;
+}>>();
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root", cycle: "label:cycle", plan: "label:plan",
@@ -83,7 +103,7 @@ const cycleDescription = [
   "",
   "## Root Definition Revision",
   "",
-  "`revision:root:1`",
+  `\`${canonicalRootRevision}\``,
   "",
   "## Requirement",
   "",
@@ -119,7 +139,27 @@ const cycleDescription = [
   "",
   "## Acceptance Mapping",
   "",
-  "Map approval to the exact revision and digest assertion.",
+  "### Execution Anchors", "",
+  `- Cycle ID: \`${cycleTaskId}\``,
+  "- Predecessor Cycle ID: None",
+  "- Predecessor Terminal Record ID: `first_cycle`",
+  `- Approval Record ID: \`${derivedCycleId("cycle_approval_record")}\``,
+  `- Plan Issue ID: \`${derivedCycleId("plan_issue")}\``,
+  `- Plan Completion Record ID: \`${derivedCycleId("plan_completion_record")}\``,
+  `- Plan Invalidation Record ID: \`${derivedCycleId("plan_invalidation_record")}\``,
+  `- Cycle Completion Record ID: \`${derivedCycleId("cycle_completion_record")}\``,
+  `- Cycle Invalidation Record ID: \`${derivedCycleId("cycle_invalidation_record")}\``,
+  `- Delivery Completion Record ID: \`${derivedCycleId("delivery_completion_record")}\``,
+  `- Delivery Invalidation Record ID: \`${derivedCycleId("delivery_invalidation_record")}\``,
+  `- Identity Derivation Version: \`${identityVersion}\``,
+  `- Workspace Base Revision: \`${"3".repeat(64)}\``, "",
+  "### Execution Directives", "", "#### Directive: `directive:approval`", "",
+  "Implement exact approval persistence.", "", "##### Dependencies", "", "- None", "",
+  "##### Acceptance Criteria", "", "- `acceptance:approval`", "",
+  "### Approved Work Groups", "", "#### Work Group: `group:approval`", "",
+  "##### Directives", "", "- `directive:approval`", "", "##### Dependencies", "", "- None", "",
+  "### Verification Directives", "", "#### Verification Directive: `verify:approval`", "",
+  "Verify exact approval persistence.", "", "##### Acceptance Criteria", "", "- `acceptance:approval`",
   "",
   "## Failure Strategy",
   "",
@@ -135,13 +175,13 @@ function rootTaskSnapshot(
     relation_id: "REL-1",
     revision: "revision:relation:1",
     type: "blocks",
-    source_issue_id: "LIN-2",
+    source_issue_id: cycleTaskId,
     target_issue_id: "LIN-3",
   }, {
     relation_id: "REL-OTHER",
     revision: "revision:other:1",
     type: "blocks",
-    source_issue_id: "LIN-2",
+    source_issue_id: cycleTaskId,
     target_issue_id: "LIN-4",
   }],
   includeCycle = true,
@@ -153,7 +193,7 @@ function rootTaskSnapshot(
     title: issueId,
     description: issueId === "LIN-1"
       ? rootDescription
-      : issueId === "LIN-2"
+      : issueId === cycleTaskId
         ? cycleDescription
         : `## ${issueId}\n\nFixture facts.`,
     parent_id: parentId,
@@ -165,12 +205,12 @@ function rootTaskSnapshot(
     root_id: rootId,
     issues: includeCycle
       ? [
-        issue("LIN-1", null, "revision:root:1", "state:root-in-progress", workflow.labels.root),
-        issue("LIN-2", "LIN-1", "revision:issue:1", workflow.cycle_states.draft, workflow.labels.cycle),
+        issue("LIN-1", null, canonicalRootRevision, "state:root-in-progress", workflow.labels.root),
+        issue(cycleTaskId, "LIN-1", canonicalDraftRevision, workflow.cycle_states.draft, workflow.labels.cycle),
         issue("LIN-3", "LIN-1", "revision:other:1", workflow.cycle_states.succeeded, workflow.labels.cycle),
         issue("LIN-4", "LIN-1", "revision:other:2", workflow.cycle_states.rejected, workflow.labels.cycle),
       ]
-      : [issue("LIN-1", null, "revision:root:1", "state:root-in-progress", workflow.labels.root)],
+      : [issue("LIN-1", null, canonicalRootRevision, "state:root-in-progress", workflow.labels.root)],
     relations: includeCycle ? relations : [],
   });
 }
@@ -185,6 +225,10 @@ function bindTaskManager(
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
     snapshot_reader: { readRootSnapshot },
+    record_reader: { readIssueRecordComments: async (issueId) => (
+      recordComments.get(manager)?.filter(({ issue_id }) => issue_id === issueId) ?? []
+    ) },
+    service_actor_id: "actor:symphony",
     approved_cycle_reader: { readApprovedCycle: async () => null },
     accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
@@ -192,7 +236,7 @@ function bindTaskManager(
 
 function taskManager(calls: string[]): TaskManageCommandInterface {
   const unexpected = (name: string) => () => Promise.reject(new Error(`unexpected_${name}`));
-  return {
+  const manager = {
     get_issue: async (call) => {
       calls.push(call.function);
       return {
@@ -216,6 +260,50 @@ function taskManager(calls: string[]): TaskManageCommandInterface {
     list_states: unexpected("list_states"),
     list_labels: unexpected("list_labels"),
   } as TaskManageCommandInterface;
+  const comments: NonNullable<ReturnType<typeof recordComments.get>> = [];
+  recordComments.set(manager, comments);
+  manager.create_issue_comment = async (call) => {
+    calls.push(call.function);
+    const createdAt = "2026-08-02T01:00:00.000Z";
+    const comment = Object.freeze({
+      comment_id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      provider_created_at: createdAt,
+      provider_updated_at: createdAt,
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_markdown: call.input.body_markdown,
+      body_digest: createHash("sha256").update(call.input.body_markdown, "utf8").digest("hex"),
+    });
+    comments.push(comment);
+    const freshComment = Object.freeze({
+      comment_id: comment.comment_id,
+      issue_id: comment.issue_id,
+      provider_created_at: comment.provider_created_at,
+      provider_updated_at: comment.provider_updated_at,
+      provider_edited_at: comment.provider_edited_at,
+      provider_archived_at: comment.provider_archived_at,
+      actor_id: comment.actor_id,
+      body_digest: comment.body_digest,
+    });
+    return parseTaskMcpResult({
+      schema_version: 1,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: comment.comment_id, issue_id: comment.issue_id },
+        fresh_comment: freshComment,
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  return manager;
 }
 
 function serveSnapshotIssues(
@@ -239,10 +327,10 @@ function serveSnapshotIssues(
   };
 }
 
-function expectedApprovalSeal(cycleRevision: string): string {
+function expectedApprovalSeal(): string {
   const definitionTarget = Object.freeze({
     root_id: rootId,
-    root_revision: parseTaskRevision("revision:root:1"),
+    root_revision: parseTaskRevision(canonicalRootRevision),
     correlation_id: correlationId,
   });
   const definition = parseRootDefinition({
@@ -250,20 +338,14 @@ function expectedApprovalSeal(cycleRevision: string): string {
     ...definitionTarget,
     root_description_markdown: rootDescription,
   }, definitionTarget);
-  const target = Object.freeze({
+  return prepareCycleApproval({
     root_id: rootId,
-    cycle_id: parseCycleIssueId("LIN-2"),
-    root_definition_revision: definition.root_revision,
-    cycle_revision: parseTaskRevision(cycleRevision),
-    correlation_id: correlationId,
-  });
-  return sealCycleSpecification({
-    schema_version: 1,
-    ...target,
+    cycle_id: cycleTaskId,
+    cycle_revision: parseTaskRevision(canonicalDraftRevision),
+    cycle_status: "Draft",
     cycle_description_markdown: cycleDescription,
-    root_adr_markdown: definition.root_adr_markdown,
-    status: "in_progress",
-  }, definition, target).seal_digest;
+    root_definition: definition,
+  }).specification.specification_seal_digest!;
 }
 
 function getIssueCall(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -274,7 +356,7 @@ function getIssueCall(overrides: Record<string, unknown> = {}): Record<string, u
     runtime_generation: generation,
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.get_issue,
-    input: { issue_id: "LIN-2" },
+    input: { issue_id: cycleTaskId },
     ...overrides,
   };
 }
@@ -305,7 +387,7 @@ function archiveIssueCall(issueId: string): Record<string, unknown> {
     runtime_generation: generation,
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.archive_issue,
-    input: { issue_id: issueId, expected_revision: "revision:issue:1" },
+    input: { issue_id: issueId, expected_revision: canonicalDraftRevision },
   };
 }
 
@@ -344,7 +426,7 @@ function createRelationCall(expectedSourceRevision: string): Record<string, unkn
     input: {
       relation_id: "22222222-2222-4222-8222-222222222222",
       relation_type: "blocks",
-      source_issue_id: "LIN-2",
+      source_issue_id: cycleTaskId,
       expected_source_revision: expectedSourceRevision,
       target_issue_id: "LIN-3",
       expected_target_revision: "revision:target:1",
@@ -363,7 +445,7 @@ function deleteRelationCall(): Record<string, unknown> {
     input: {
       relation_id: "REL-1",
       expected_relation_revision: "revision:relation:1",
-      source_issue_id: "LIN-2",
+      source_issue_id: cycleTaskId,
       expected_source_revision: "revision:source:1",
       target_issue_id: "LIN-3",
       expected_target_revision: "revision:target:1",
@@ -451,7 +533,7 @@ test("Root tools expose only capability-approved generic schemas", () => {
 test("Root tools generate every generic Task MCP schema with an exact bound function and capability", () => {
   const tools = new RootTools({
     target: { root_id: rootId, runtime_generation: generation },
-    capabilities: Object.values(TASK_MCP_CAPABILITIES),
+    capabilities: TASK_MCP_FUNCTIONS.map((functionName) => TASK_MCP_CAPABILITIES[functionName]),
     task_manager: bindTaskManager(taskManager([])),
   });
   assert.deepEqual(tools.specs.map(({ name }) => name), TASK_MCP_FUNCTIONS);
@@ -571,7 +653,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
           issue_id: call.input.issue_id,
           revision: "revision:issue:2",
           status: workflow.cycle_states.draft,
-          title: "LIN-2",
+          title: cycleTaskId,
           description: correctedCycleDescription,
           parent_id: "LIN-1",
           labels: [workflow.labels.cycle],
@@ -608,8 +690,8 @@ test("Root tools return a typed mutation result with fresh resource and concrete
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.update_issue,
     input: {
-      issue_id: "LIN-2",
-      expected_revision: "revision:issue:1",
+      issue_id: cycleTaskId,
+      expected_revision: canonicalDraftRevision,
       desired: { description: correctedCycleDescription },
     },
   }, { assertActive: () => undefined });
@@ -617,10 +699,10 @@ test("Root tools return a typed mutation result with fresh resource and concrete
   assert.deepEqual(calls, ["get_issue", "update_issue"]);
   assert.equal((result as { output?: { outcome?: unknown } }).output?.outcome, "applied");
   assert.deepEqual((result as { output?: { fresh_resource?: unknown } }).output?.fresh_resource, {
-    issue_id: "LIN-2",
+    issue_id: cycleTaskId,
     revision: "revision:issue:2",
     status: workflow.cycle_states.draft,
-    title: "LIN-2",
+    title: cycleTaskId,
     description: correctedCycleDescription,
     parent_id: "LIN-1",
     labels: [workflow.labels.cycle],
@@ -629,7 +711,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
   });
   assert.deepEqual((result as { output?: { concrete_diff?: unknown } }).output?.concrete_diff, [{
     kind: "field_changed",
-    issue_id: "LIN-2",
+    issue_id: cycleTaskId,
     field: "description",
     before: cycleDescription,
     after: correctedCycleDescription,
@@ -647,7 +729,7 @@ test("Root tools return a seal digest only from an applied approval fresh read-b
       issue_id: call.input.issue_id,
       revision: "revision:issue:sealed",
       status: workflow.cycle_states.in_progress,
-      title: "LIN-2",
+      title: cycleTaskId,
       description: cycleDescription,
       parent_id: "LIN-1",
       labels: [workflow.labels.cycle],
@@ -701,15 +783,15 @@ test("Root tools return a seal digest only from an applied approval fresh read-b
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.update_issue,
     input: {
-      issue_id: "LIN-2",
-      expected_revision: "revision:issue:1",
+      issue_id: cycleTaskId,
+      expected_revision: canonicalDraftRevision,
       desired: { state_id: workflow.cycle_states.in_progress },
     },
   }, { assertActive: () => undefined });
 
   assert.equal(
     (result as { seal_digest?: unknown }).seal_digest,
-    expectedApprovalSeal("revision:issue:sealed"),
+    expectedApprovalSeal(),
   );
   assert.equal(
     (result as { output?: { fresh_resource?: { revision?: unknown } } }).output?.fresh_resource?.revision,
@@ -735,7 +817,7 @@ test("Root tools do not return a seal for a stale approval precondition", async 
         issue_id: call.input.issue_id,
         revision: "revision:issue:concurrent",
         status: workflow.cycle_states.draft,
-        title: "LIN-2",
+        title: cycleTaskId,
         description: correctedCycleDescription,
         parent_id: "LIN-1",
         labels: [workflow.labels.cycle],
@@ -772,8 +854,8 @@ test("Root tools do not return a seal for a stale approval precondition", async 
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.update_issue,
     input: {
-      issue_id: "LIN-2",
-      expected_revision: "revision:issue:1",
+      issue_id: cycleTaskId,
+      expected_revision: canonicalDraftRevision,
       desired: { state_id: workflow.cycle_states.in_progress },
     },
   }, { assertActive: () => undefined });
@@ -846,8 +928,8 @@ test("an exact read resolves an unknown applied approval with the sealed fresh r
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.update_issue,
     input: {
-      issue_id: "LIN-2",
-      expected_revision: "revision:issue:1",
+      issue_id: cycleTaskId,
+      expected_revision: canonicalDraftRevision,
       desired: { state_id: workflow.cycle_states.in_progress },
     },
   }, { assertActive: () => undefined });
@@ -861,7 +943,7 @@ test("an exact read resolves an unknown applied approval with the sealed fresh r
   );
   assert.equal(
     (resolved as { seal_digest?: unknown }).seal_digest,
-    expectedApprovalSeal("revision:issue:sealed-after-unknown"),
+    expectedApprovalSeal(),
   );
   assert.equal(tools.hasPendingAcceptance(), false);
 });
@@ -872,7 +954,7 @@ test("conflict_observed blocks every mutation until get_issue reads the exact ta
   let firstUnknown = true;
   manager.update_issue = async (call) => {
     effects.push(`update:${call.input.issue_id}`);
-    const outcome = call.input.issue_id === "LIN-2" && firstUnknown
+    const outcome = call.input.issue_id === cycleTaskId && firstUnknown
       ? "conflict_observed"
       : "not_applied";
     if (outcome === "conflict_observed") firstUnknown = false;
@@ -917,17 +999,17 @@ test("conflict_observed blocks every mutation until get_issue reads the exact ta
   await read.execute(getIssueCall(), { assertActive: () => undefined });
 
   const unknown = await update.execute(
-    updateIssueCall("LIN-2", "revision:issue:1"),
+    updateIssueCall(cycleTaskId, canonicalDraftRevision),
     { assertActive: () => undefined },
   );
   assert.equal((unknown as { output?: { outcome?: unknown } }).output?.outcome, "conflict_observed");
   assert.equal(tools.hasPendingAcceptance(), true);
   await assert.rejects(
-    update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined }),
+    update.execute(updateIssueCall(cycleTaskId, canonicalDraftRevision), { assertActive: () => undefined }),
     isAcceptanceUnknown,
   );
   await assert.rejects(
-    update.execute(updateIssueCall("LIN-1", "revision:root:1"), { assertActive: () => undefined }),
+    update.execute(updateIssueCall("LIN-1", canonicalRootRevision), { assertActive: () => undefined }),
     isAcceptanceUnknown,
   );
   await assert.rejects(
@@ -936,20 +1018,20 @@ test("conflict_observed blocks every mutation until get_issue reads the exact ta
   );
   await read.execute(getIssueCall({ input: { issue_id: "LIN-3" } }), { assertActive: () => undefined });
   await assert.rejects(
-    update.execute(updateIssueCall("LIN-1", "revision:root:1"), { assertActive: () => undefined }),
+    update.execute(updateIssueCall("LIN-1", canonicalRootRevision), { assertActive: () => undefined }),
     isAcceptanceUnknown,
   );
   assert.equal(tools.hasPendingAcceptance(), true);
 
   await read.execute(getIssueCall(), { assertActive: () => undefined });
   assert.equal(tools.hasPendingAcceptance(), false);
-  await update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined });
+  await update.execute(updateIssueCall(cycleTaskId, canonicalDraftRevision), { assertActive: () => undefined });
   assert.deepEqual(effects, [
-    "read:LIN-2",
-    "update:LIN-2",
+    `read:${cycleTaskId}`,
+    `update:${cycleTaskId}`,
     "read:LIN-3",
-    "read:LIN-2",
-    "update:LIN-2",
+    `read:${cycleTaskId}`,
+    `update:${cycleTaskId}`,
   ]);
 });
 
@@ -995,7 +1077,7 @@ test("conflict_observed blocks every declared tool while an exact Task mutation 
   assert.ok(read);
   assert.ok(update);
   await read.execute(getIssueCall(), { assertActive: () => undefined });
-  await update.execute(updateIssueCall("LIN-2", "revision:issue:1"), { assertActive: () => undefined });
+  await update.execute(updateIssueCall(cycleTaskId, canonicalDraftRevision), { assertActive: () => undefined });
 
   for (const name of ["get_status", "get_remote_ref"]) {
     const binding = bindings.get(name);
@@ -1010,7 +1092,7 @@ test("conflict_observed blocks every declared tool while an exact Task mutation 
           : "delivery:get_remote_ref",
     }, { assertActive: () => undefined }), isAcceptanceUnknown);
   }
-  assert.deepEqual(effects, ["read:LIN-2", "update:LIN-2"]);
+  assert.deepEqual(effects, [`read:${cycleTaskId}`, `update:${cycleTaskId}`]);
 });
 
 test("conflict_observed from create_issue blocks create retries until the caller identity is read", async () => {
@@ -1063,16 +1145,16 @@ test("conflict_observed from create_issue blocks create retries until the caller
   assert.ok(create);
   assert.ok(read);
 
-  await create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined });
+  await create.execute(createIssueCall(canonicalRootRevision), { assertActive: () => undefined });
   await assert.rejects(
-    create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined }),
+    create.execute(createIssueCall(canonicalRootRevision), { assertActive: () => undefined }),
     isAcceptanceUnknown,
   );
   await read.execute(
     getIssueCall({ input: { issue_id: "11111111-1111-4111-8111-111111111111" } }),
     { assertActive: () => undefined },
   );
-  await create.execute(createIssueCall("revision:root:1"), { assertActive: () => undefined });
+  await create.execute(createIssueCall(canonicalRootRevision), { assertActive: () => undefined });
   assert.deepEqual(effects, [
     "create:1",
     "read:11111111-1111-4111-8111-111111111111",
@@ -1125,7 +1207,7 @@ test("Root relation mutations are denied before provider effects", async () => {
           relation_id: "REL-1",
           revision: "revision:relation:1",
           type: "blocks",
-          source_issue_id: "LIN-2",
+          source_issue_id: cycleTaskId,
           target_issue_id: "LIN-3",
         }]
         : creations >= 2
@@ -1133,7 +1215,7 @@ test("Root relation mutations are denied before provider effects", async () => {
             relation_id: "REL-OTHER",
             revision: "revision:other:1",
             type: "blocks",
-            source_issue_id: "LIN-2",
+            source_issue_id: cycleTaskId,
             target_issue_id: "LIN-4",
           }]
           : [],
@@ -1248,6 +1330,8 @@ test("Root tools fail composition closed for raw or differently bound Task manag
     caller_issuer: callerAuthority.issuer,
     task_manager: taskManager([]),
     snapshot_reader: { readRootSnapshot: async () => otherSnapshot },
+    record_reader: { readIssueRecordComments: async () => [] },
+    service_actor_id: "actor:symphony",
     approved_cycle_reader: { readApprovedCycle: async () => null },
     accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
@@ -1286,7 +1370,7 @@ test("Root tools advertise and enforce 32-item relation pages so 100 relations f
   assert.equal(schema.properties?.input?.properties?.page_size?.const, 32);
 
   const page = await binding.execute(
-    listRelationsCall("LIN-2", null, 32),
+    listRelationsCall(cycleTaskId, null, 32),
     { assertActive: () => undefined },
   ) as { output: { relations: readonly unknown[] } };
   assert.equal(page.output.relations.length, 2);
@@ -1298,7 +1382,7 @@ test("Root tools advertise and enforce 32-item relation pages so 100 relations f
     runtime_generation: generation,
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.list_relations,
-    input: { issue_id: "LIN-2", cursor: null, page_size: 1 },
+    input: { issue_id: cycleTaskId, cursor: null, page_size: 1 },
   }, { assertActive: () => undefined }), /invalid_contract/u);
 });
 
@@ -1347,8 +1431,8 @@ test("Root tools reject oversized typed mutation diffs as a fatal contract viola
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.update_issue,
     input: {
-      issue_id: "LIN-2",
-      expected_revision: "revision:issue:1",
+      issue_id: cycleTaskId,
+      expected_revision: canonicalDraftRevision,
       desired: { description: correctedCycleDescription },
     },
   }, { assertActive: () => undefined }), /invalid_contract/u);

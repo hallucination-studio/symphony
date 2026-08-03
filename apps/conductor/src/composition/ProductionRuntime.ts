@@ -48,7 +48,14 @@ import {
 import { isSensitiveWorkspacePath } from "../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import type { RootToolBridgeLog } from "../codex-app-server/internal/DynamicToolBridge.js";
 import { CycleMachineHost, type CycleMachineReadRequest, type FreshCycleExecutionReader } from "../cycle/internal/CycleMachine.js";
-import { CyclePlanMachine } from "../cycle/internal/CyclePlanMachine.js";
+import {
+  CyclePlanMachine,
+  type FreshSealedCycleBasisReader,
+} from "../cycle/internal/CyclePlanMachine.js";
+import { parseCycleApprovalRecord, type SealedCycleBasis } from "../contracts/cycle-records.js";
+import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
+import { readExactTaskIssueRecord } from "../cycle/internal/CycleRecords.js";
+import { PlanCompletionRecordWriter } from "../cycle/internal/PlanCompletionRecord.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { DeliveryInterface } from "../delivery/api/DeliveryInterface.js";
 import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
@@ -179,7 +186,7 @@ function executionStage(stage: StageExecutionSnapshot) {
   };
 }
 
-export class ProductionCycleReader implements FreshCycleExecutionReader, RootApprovedCycleReader {
+export class ProductionCycleReader implements FreshCycleExecutionReader, RootApprovedCycleReader, FreshSealedCycleBasisReader {
   readonly #sealedSpecifications = new Map<CycleIssueId, CycleSpecification>();
   readonly #sealedStages = new Map<StageIssueId, SealedStageIssue>();
   #latestRootTurnCorrelation: CorrelationId | null = null;
@@ -187,9 +194,10 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
   constructor(
     private readonly target: Readonly<{ root_id: RootIssueId; runtime_generation: RuntimeGeneration }>,
     private readonly workflow: TaskWorkflowIdentities,
-    private readonly snapshots: Pick<LinearQueries, "readRootSnapshot">,
+    private readonly snapshots: Pick<LinearQueries, "readRootSnapshot" | "readIssueRecordComments">,
     private readonly git: Pick<GitWorkspaceInterface, "read">,
     private readonly workspace: RootWorkspaceIdentity,
+    private readonly serviceActorId: string,
   ) {}
 
   rememberRootTurn(correlationId: CorrelationId): void {
@@ -205,6 +213,58 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       cycle_id: parseCycleIssueId(cycleId),
       correlation_id: correlationId,
     }));
+  }
+
+  async readSealedCycleBasis(cycleId: TaskIssueId): Promise<SealedCycleBasis> {
+    const task = await this.snapshots.readRootSnapshot(this.target.root_id);
+    const parsedCycleId = parseTaskIssueId(cycleId);
+    const cycle = taskIssue(task, parsedCycleId);
+    if (
+      cycle.parent_id !== parseTaskIssueId(this.target.root_id)
+      || kindOf(cycle, this.workflow) !== "cycle"
+      || cycle.description === null
+    ) throw new Error("sealed_cycle_basis_cycle_invalid");
+    const root = taskIssue(task, parseTaskIssueId(this.target.root_id));
+    if (root.description === null || kindOf(root, this.workflow) !== "root") {
+      throw new Error("sealed_cycle_basis_root_invalid");
+    }
+    const draft = parseCycleDraftMarkdown(cycle.description);
+    const correlationId = parseCorrelationId(randomUUID());
+    const definition = parseRootDefinition({
+      schema_version: 1,
+      root_id: this.target.root_id,
+      root_revision: root.revision,
+      correlation_id: correlationId,
+      root_description_markdown: root.description,
+    }, {
+      root_id: this.target.root_id,
+      root_revision: draft.root_definition_revision,
+      correlation_id: correlationId,
+    });
+    const prepared = prepareCycleApproval({
+      root_id: this.target.root_id,
+      cycle_id: parsedCycleId,
+      cycle_revision: cycle.revision,
+      cycle_status: "Draft",
+      cycle_description_markdown: cycle.description,
+      root_definition: definition,
+    });
+    const comments = await this.snapshots.readIssueRecordComments(parsedCycleId);
+    const projected = readExactTaskIssueRecord(
+      comments,
+      parsedCycleId,
+      prepared.specification.approval_record_id,
+      this.serviceActorId,
+    );
+    if (projected === null) throw new Error("cycle_approval_record_missing");
+    const approval = parseCycleApprovalRecord(projected, prepared.specification);
+    if (approval.basis_document_digest !== prepared.projection.basis_document_digest) {
+      throw new Error("cycle_approval_document_mismatch");
+    }
+    return Object.freeze({
+      specification: prepared.specification,
+      approval_record: approval,
+    });
   }
 
   async read(request: CycleMachineReadRequest): Promise<CycleAdvanceRequest | null> {
@@ -579,6 +639,7 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
       this.options.queries,
       route.git,
       workspace,
+      this.options.startup.config.agent_actor_id,
     );
     const acceptedRevision = createAcceptedRevisionAuthority();
     const taskBinding = bindRootTaskManageCommand({
@@ -587,6 +648,8 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
       caller_issuer: this.options.caller_issuer,
       task_manager: this.options.task_manager,
       snapshot_reader: this.options.queries,
+      record_reader: this.options.queries,
+      service_actor_id: this.options.startup.config.agent_actor_id,
       approved_cycle_reader: reader,
       accepted_revision_issuer: acceptedRevision.issuer,
     });
@@ -636,6 +699,14 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
       delivery: route.delivery,
     });
     const planMachine = new CyclePlanMachine({
+      sealed_basis_reader: reader,
+      plan_completion_record_writer: new PlanCompletionRecordWriter({
+        caller_issuer: this.options.caller_issuer,
+        workflow: this.options.startup.config.workflow,
+        task_manager: this.options.task_manager,
+        record_reader: this.options.queries,
+        service_actor_id: this.options.startup.config.agent_actor_id,
+      }),
       workflow: this.options.startup.config.workflow,
       caller_issuer: this.options.caller_issuer,
       task_manager: this.options.task_manager,

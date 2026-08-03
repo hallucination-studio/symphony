@@ -444,6 +444,19 @@ test("Work readiness uses an identity-sorted stable topological order", () => {
   assert.equal(afterA.action === "run_work" ? afterA.work_issue_id : null, workB.issue_id);
 });
 
+test("independent Work may complete in persisted order rather than identity order", () => {
+  const transition = action({
+    workStatuses: {
+      [workA.issue_id]: "todo",
+      [workB.issue_id]: "done",
+      [workC.issue_id]: "todo",
+    },
+  });
+
+  assert.equal(transition.action, "run_work");
+  assert.equal(transition.action === "run_work" ? transition.work_issue_id : null, workA.issue_id);
+});
+
 test("terminal Stage outcomes map to closed Cycle failures", () => {
   const cases: readonly [SnapshotOptions, string][] = [
     [{ graph: "plan", planStatus: "failed" }, "plan_failed"],
@@ -473,7 +486,6 @@ test("impossible Stage ordering and premature lifecycle states fail closed", () 
   const cases: readonly SnapshotOptions[] = [
     { planStatus: "todo" },
     { planStatus: "in_progress" },
-    { workStatuses: { "WORK-B": "done" } },
     { workStatuses: { "WORK-A": "in_progress", "WORK-B": "in_progress" } },
     { workStatuses: { "WORK-C": "done" } },
     { verifyStatus: "in_progress" },

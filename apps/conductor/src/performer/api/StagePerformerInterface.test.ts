@@ -87,6 +87,10 @@ const request = {
   correlation_id: "corr:plan:1",
   cycle_description_markdown: cycleDescriptionMarkdown,
   root_adr_markdown: rootAdrMarkdown,
+  approved_work_groups: [
+    { work_group_id: "contract", depends_on_work_group_ids: [] },
+    { work_group_id: "boundary", depends_on_work_group_ids: ["contract"] },
+  ],
 };
 
 const completed = {
@@ -94,31 +98,7 @@ const completed = {
   ...planTarget,
   correlation_id: request.correlation_id,
   outcome: "completed",
-  plan_summary_markdown: "## Plan\n\nCompile the sealed design without adding decisions.",
-  work_items: [
-    {
-      local_key: "contract",
-      title: "Define the Plan graph contract",
-      description_markdown: "## Work\n\nValidate the identity-free Markdown graph.",
-      depends_on_local_keys: [],
-    },
-    {
-      local_key: "boundary",
-      title: "Isolate the Plan boundary",
-      description_markdown: "## Work\n\nRun Plan without a code mount or tools.",
-      depends_on_local_keys: ["contract"],
-    },
-  ],
-  verify: {
-    title: "Verify the Plan boundary",
-    description_markdown: "## Verify\n\nRun focused contract, prompt, and capability checks.",
-  },
-  traceability_markdown: [
-    "## Traceability",
-    "",
-    "- Context criterion: `boundary` and Verify prove sealed-Markdown-only input.",
-    "- Coverage criterion: `contract`, `boundary`, and Verify prove mapped evidence.",
-  ].join("\n"),
+  ordered_work_group_ids: ["contract", "boundary"],
   sanitized_reason: null,
 };
 
@@ -169,16 +149,13 @@ test("PlanRequest accepts only one sealed Cycle Markdown snapshot and its pinned
   );
 });
 
-test("completed PlanResult is a closed, deeply frozen, identity-free Markdown DAG", () => {
+test("completed PlanResult is a closed, deeply frozen exact Work-group order", () => {
   const parsed = parsePlanResult(structuredClone(completed), parsedRequest());
 
   assert.deepEqual(parsed, completed);
   assert.equal(parsed.outcome, "completed");
   assert.ok(Object.isFrozen(parsed));
-  assert.ok(Object.isFrozen(parsed.work_items));
-  assert.ok(Object.isFrozen(parsed.work_items[0]));
-  assert.ok(Object.isFrozen(parsed.work_items[1]?.depends_on_local_keys));
-  assert.ok(Object.isFrozen(parsed.verify));
+  assert.ok(Object.isFrozen(parsed.ordered_work_group_ids));
 
   for (const mutationClaim of [
     { issue_id: "LIN-PLAN" },
@@ -195,82 +172,38 @@ test("completed PlanResult is a closed, deeply frozen, identity-free Markdown DA
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      work_items: [{ ...completed.work_items[0], issue_id: "LIN-WORK" }],
+      work_items: [{ issue_id: "LIN-WORK" }],
     }, parsedRequest()),
     /invalid_contract_keys/u,
   );
 });
 
-test("completed PlanResult bounds work and verification content", () => {
+test("completed PlanResult must be an exact legal total order", () => {
   assert.throws(
-    () => parsePlanResult({ ...completed, work_items: [] }, parsedRequest()),
-    /plan_work_items_required/u,
+    () => parsePlanResult({ ...completed, ordered_work_group_ids: [] }, parsedRequest()),
+    /plan_work_group_order_mismatch/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      work_items: Array.from({ length: 33 }, (_, index) => ({
-        local_key: `work-${index}`,
-        title: `Work ${index}`,
-        description_markdown: `## Work\n\nExecute Work ${index}.`,
-        depends_on_local_keys: [],
-      })),
+      ordered_work_group_ids: ["contract", "contract"],
     }, parsedRequest()),
-    /contract_array_limit_exceeded/u,
+    /plan_work_group_order_mismatch/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      work_items: [
-        completed.work_items[0],
-        { ...completed.work_items[1], local_key: "contract" },
-      ],
+      ordered_work_group_ids: ["contract", "invented"],
     }, parsedRequest()),
-    /duplicate_plan_local_key/u,
+    /plan_work_group_order_mismatch/u,
   );
   assert.throws(
     () => parsePlanResult({
       ...completed,
-      plan_summary_markdown: "x".repeat(2_049),
+      ordered_work_group_ids: ["boundary", "contract"],
     }, parsedRequest()),
-    /plan_output_markdown_limit_exceeded/u,
+    /plan_work_group_order_illegal/u,
   );
-  assert.throws(
-    () => parsePlanResult({
-      ...completed,
-      traceability_markdown: "{\"provider_receipt\":\"hidden\"}",
-    }, parsedRequest()),
-    /invalid_plan_traceability_markdown/u,
-  );
-});
-
-test("completed PlanResult requires a closed acyclic Work dependency graph", () => {
-  const invalidGraphs = [
-    {
-      work_items: [completed.work_items[0], {
-        ...completed.work_items[1], depends_on_local_keys: ["missing"],
-      }],
-      code: /unknown_plan_dependency/u,
-    },
-    {
-      work_items: [{ ...completed.work_items[0], depends_on_local_keys: ["contract"] }],
-      code: /self_plan_dependency/u,
-    },
-    {
-      work_items: [
-        { ...completed.work_items[0], depends_on_local_keys: ["boundary"] },
-        { ...completed.work_items[1], depends_on_local_keys: ["contract"] },
-      ],
-      code: /cyclic_plan_dependencies/u,
-    },
-  ];
-
-  for (const { work_items, code } of invalidGraphs) {
-    assert.throws(
-      () => parsePlanResult({ ...completed, work_items }, parsedRequest()),
-      code,
-    );
-  }
 });
 
 test("failed and canceled PlanResult variants contain no actionable graph", () => {
@@ -280,22 +213,15 @@ test("failed and canceled PlanResult variants contain no actionable graph", () =
       ...planTarget,
       correlation_id: request.correlation_id,
       outcome,
-      plan_summary_markdown: null,
-      work_items: [],
-      verify: null,
-      traceability_markdown: null,
+      ordered_work_group_ids: [],
       sanitized_reason: outcome === "failed"
         ? "Plan generation failed"
         : "Plan generation was canceled",
     };
     assert.deepEqual(parsePlanResult(terminal, parsedRequest()), terminal);
     assert.throws(
-      () => parsePlanResult({ ...terminal, plan_summary_markdown: completed.plan_summary_markdown }, parsedRequest()),
-      /terminal_plan_graph_forbidden/u,
-    );
-    assert.throws(
-      () => parsePlanResult({ ...terminal, work_items: completed.work_items }, parsedRequest()),
-      /terminal_plan_graph_forbidden/u,
+      () => parsePlanResult({ ...terminal, ordered_work_group_ids: completed.ordered_work_group_ids }, parsedRequest()),
+      /terminal_plan_order_forbidden/u,
     );
     assert.throws(
       () => parsePlanResult({ ...terminal, sanitized_reason: "raw\nsecret" }, parsedRequest()),
@@ -511,6 +437,16 @@ test("terminal WorkResult preserves partial evidence and unknown workspace state
       sanitized_summary_markdown: ["Authorization:", "Bearer", "abcd".repeat(4)].join(" "),
     }, parsedWorkRequest()),
     /invalid_work_summary_markdown/u,
+  );
+  assert.throws(
+    () => parseWorkResult({
+      ...completedWork,
+      checks: [{
+        ...completedWork.checks[0],
+        check: ["Authorization:", "Bearer", "abcd".repeat(4)].join(" "),
+      }],
+    }, parsedWorkRequest()),
+    /invalid_work_check/u,
   );
 });
 

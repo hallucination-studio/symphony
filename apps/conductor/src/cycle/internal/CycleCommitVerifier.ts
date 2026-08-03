@@ -2,6 +2,7 @@ import type {
   CycleAdvanceRequest,
   StageExecutionSnapshot,
 } from "../../contracts/cycle.js";
+import type { SealedCycleBasis } from "../../contracts/cycle-records.js";
 import {
   parseTaskIssueId,
   type StageIssueId,
@@ -36,6 +37,7 @@ import {
   type FreshCycleExecutionReader,
 } from "./CycleMachine.js";
 import type { CycleTransition } from "./CycleTransition.js";
+import type { BuiltPlanGraphManifest } from "./PlanGraphManifest.js";
 
 type CommitAndVerifyTransition = Extract<CycleTransition, { readonly action: "commit_and_verify" }>;
 
@@ -52,6 +54,15 @@ export interface CycleCommitVerifierOptions {
   readonly reader: FreshCycleExecutionReader;
   readonly git_workspace: GitWorkspaceInterface;
   readonly performer_factory: CycleVerifyPerformerFactory;
+  readonly completion_writer: {
+    persistVerify(
+      snapshot: CycleAdvanceRequest,
+      basis: SealedCycleBasis,
+      built: BuiltPlanGraphManifest,
+      result: ReturnType<typeof parseVerifyResult>,
+      execution: { assertActive(): void },
+    ): Promise<unknown>;
+  };
 }
 
 export interface CycleCommitVerificationResult {
@@ -320,6 +331,7 @@ export class CycleCommitVerifier {
   #retired = false;
   readonly #taskManager: TaskManageCommandInterface;
   readonly #workflow: TaskWorkflowIdentities;
+  readonly #completionWriter: CycleCommitVerifierOptions["completion_writer"];
 
   constructor(options: CycleCommitVerifierOptions) {
     this.#workflow = parseTaskWorkflowIdentities(options.workflow);
@@ -328,11 +340,14 @@ export class CycleCommitVerifier {
     this.#reader = options.reader;
     this.#gitWorkspace = options.git_workspace;
     this.#performerFactory = options.performer_factory;
+    this.#completionWriter = options.completion_writer;
   }
 
   async execute(
     request: CycleAdvanceRequest,
     transition: CommitAndVerifyTransition,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
   ): Promise<CycleCommitVerificationResult> {
     if (this.#retired || this.#active) throw new CycleCommitVerificationError(request);
     this.#active = true;
@@ -419,6 +434,15 @@ export class CycleCommitVerifier {
       }
       if (verifyFailure !== null) throw verifyFailure;
       const verifyResult = parseVerifyResult(rawVerifyResult, verifyRequest);
+      current = bindCycleAdvanceRequest({ ...current, git: afterVerify });
+      await this.#completionWriter.persistVerify(
+        current,
+        basis,
+        built,
+        verifyResult,
+        Object.freeze({ assertActive: () => this.#assertActive(epoch) }),
+      );
+      this.#assertActive(epoch);
       verifyTerminalAttempted = true;
       if (verifyResult.conclusion !== "passed") {
         current = await this.#transitionVerify(current, startedVerify, "failed", epoch);

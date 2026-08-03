@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmod, mkdir, mkdtemp, open, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -20,6 +21,7 @@ import {
   parseTaskIssueId,
   parseThreadId,
 } from "../../contracts/identity.js";
+import { deriveCycleUuid } from "../../contracts/cycle-identities.js";
 import {
   parseGitSnapshot,
   parseRootBootstrap,
@@ -37,6 +39,7 @@ import {
 import { createAcceptedRevisionAuthority } from "../../runtime/RootAcceptedRevision.js";
 import type { RootToolBinding, RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
+import type { LinearIssueRecordComment } from "../../task-management/linear/LinearQueries.js";
 import {
   createTaskManageCallerAuthority,
   parseTaskWorkflowIdentities,
@@ -183,10 +186,9 @@ const cycleDraftDescription = [
   "Fail closed on malformed or incomplete Markdown, stale revisions, snapshot drift, conflicting graph facts,",
   "unknown acceptance without exact resolution, or any read-back mismatch.",
 ].join("\n");
-const correctedCycleDraftDescription = cycleDraftDescription.replace(
-  "Validate closed Markdown and exact revisions at the Root boundary.",
-  "Validate closed Markdown, copied Root facts, and exact revisions at the Root boundary.",
-);
+function cycleDraftDescriptionForTest(): string {
+  return cycleDraftDescription;
+}
 
 function bootstrap(
   correlation = "corr:bootstrap:1",
@@ -574,6 +576,8 @@ function trustedCodexTools(
       caller_issuer: callerAuthority.issuer,
       task_manager: taskManager(() => Promise.reject(new Error("unexpected_task_manager_call"))),
       snapshot_reader: { readRootSnapshot: async () => bootstrap().task },
+      record_reader: { readIssueRecordComments: async () => [] },
+      service_actor_id: "actor:symphony",
       approved_cycle_reader: { readApprovedCycle: async () => null },
       accepted_revision_issuer: acceptedRevisionAuthority.issuer,
     }),
@@ -606,6 +610,8 @@ async function controlledFixture(
   maxToolCalls = 4,
   turnTimeoutMs = 2_000,
   readRootSnapshot: () => Promise<ReturnType<typeof parseTaskSnapshot>> = async () => bootstrap().task,
+  readIssueRecordComments: (issueId: ReturnType<typeof parseTaskIssueId>) => Promise<readonly LinearIssueRecordComment[]>
+    = async () => [],
 ) {
   const rootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-r52-controlled-"));
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-r21-code-"));
@@ -633,6 +639,8 @@ async function controlledFixture(
         caller_issuer: callerAuthority.issuer,
         task_manager: manager,
         snapshot_reader: { readRootSnapshot },
+        record_reader: { readIssueRecordComments },
+        service_actor_id: "actor:symphony",
         approved_cycle_reader: { readApprovedCycle: async () => null },
         accepted_revision_issuer: acceptedRevisionAuthority.issuer,
       }),
@@ -2086,7 +2094,52 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
 
 test("controlled app-server completes fresh Define, Draft review, correction, and one-way seal", async () => {
   const rootTaskIssueId = parseTaskIssueId(rootId);
-  const cycleId = parseTaskIssueId("44444444-4444-4444-8444-444444444444");
+  const identityVersion = "symphony-identity:v1";
+  const cycleId = parseTaskIssueId(deriveCycleUuid(
+    identityVersion,
+    "cycle_issue",
+    rootId,
+    "first_cycle",
+    "first_cycle",
+  ));
+  const rootRevision = `symphony:v1:${"a".repeat(64)}`;
+  const cycleCreatedRevision = `symphony:v1:${"b".repeat(64)}`;
+  const cycleCorrectedRevision = `symphony:v1:${"c".repeat(64)}`;
+  const cycleApprovedRevision = `symphony:v1:${"d".repeat(64)}`;
+  const executionDesign = [
+    "### Execution Anchors", "",
+    `- Cycle ID: \`${cycleId}\``,
+    "- Predecessor Cycle ID: None",
+    "- Predecessor Terminal Record ID: `first_cycle`",
+    `- Approval Record ID: \`${deriveCycleUuid(identityVersion, "cycle_approval_record", cycleId)}\``,
+    `- Plan Issue ID: \`${deriveCycleUuid(identityVersion, "plan_issue", cycleId)}\``,
+    `- Plan Completion Record ID: \`${deriveCycleUuid(identityVersion, "plan_completion_record", cycleId)}\``,
+    `- Plan Invalidation Record ID: \`${deriveCycleUuid(identityVersion, "plan_invalidation_record", cycleId)}\``,
+    `- Cycle Completion Record ID: \`${deriveCycleUuid(identityVersion, "cycle_completion_record", cycleId)}\``,
+    `- Cycle Invalidation Record ID: \`${deriveCycleUuid(identityVersion, "cycle_invalidation_record", cycleId)}\``,
+    `- Delivery Completion Record ID: \`${deriveCycleUuid(identityVersion, "delivery_completion_record", cycleId)}\``,
+    `- Delivery Invalidation Record ID: \`${deriveCycleUuid(identityVersion, "delivery_invalidation_record", cycleId)}\``,
+    `- Identity Derivation Version: \`${identityVersion}\``,
+    `- Workspace Base Revision: \`${"e".repeat(64)}\``, "",
+    "### Execution Directives", "", "#### Directive: `directive:runtime`", "",
+    "Implement the approved Root runtime.", "", "##### Dependencies", "", "- None", "",
+    "##### Acceptance Criteria", "", "- `acceptance:runtime`", "",
+    "### Approved Work Groups", "", "#### Work Group: `group:runtime`", "",
+    "##### Directives", "", "- `directive:runtime`", "", "##### Dependencies", "", "- None", "",
+    "### Verification Directives", "", "#### Verification Directive: `verify:runtime`", "",
+    "Verify the approved Root runtime.", "", "##### Acceptance Criteria", "", "- `acceptance:runtime`",
+  ].join("\n");
+  const cycleDraftDescription = cycleDraftDescriptionForTest().replace(
+    "`revision:root:2`",
+    `\`${rootRevision}\``,
+  ).replace(
+    "## Failure Strategy",
+    `${executionDesign}\n\n## Failure Strategy`,
+  );
+  const correctedCycleDraftDescription = cycleDraftDescription.replace(
+    "Validate closed Markdown and exact revisions at the Root boundary.",
+    "Validate closed Markdown, copied Root facts, and exact revisions at the Root boundary.",
+  );
   const responses = new Map<string, ReturnType<typeof toolResponse>>();
   const reviewedDraftDescriptions: string[] = [];
   const readIssue = (response: ReturnType<typeof toolResponse>) => {
@@ -2216,6 +2269,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
 
   let currentTask = bootstrap().task;
   const managerCalls: string[] = [];
+  const recordComments: LinearIssueRecordComment[] = [];
   const manager = taskManager(async (call, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, call);
     const before = currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id);
@@ -2225,8 +2279,8 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     const statusUpdate = call.input.desired.state_id !== undefined;
     assert.notEqual(descriptionUpdate, statusUpdate);
     const revision = before.issue_id === rootTaskIssueId
-      ? "revision:root:2"
-      : descriptionUpdate ? "revision:cycle:2" : "revision:cycle:3";
+      ? rootRevision
+      : descriptionUpdate ? cycleCorrectedRevision : cycleApprovedRevision;
     const field = descriptionUpdate ? "description" : "status";
     const beforeValue = descriptionUpdate ? before.description : before.status;
     const afterValue = descriptionUpdate ? call.input.desired.description : call.input.desired.state_id;
@@ -2271,7 +2325,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     assert.equal(call.input.expected_parent_revision, parent.revision);
     const fresh = {
       issue_id: call.input.issue_id,
-      revision: "revision:cycle:1",
+      revision: cycleCreatedRevision,
       status: call.input.desired.state_id,
       title: call.input.desired.title,
       description: call.input.desired.description,
@@ -2302,6 +2356,47 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
       },
     }, call);
   };
+  manager.create_issue_comment = async (call, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, call);
+    const timestamp = "2026-08-02T02:00:00.000Z";
+    const bodyDigest = createHash("sha256").update(call.input.body_markdown, "utf8").digest("hex");
+    recordComments.push({
+      comment_id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      provider_created_at: timestamp,
+      provider_updated_at: timestamp,
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: bodyDigest,
+      body_markdown: call.input.body_markdown,
+    });
+    managerCalls.push(`comment:${call.input.issue_id}:${call.input.expected_issue_revision}`);
+    return parseTaskMcpResult({
+      schema_version: call.schema_version,
+      function: call.function,
+      root_id: call.root_id,
+      runtime_generation: call.runtime_generation,
+      correlation_id: call.correlation_id,
+      capability: call.capability,
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: call.input.comment_id, issue_id: call.input.issue_id },
+        fresh_comment: {
+          comment_id: call.input.comment_id,
+          issue_id: call.input.issue_id,
+          provider_created_at: timestamp,
+          provider_updated_at: timestamp,
+          provider_edited_at: null,
+          provider_archived_at: null,
+          actor_id: "actor:symphony",
+          body_digest: bodyDigest,
+        },
+        sanitized_reason: null,
+      },
+    }, call);
+  };
   manager.get_issue = async (call, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, call);
     const issue = currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null;
@@ -2327,6 +2422,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     8,
     2_000,
     async () => currentTask,
+    async (issueId) => recordComments.filter((comment) => comment.issue_id === issueId),
   );
 
   try {
@@ -2334,11 +2430,12 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     assert.deepEqual(managerCalls, [
       `update:${rootId}:revision:root:1`,
       `get:${rootId}`,
-      `create:${rootId}:revision:root:2`,
+      `create:${rootId}:${rootRevision}`,
       `get:${cycleId}`,
-      `update:${cycleId}:revision:cycle:1`,
+      `update:${cycleId}:${cycleCreatedRevision}`,
       `get:${cycleId}`,
-      `update:${cycleId}:revision:cycle:2`,
+      `comment:${cycleId}:${cycleCorrectedRevision}`,
+      `update:${cycleId}:${cycleCorrectedRevision}`,
       `get:${cycleId}`,
     ]);
     assert.equal([...responses.values()].every(({ success }) => success), true);
@@ -2361,7 +2458,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     ]);
     const sealed = currentTask.issues.find(({ issue_id }) => issue_id === cycleId);
     assert.equal(sealed?.description, correctedCycleDraftDescription);
-    assert.equal(sealed?.revision, "revision:cycle:3");
+    assert.equal(sealed?.revision, cycleApprovedRevision);
     assert.equal(f.toolLogs.length, 8);
   } finally {
     await f.root.close();

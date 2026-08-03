@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { parseRootIssueId, parseRuntimeGeneration } from "../../contracts/identity.js";
-import { parseTaskMcpCall, parseTaskMcpResult, type TaskMcpMutationCall } from "../mcp/TaskMcpSchemas.js";
+import {
+  parseTaskMcpCall,
+  parseTaskMcpResult,
+  type CreateIssueCommentCall,
+  type TaskMcpMutationCall,
+} from "../mcp/TaskMcpSchemas.js";
 import { LinearCommands, type LinearCommandClient } from "./LinearCommands.js";
 import type {
   LinearIssueCommentEvidence,
@@ -83,6 +89,7 @@ class FakeCommandClient implements LinearCommandClient {
   }
 
   createIssue(input: unknown) { return this.#effect("create_issue", input); }
+  createIssueComment(input: unknown) { return this.#effect("create_issue_comment", input); }
   updateIssue(issueId: string, input: unknown) { return this.#effect("update_issue", { issue_id: issueId, input }); }
   archiveIssue(issueId: string) { return this.#effect("archive_issue", { issue_id: issueId }); }
   createRelation(input: unknown) { return this.#effect("create_relation", input); }
@@ -129,6 +136,7 @@ function mutationCall(functionName: TaskMcpMutationCall["function"], input: unkn
   if (
     parsed.function === "get_issue" || parsed.function === "list_issues" || parsed.function === "list_children"
     || parsed.function === "list_relations" || parsed.function === "list_states" || parsed.function === "list_labels"
+    || parsed.function === "create_issue_comment"
   ) assert.fail("expected mutation call");
   return parsed;
 }
@@ -173,6 +181,24 @@ const calls = {
     expected_target_revision: "revision:target:1",
   }),
 } as const;
+
+const COMMENT_BODY = "<!-- symphony:record -->\n{\"record_kind\":\"stage_completion\"}";
+const COMMENT_DIGEST = createHash("sha256").update(COMMENT_BODY, "utf8").digest("hex");
+
+const createCommentCall = parseTaskMcpCall({
+  schema_version: 1,
+  function: "create_issue_comment",
+  root_id: "root-1",
+  runtime_generation: 1,
+  correlation_id: "corr:create-comment",
+  capability: "task_manage:create_issue_comment",
+  input: {
+    comment_id: "33333333-3333-4333-8333-333333333333",
+    issue_id: "issue-1",
+    expected_issue_revision: "revision:issue:1",
+    body_markdown: COMMENT_BODY,
+  },
+}, target) as CreateIssueCommentCall;
 
 function commands(client: FakeCommandClient, evidence = new FakeEvidenceReader()) {
   return new LinearCommands(client, evidence, { team_id: TEAM_ID, service_actor_id: "actor:1" });
@@ -262,6 +288,75 @@ test("all five generic mutations apply one exact effect after fresh precondition
     assert.equal(result.output.sanitized_reason, null);
     assert.deepEqual(client.effects, [{ kind: entry.call.function, input: entry.expectedEffect }]);
     assert.deepEqual(parseTaskMcpResult(result, entry.call), result);
+  }
+});
+
+test("comment creation proves exact absence then fresh-reads one immutable service-actor record", async () => {
+  const client = new FakeCommandClient();
+  client.enqueueIssue("issue-1", issue("issue-1", "revision:issue:1"));
+  const evidence = new FakeEvidenceReader();
+  evidence.enqueueComments("issue-1", [], [{
+    comment_id: createCommentCall.input.comment_id,
+    issue_id: "issue-1",
+    provider_created_at: "2026-07-30T00:00:01.000Z",
+    provider_updated_at: "2026-07-30T00:00:01.000Z",
+    provider_edited_at: null,
+    provider_archived_at: null,
+    actor_id: "actor:1",
+    body_digest: COMMENT_DIGEST,
+  }]);
+
+  const result = await commands(client, evidence).execute(createCommentCall, ACTIVE_EXECUTION);
+
+  assert.equal(result.output.outcome, "applied");
+  assert.deepEqual(result.output.fresh_comment, {
+    comment_id: createCommentCall.input.comment_id,
+    issue_id: "issue-1",
+    provider_created_at: "2026-07-30T00:00:01.000Z",
+    provider_updated_at: "2026-07-30T00:00:01.000Z",
+    provider_edited_at: null,
+    provider_archived_at: null,
+    actor_id: "actor:1",
+    body_digest: COMMENT_DIGEST,
+  });
+  assert.deepEqual(client.effects, [{
+    kind: "create_issue_comment",
+    input: {
+      id: createCommentCall.input.comment_id,
+      issue_id: "issue-1",
+      body_markdown: COMMENT_BODY,
+    },
+  }]);
+});
+
+test("comment creation closes stale, uncertain, and mismatched read-back without retry", async () => {
+  const exactComment: LinearIssueCommentEvidence = {
+    comment_id: createCommentCall.input.comment_id,
+    issue_id: "issue-1",
+    provider_created_at: "2026-07-30T00:00:01.000Z",
+    provider_updated_at: "2026-07-30T00:00:01.000Z",
+    provider_edited_at: null,
+    provider_archived_at: null,
+    actor_id: "actor:1",
+    body_digest: COMMENT_DIGEST,
+  };
+  const cases = [
+    { name: "stale issue", revision: "revision:issue:2", before: [], after: [], outcome: "stale_before_effect", effects: 0 },
+    { name: "identity present", revision: "revision:issue:1", before: [exactComment], after: [], outcome: "stale_before_effect", effects: 0 },
+    { name: "external actor", revision: "revision:issue:1", before: [], after: [{ ...exactComment, actor_id: "actor:other" }], outcome: "conflict_observed", effects: 1 },
+    { name: "edited timestamp", revision: "revision:issue:1", before: [], after: [{ ...exactComment, provider_updated_at: "2026-07-30T00:00:02.000Z" }], outcome: "conflict_observed", effects: 1 },
+  ] as const;
+  for (const entry of cases) {
+    const client = new FakeCommandClient();
+    client.failure = entry.effects === 1 ? new Error("provider_timeout") : null;
+    client.enqueueIssue("issue-1", issue("issue-1", entry.revision));
+    const evidence = new FakeEvidenceReader();
+    evidence.enqueueComments("issue-1", entry.before, entry.after);
+
+    const result = await commands(client, evidence).execute(createCommentCall, ACTIVE_EXECUTION);
+
+    assert.equal(result.output.outcome, entry.outcome, entry.name);
+    assert.equal(client.effects.length, entry.effects, entry.name);
   }
 });
 

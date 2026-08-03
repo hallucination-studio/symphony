@@ -37,6 +37,8 @@ import {
   type ArchiveIssueResult,
   type CreateIssueCall,
   type CreateIssueResult,
+  type CreateIssueCommentCall,
+  type CreateIssueCommentResult,
   type CreateRelationCall,
   type CreateRelationResult,
   type DeleteRelationCall,
@@ -57,6 +59,7 @@ import {
   type TaskMcpFunction,
   type TaskMcpMutationCall,
   type TaskMcpMutationResult,
+  type TaskMcpWriteCall,
   type TaskMcpResult,
   type UpdateIssueCall,
   type UpdateIssueResult,
@@ -67,7 +70,7 @@ export interface BindCycleTaskManageCommandOptions {
   readonly workflow: TaskWorkflowIdentities;
   readonly caller_issuer: TaskManageCallerIssuer;
   readonly task_manager: TaskManageCommandInterface;
-  readonly mutation_manifest: readonly TaskMcpMutationCall[];
+  readonly mutation_manifest: readonly TaskMcpWriteCall[];
   readonly materialization_issues?: readonly TaskIssueSnapshot[];
 }
 
@@ -92,7 +95,7 @@ function invalidBoundary(): never {
 function canonicalMutation(
   value: unknown,
   snapshot: CycleExecutionSnapshot,
-): TaskMcpMutationCall {
+): TaskMcpWriteCall {
   let call: TaskMcpCall;
   try {
     call = parseTaskMcpCall(value, {
@@ -108,6 +111,7 @@ function canonicalMutation(
       call.function !== "create_issue"
       && call.function !== "update_issue"
       && call.function !== "archive_issue"
+      && call.function !== "create_issue_comment"
       && call.function !== "create_relation"
       && call.function !== "delete_relation"
     )
@@ -115,7 +119,7 @@ function canonicalMutation(
   return call;
 }
 
-function mutationKey(call: TaskMcpMutationCall): string {
+function mutationKey(call: TaskMcpWriteCall): string {
   return JSON.stringify(call);
 }
 
@@ -335,6 +339,35 @@ export class CycleTaskManageCommandBinding {
     return callDenied();
   }
 
+  async create_issue_comment(
+    call: CreateIssueCommentCall,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<CreateIssueCommentResult> {
+    const canonical = this.#takeMutation(call, "create_issue_comment");
+    this.#authorizeCreateIssueComment(canonical);
+    const operation = this.#taskManager.create_issue_comment;
+    if (operation === undefined) invalidBoundary();
+    const value = await this.#callProvider(() => operation.call(
+      this.#taskManager,
+      call,
+      this.#providerExecution(call, execution),
+    ));
+    execution.assertActive();
+    return validateResult<CreateIssueCommentResult>(value, call, (result) => {
+      if (
+        result.output.target.kind !== "comment"
+        || result.output.target.comment_id !== call.input.comment_id
+        || result.output.target.issue_id !== call.input.issue_id
+      ) invalidBoundary();
+      const fresh = result.output.fresh_comment;
+      if (fresh !== null && (
+        fresh.comment_id !== call.input.comment_id
+        || fresh.issue_id !== call.input.issue_id
+      )) invalidBoundary();
+      if (result.output.outcome === "applied" && fresh === null) invalidBoundary();
+    });
+  }
+
   async list_relations(call: ListRelationsCall, execution: TaskManageBoundaryExecution): Promise<ListRelationsResult> {
     this.#assertCall(call, "list_relations");
     this.#assertOwnedIssue(call.input.issue_id);
@@ -423,17 +456,17 @@ export class CycleTaskManageCommandBinding {
     ) callDenied();
   }
 
-  #takeMutation<F extends TaskMcpMutationCall["function"]>(
-    call: Extract<TaskMcpMutationCall, { readonly function: F }>,
+  #takeMutation<F extends TaskMcpWriteCall["function"]>(
+    call: Extract<TaskMcpWriteCall, { readonly function: F }>,
     expectedFunction: F,
-  ): Extract<TaskMcpMutationCall, { readonly function: F }> {
+  ): Extract<TaskMcpWriteCall, { readonly function: F }> {
     this.#assertCall(call, expectedFunction);
     const canonical = canonicalMutation(call, this.#snapshot);
     if (canonical.function !== expectedFunction) return callDenied();
     const key = mutationKey(canonical);
     if (this.#grants.get(key) !== false) return callDenied();
     this.#grants.set(key, true);
-    return canonical as Extract<TaskMcpMutationCall, { readonly function: F }>;
+    return canonical as Extract<TaskMcpWriteCall, { readonly function: F }>;
   }
 
   #providerExecution(call: TaskMcpCall, execution: TaskManageBoundaryExecution): TaskManageExecution {
@@ -535,7 +568,16 @@ export class CycleTaskManageCommandBinding {
     ) callDenied();
   }
 
-  #assertManifest(grants: readonly TaskMcpMutationCall[]): void {
+  #authorizeCreateIssueComment(call: CreateIssueCommentCall): void {
+    this.#assertOwnedIssue(call.input.issue_id);
+    const stage = this.#stages.get(call.input.issue_id);
+    const expectedRevision = call.input.issue_id === parseTaskIssueId(this.#snapshot.cycle_id)
+      ? this.#snapshot.cycle_revision
+      : stage?.revision ?? this.#materializationIssues.get(call.input.issue_id)?.revision;
+    if (expectedRevision === undefined || call.input.expected_issue_revision !== expectedRevision) callDenied();
+  }
+
+  #assertManifest(grants: readonly TaskMcpWriteCall[]): void {
     const creates = grants.filter((call): call is CreateIssueCall => call.function === "create_issue");
     const kind = (call: CreateIssueCall) => Object.entries(this.#workflow.labels)
       .find(([, labelId]) => call.input.desired.label_ids.includes(labelId))?.[0];

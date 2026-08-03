@@ -18,8 +18,6 @@ import {
 } from "../../contracts/identity.js";
 import {
   parseCycleDraftMarkdown,
-  parsePlanGraph,
-  type PlanGraph,
 } from "../../contracts/cycle.js";
 import type { RuntimeTarget } from "../../contracts/runtime.js";
 import {
@@ -36,7 +34,6 @@ import {
 
 export const PLAN_OUTCOMES = ["completed", "failed", "canceled"] as const;
 export const MAX_PLAN_WORK_ITEMS = 32;
-export const MAX_PLAN_OUTPUT_MARKDOWN_LENGTH = 2_048;
 export const MAX_PERFORMER_CHECKS = 32;
 export const MAX_PERFORMER_SUMMARY_LENGTH = 2_048;
 
@@ -57,6 +54,12 @@ export interface PlanRequest extends PlanRequestTarget {
   readonly correlation_id: CorrelationId;
   readonly cycle_description_markdown: MarkdownText;
   readonly root_adr_markdown: MarkdownText;
+  readonly approved_work_groups: readonly [PlanWorkGroup, ...PlanWorkGroup[]];
+}
+
+export interface PlanWorkGroup {
+  readonly work_group_id: string;
+  readonly depends_on_work_group_ids: readonly string[];
 }
 
 interface PlanResultEnvelope extends PlanRequestTarget {
@@ -64,17 +67,15 @@ interface PlanResultEnvelope extends PlanRequestTarget {
   readonly correlation_id: CorrelationId;
 }
 
-export interface CompletedPlanResult extends PlanResultEnvelope, PlanGraph {
+export interface CompletedPlanResult extends PlanResultEnvelope {
   readonly outcome: "completed";
+  readonly ordered_work_group_ids: readonly [string, ...string[]];
   readonly sanitized_reason: null;
 }
 
 export interface TerminalPlanResult extends PlanResultEnvelope {
   readonly outcome: "failed" | "canceled";
-  readonly plan_summary_markdown: null;
-  readonly work_items: readonly [];
-  readonly verify: null;
-  readonly traceability_markdown: null;
+  readonly ordered_work_group_ids: readonly [];
   readonly sanitized_reason: string;
 }
 
@@ -191,10 +192,7 @@ const PLAN_RESULT_KEYS = [
   "cycle_revision",
   "correlation_id",
   "outcome",
-  "plan_summary_markdown",
-  "work_items",
-  "verify",
-  "traceability_markdown",
+  "ordered_work_group_ids",
   "sanitized_reason",
 ] as const;
 
@@ -237,6 +235,7 @@ export function parsePlanRequest(value: unknown, expected: PlanRequestTarget): P
     "correlation_id",
     "cycle_description_markdown",
     "root_adr_markdown",
+    "approved_work_groups",
   ]);
   const target = parsedPlanRequestTarget(record);
   assertPlanRequestTarget(target, expected);
@@ -247,12 +246,37 @@ export function parsePlanRequest(value: unknown, expected: PlanRequestTarget): P
   const cycleDraft = parseCycleDraftMarkdown(cycleDescription);
   const rootAdr = parseMarkdownText(record.root_adr_markdown, "invalid_plan_root_adr_markdown");
   if (rootAdr !== cycleDraft.root_adr_markdown) throw new Error("plan_root_adr_mismatch");
+  const approvedWorkGroups = parseArray(record.approved_work_groups, (value) => {
+    const group = asRecord(value);
+    assertExactKeys(group, ["work_group_id", "depends_on_work_group_ids"]);
+    return Object.freeze({
+      work_group_id: parseBoundedString(group.work_group_id, "invalid_plan_work_group_id", 128),
+      depends_on_work_group_ids: parseArray(
+        group.depends_on_work_group_ids,
+        (entry) => parseBoundedString(entry, "invalid_plan_work_group_dependency_id", 128),
+        MAX_PLAN_WORK_ITEMS,
+      ),
+    });
+  }, MAX_PLAN_WORK_ITEMS);
+  if (approvedWorkGroups.length === 0) throw new Error("plan_work_groups_required");
+  const groupIds = approvedWorkGroups.map(({ work_group_id }) => work_group_id);
+  if (new Set(groupIds).size !== groupIds.length) throw new Error("duplicate_plan_work_group_id");
+  const known = new Set(groupIds);
+  for (const group of approvedWorkGroups) {
+    if (new Set(group.depends_on_work_group_ids).size !== group.depends_on_work_group_ids.length) {
+      throw new Error("duplicate_plan_work_group_dependency");
+    }
+    if (group.depends_on_work_group_ids.some((id) => id === group.work_group_id || !known.has(id))) {
+      throw new Error("invalid_plan_work_group_dependency");
+    }
+  }
   return Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
     ...target,
     correlation_id: parseCorrelationId(record.correlation_id),
     cycle_description_markdown: cycleDescription,
     root_adr_markdown: rootAdr,
+    approved_work_groups: approvedWorkGroups as readonly [PlanWorkGroup, ...PlanWorkGroup[]],
   });
 }
 
@@ -266,18 +290,6 @@ function parseResultEnvelope(record: UnknownRecord, request: PlanRequest): PlanR
     ...target,
     correlation_id: correlationId,
   });
-}
-
-function assertPlanOutputBounded(graph: PlanGraph): void {
-  const markdown = [
-    graph.plan_summary_markdown,
-    ...graph.work_items.map(({ description_markdown }) => description_markdown),
-    graph.verify.description_markdown,
-    graph.traceability_markdown,
-  ];
-  if (markdown.some((value) => value.length > MAX_PLAN_OUTPUT_MARKDOWN_LENGTH)) {
-    throw new Error("plan_output_markdown_limit_exceeded");
-  }
 }
 
 function parseReason(value: unknown): string {
@@ -294,35 +306,38 @@ export function parsePlanResult(value: unknown, request: PlanRequest): PlanResul
 
   if (outcome === "completed") {
     if (record.sanitized_reason !== null) throw new Error("completed_plan_reason_forbidden");
-    const graph = parsePlanGraph({
-      plan_summary_markdown: record.plan_summary_markdown,
-      work_items: record.work_items,
-      verify: record.verify,
-      traceability_markdown: record.traceability_markdown,
-    });
-    assertPlanOutputBounded(graph);
+    const orderedIds = parseArray(
+      record.ordered_work_group_ids,
+      (entry) => parseBoundedString(entry, "invalid_plan_work_group_id", 128),
+      MAX_PLAN_WORK_ITEMS,
+    );
+    const expectedIds = request.approved_work_groups.map(({ work_group_id }) => work_group_id);
+    if (
+      orderedIds.length !== expectedIds.length
+      || new Set(orderedIds).size !== orderedIds.length
+      || orderedIds.some((id) => !expectedIds.includes(id))
+    ) throw new Error("plan_work_group_order_mismatch");
+    const position = new Map(orderedIds.map((id, index) => [id, index]));
+    for (const group of request.approved_work_groups) {
+      if (group.depends_on_work_group_ids.some((dependency) => position.get(dependency)! >= position.get(group.work_group_id)!)) {
+        throw new Error("plan_work_group_order_illegal");
+      }
+    }
     return Object.freeze({
       ...envelope,
       outcome,
-      ...graph,
+      ordered_work_group_ids: orderedIds as readonly [string, ...string[]],
       sanitized_reason: null,
     });
   }
 
-  if (
-    record.plan_summary_markdown !== null
-    || !Array.isArray(record.work_items)
-    || record.work_items.length !== 0
-    || record.verify !== null
-    || record.traceability_markdown !== null
-  ) throw new Error("terminal_plan_graph_forbidden");
+  if (!Array.isArray(record.ordered_work_group_ids) || record.ordered_work_group_ids.length !== 0) {
+    throw new Error("terminal_plan_order_forbidden");
+  }
   return Object.freeze({
     ...envelope,
     outcome,
-    plan_summary_markdown: null,
-    work_items: Object.freeze([]) as readonly [],
-    verify: null,
-    traceability_markdown: null,
+    ordered_work_group_ids: Object.freeze([]) as readonly [],
     sanitized_reason: parseReason(record.sanitized_reason),
   });
 }
@@ -437,8 +452,10 @@ function parseVerifyChecks(value: unknown): readonly VerifyCheckEvidence[] {
 function parseWorkCheckEvidence(value: unknown): WorkCheckEvidence {
   const record = asRecord(value);
   assertExactKeys(record, ["check", "status", "sanitized_summary_markdown"]);
+  const check = parseBoundedString(record.check, "invalid_work_check", 1_024);
+  if (containsCredentialMaterial(check)) throw new Error("invalid_work_check");
   return Object.freeze({
-    check: parseBoundedString(record.check, "invalid_work_check", 1_024),
+    check,
     status: parseEnum(record.status, CHECK_STATUSES),
     sanitized_summary_markdown: record.sanitized_summary_markdown === null
       ? null

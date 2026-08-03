@@ -292,6 +292,22 @@ test("complete Root snapshot includes every descendant and internal relation wit
   assert.equal("active_cycle" in snapshot, false);
 });
 
+test("complete Root snapshots require service-actor creation evidence for every Stage", async () => {
+  const client = new FakeLinearQueryClient();
+  client.issues.set("root-1", issue("root-1", null, "In Progress", ["symphony:kind/root"]));
+  client.children.set("root-1", [
+    issue("cycle-1", "root-1", "In Progress", ["symphony:kind/cycle"]),
+  ]);
+  client.children.set("cycle-1", [
+    issue("work-1", "cycle-1", "Todo", ["symphony:kind/work"], { creator_id: "actor:foreign" }),
+  ]);
+
+  await assert.rejects(
+    new LinearQueries(client, options()).readRootSnapshot(parseRootIssueId("root-1")),
+    /linear_stage_creator_mismatch/u,
+  );
+});
+
 test("inventory and snapshot fail closed on malformed facts, ambiguity, and raw provider errors", async () => {
   const malformed = new FakeLinearQueryClient();
   malformed.teamIssues = [{ ...issue("root-1", null, "Todo", ["symphony:kind/root"]), sdk_private: true }];
@@ -424,6 +440,10 @@ test("complete history and comment reads paginate, classify origin, and never ex
   assert.equal(comments[0]?.provider_edited_at, "2026-07-30T01:00:00.000Z");
   assert.equal(comments[1]?.provider_archived_at, "2026-07-30T02:00:00.000Z");
   assert.equal(JSON.stringify(comments).includes("private body"), false);
+  const records = await queries.readIssueRecordComments(parseTaskIssueId("root-1"));
+  assert.equal(records.length, 51);
+  assert.equal(records[0]?.body_markdown, "private body 0");
+  assert.equal(records[0]?.body_digest, "a".repeat(64));
 });
 
 test("history, comments, and service actor validation fail closed on incomplete identity evidence", async () => {
@@ -460,4 +480,15 @@ test("history, comments, and service actor validation fail closed on incomplete 
     active: true,
     app: true,
   });
+
+  const evidenceClient = new FakeLinearQueryClient();
+  evidenceClient.issues.set("work-1", issue("work-1", "cycle-1", "Todo", ["symphony:kind/work"]));
+  assert.deepEqual(
+    await new LinearQueries(evidenceClient, options()).readIssueCreationEvidence(parseTaskIssueId("work-1")),
+    {
+      issue_id: "work-1",
+      provider_created_at: "2026-07-30T00:00:00.000Z",
+      actor_id: ACTOR_ID,
+    },
+  );
 });

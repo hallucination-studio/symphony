@@ -226,6 +226,8 @@ test("Root denies approved Cycle, Stage graph, and active Stage mutations before
     caller_issuer: callerAuthority.issuer,
     task_manager: recordingManager(effects),
     snapshot_reader: { readRootSnapshot: async () => approvedSnapshot() },
+    record_reader: { readIssueRecordComments: async () => [] },
+    service_actor_id: "actor:symphony",
     approved_cycle_reader: { readApprovedCycle: async () => null },
     accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   }).forCorrelation(correlationId);

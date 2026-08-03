@@ -21,7 +21,7 @@ import {
   type CycleExecutionTarget,
 } from "../contracts/cycle.js";
 import type { TaskIssueSnapshot } from "../contracts/observation.js";
-import { parseTaskMcpResult, TASK_MCP_CAPABILITIES, type CreateIssueCall, type CreateRelationCall, type DeleteRelationCall, type GetIssueCall, type ListIssuesCall, type ListRelationsCall, type UpdateIssueCall } from "../task-management/mcp/TaskMcpSchemas.js";
+import { parseTaskMcpResult, TASK_MCP_CAPABILITIES, type CreateIssueCall, type CreateIssueCommentCall, type CreateRelationCall, type DeleteRelationCall, type GetIssueCall, type ListIssuesCall, type ListRelationsCall, type UpdateIssueCall } from "../task-management/mcp/TaskMcpSchemas.js";
 import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   createTaskManageCallerAuthority,
@@ -316,6 +316,19 @@ function createMaterializedRelation(): CreateRelationCall {
   };
 }
 
+function createStageComment(revision = "revision:work:current"): CreateIssueCommentCall {
+  return {
+    ...envelope("create_issue_comment"),
+    function: "create_issue_comment",
+    input: {
+      comment_id: "33333333-3333-4333-8333-333333333333",
+      issue_id: parseTaskIssueId("WORK-A"),
+      expected_issue_revision: parseTaskRevision(revision),
+      body_markdown: "<!-- symphony:record -->\n{\"record_kind\":\"stage_completion\"}",
+    },
+  };
+}
+
 function recordingManager(effects: string[]): TaskManageCommandInterface {
   const record = (name: string) => async () => {
     effects.push(name);
@@ -367,6 +380,57 @@ test("Cycle machine denies Root, Cycle specification, sealed Stage, successor, a
     await assert.rejects(invoke(), denied);
     assert.deepEqual(effects, []);
   }
+});
+
+test("Cycle machine grants one exact Stage record write at the current revision", async () => {
+  const call = createStageComment();
+  const effects: string[] = [];
+  const manager = recordingManager(effects);
+  manager.create_issue_comment = async (received, providerExecution) => {
+    callerAuthority.verifier.assert(providerExecution.caller, received);
+    effects.push("create_issue_comment");
+    return parseTaskMcpResult({
+      ...envelope("create_issue_comment"),
+      function: "create_issue_comment",
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: received.input.comment_id, issue_id: received.input.issue_id },
+        fresh_comment: {
+          comment_id: received.input.comment_id,
+          issue_id: received.input.issue_id,
+          provider_created_at: "2026-08-02T01:00:00.000Z",
+          provider_updated_at: "2026-08-02T01:00:00.000Z",
+          provider_edited_at: null,
+          provider_archived_at: null,
+          actor_id: "actor:symphony",
+          body_digest: "a".repeat(64),
+        },
+        sanitized_reason: null,
+      },
+    }, received);
+  };
+  const bound = bindCycleTaskManageCommand({
+    snapshot,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    mutation_manifest: [call],
+  });
+
+  assert.equal((await bound.create_issue_comment(call, execution)).output.outcome, "applied");
+  await assert.rejects(bound.create_issue_comment(call, execution), denied);
+  assert.deepEqual(effects, ["create_issue_comment"]);
+
+  const stale = createStageComment("revision:work:stale");
+  const staleBound = bindCycleTaskManageCommand({
+    snapshot,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: recordingManager(effects),
+    mutation_manifest: [stale],
+  });
+  await assert.rejects(staleBound.create_issue_comment(stale, execution), denied);
 });
 
 test("Cycle machine rejects duplicate or incomplete graph-materialization manifests", () => {

@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   parseSealedExecutionGraph,
   type CycleAdvanceRequest,
@@ -7,6 +5,7 @@ import {
   type ExecutionGraphSealDigest,
   type StageExecutionSnapshot,
 } from "../../contracts/cycle.js";
+import type { SealedCycleBasis } from "../../contracts/cycle-records.js";
 import {
   parseStageIssueId,
   parseTaskIssueId,
@@ -47,6 +46,11 @@ import {
 } from "./CycleMachine.js";
 import type { FreshCycleExecutionReader } from "./CycleMachine.js";
 import { CycleGraphMaterializer } from "./CycleGraphMaterializer.js";
+import {
+  buildPlanGraphManifest,
+  type BuiltPlanGraphManifest,
+} from "./PlanGraphManifest.js";
+import type { PlanCompletionRecordWriter } from "./PlanCompletionRecord.js";
 import { reduceCycleTransition } from "./CycleTransition.js";
 import {
   CycleCommitVerificationError,
@@ -78,11 +82,32 @@ export interface CyclePlanPerformerFactory {
   create(target: PlanRequestTarget): Promise<PlanPerformerInterface>;
 }
 
+export interface FreshSealedCycleBasisReader {
+  readSealedCycleBasis(cycleId: TaskIssueId): Promise<SealedCycleBasis>;
+}
+
+interface PlanCompletionRecordPersistence {
+  persistCompleted(
+    ...args: Parameters<PlanCompletionRecordWriter["persistCompleted"]>
+  ): Promise<unknown>;
+  persistPlanTerminal(...args: Parameters<PlanCompletionRecordWriter["persistPlanTerminal"]>): Promise<unknown>;
+  readCompleted(
+    request: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+  ): Promise<BuiltPlanGraphManifest | null>;
+  persistWork(...args: Parameters<PlanCompletionRecordWriter["persistWork"]>): Promise<unknown>;
+  persistVerify(...args: Parameters<PlanCompletionRecordWriter["persistVerify"]>): Promise<unknown>;
+  persistPlanInvalidation(...args: Parameters<PlanCompletionRecordWriter["persistPlanInvalidation"]>): Promise<unknown>;
+  hasPlanInvalidation(...args: Parameters<PlanCompletionRecordWriter["hasPlanInvalidation"]>): Promise<boolean>;
+}
+
 export interface CyclePlanMachineOptions {
   readonly workflow: TaskWorkflowIdentities;
   readonly caller_issuer: TaskManageCallerIssuer;
   readonly task_manager: TaskManageCommandInterface;
   readonly reader: FreshCycleExecutionReader;
+  readonly sealed_basis_reader: FreshSealedCycleBasisReader;
+  readonly plan_completion_record_writer: PlanCompletionRecordPersistence;
   readonly git_workspace: GitWorkspaceInterface;
   readonly plan_performer_factory: CyclePlanPerformerFactory;
   readonly work_performer_factory: CycleWorkPerformerFactory;
@@ -171,6 +196,7 @@ function parseExecution(value: CycleMachineExecution): CycleMachineExecution {
 function createPlanCall(
   request: CycleAdvanceRequest,
   workflow: TaskWorkflowIdentities,
+  basis: SealedCycleBasis,
 ): CreateIssueCall {
   return Object.freeze({
     schema_version: 1,
@@ -180,7 +206,7 @@ function createPlanCall(
     correlation_id: request.correlation_id,
     capability: TASK_MCP_CAPABILITIES.create_issue,
     input: Object.freeze({
-      issue_id: parseTaskIssueId(randomUUID()),
+      issue_id: basis.specification.plan_issue_id,
       parent_issue_id: parseTaskIssueId(request.cycle_id),
       expected_parent_revision: request.cycle_revision,
       desired: Object.freeze({
@@ -193,6 +219,29 @@ function createPlanCall(
       }),
     }),
   });
+}
+
+function nextPersistedWorkIssue(
+  request: CycleAdvanceRequest,
+  built: BuiltPlanGraphManifest,
+): StageExecutionSnapshot["issue_id"] {
+  const byId = new Map(request.sealed_work_issues.map((stage) => [parseTaskIssueId(stage.issue_id), stage]));
+  if (
+    byId.size !== built.manifest.ordered_work_nodes.length
+    || built.manifest.ordered_work_nodes.some(({ issue_id }) => !byId.has(issue_id))
+  ) throw new Error("persisted_work_graph_mismatch");
+  let next: StageExecutionSnapshot["issue_id"] | null = null;
+  for (const node of built.manifest.ordered_work_nodes) {
+    const stage = byId.get(node.issue_id)!;
+    if (next === null && stage.status === "done") continue;
+    if (next === null && stage.status === "todo") {
+      next = stage.issue_id;
+      continue;
+    }
+    if (stage.status !== "todo") throw new Error("persisted_work_order_blocked");
+  }
+  if (next !== null) return next;
+  throw new Error("persisted_work_order_complete");
 }
 
 function statusCall(
@@ -253,6 +302,8 @@ export class CyclePlanMachine implements CycleMachineInterface {
   readonly #planAttempts = new Set<string>();
   #planPerformer: PlanPerformerInterface | null = null;
   readonly #planPerformerFactory: CyclePlanPerformerFactory;
+  readonly #planCompletionRecordWriter: PlanCompletionRecordPersistence;
+  readonly #sealedBasisReader: FreshSealedCycleBasisReader;
   #sealedGraphDigest: ExecutionGraphSealDigest | null = null;
   readonly #stageOwners = new Map<StageExecutionSnapshot["issue_id"], CycleAdvanceRequest["cycle_id"]>();
   readonly #taskManager: TaskManageCommandInterface;
@@ -267,6 +318,8 @@ export class CyclePlanMachine implements CycleMachineInterface {
     this.#callerIssuer = options.caller_issuer;
     this.#taskManager = options.task_manager;
     this.#planPerformerFactory = options.plan_performer_factory;
+    this.#planCompletionRecordWriter = options.plan_completion_record_writer;
+    this.#sealedBasisReader = options.sealed_basis_reader;
     this.#commitVerifier = new CycleCommitVerifier({
       workflow: this.#workflow,
       caller_issuer: this.#callerIssuer,
@@ -274,6 +327,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
       reader: options.reader,
       git_workspace: options.git_workspace,
       performer_factory: options.verify_performer_factory,
+      completion_writer: this.#planCompletionRecordWriter,
     });
     this.#materializer = new CycleGraphMaterializer({
       workflow: this.#workflow,
@@ -287,6 +341,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
       task_manager: this.#taskManager,
       reader: options.reader,
       performer_factory: options.work_performer_factory,
+      completion_writer: this.#planCompletionRecordWriter,
     });
   }
 
@@ -345,6 +400,20 @@ export class CyclePlanMachine implements CycleMachineInterface {
     if (pending !== undefined) {
       return this.#failCycle(request, pending.reason, pending.plan_status, epoch);
     }
+    if (request.plan_issue?.status === "in_progress") {
+      try {
+        const basis = await this.#readSealedBasis(request);
+        if (await this.#planCompletionRecordWriter.hasPlanInvalidation(request, basis)) {
+          return this.#failCycle(request, "plan_phase_failed", "failed", epoch);
+        }
+        const persisted = await this.#planCompletionRecordWriter.readCompleted(request, basis);
+        this.#assertActive(epoch);
+        if (persisted !== null) return this.#materializePersistedPlan(request, basis, persisted, epoch);
+      } catch {
+        this.#assertActive(epoch);
+        return this.#failCycle(request, "plan_phase_failed", "failed", epoch);
+      }
+    }
     if (execution.ownership === "lost") {
       return this.#failCycle(request, "lost_execution_context", "failed", epoch);
     }
@@ -386,7 +455,11 @@ export class CyclePlanMachine implements CycleMachineInterface {
     ) return this.#failCycle(request, "lost_execution_context", "failed", epoch);
     if (transition.action === "run_work") {
       try {
-        const execution = await this.#workExecutor.execute(request, transition.work_issue_id);
+        const basis = await this.#readSealedBasis(request);
+        const built = await this.#planCompletionRecordWriter.readCompleted(request, basis);
+        if (built === null) throw new Error("plan_completion_record_missing");
+        const workIssueId = nextPersistedWorkIssue(request, built);
+        const execution = await this.#workExecutor.execute(request, workIssueId, basis, built);
         this.#assertActive(epoch);
         if (execution.outcome === "completed") {
           this.#remember(execution.snapshot);
@@ -405,7 +478,10 @@ export class CyclePlanMachine implements CycleMachineInterface {
     }
     if (transition.action === "commit_and_verify") {
       try {
-        const execution = await this.#commitVerifier.execute(request, transition);
+        const basis = await this.#readSealedBasis(request);
+        const built = await this.#planCompletionRecordWriter.readCompleted(request, basis);
+        if (built === null) throw new Error("plan_completion_record_missing");
+        const execution = await this.#commitVerifier.execute(request, transition, basis, built);
         this.#assertActive(epoch);
         this.#remember(execution.snapshot);
         return execution.outcome === "awaiting_acceptance"
@@ -434,7 +510,8 @@ export class CyclePlanMachine implements CycleMachineInterface {
     this.#planCreations.add(cycleKey);
 
     try {
-      const call = createPlanCall(request, this.#workflow);
+      const basis = await this.#readSealedBasis(request);
+      const call = createPlanCall(request, this.#workflow, basis);
       const command = bindCycleTaskManageCommand({
         snapshot: request,
         workflow: this.#workflow,
@@ -488,6 +565,71 @@ export class CyclePlanMachine implements CycleMachineInterface {
     }
   }
 
+  async #materializePersistedPlan(
+    request: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
+    epoch: number,
+  ): Promise<CycleAdvanceResult> {
+    try {
+      let readback: CycleAdvanceRequest;
+      try {
+        readback = await this.#materializer.materialize(request, built, this.#execution(epoch));
+      } catch {
+        await this.#quarantineMaterialization(request, basis, built, epoch);
+        throw new Error("partial_graph_materialization");
+      }
+      this.#assertActive(epoch);
+      this.#sealedGraphDigest = readback.sealed_graph_digest;
+      const plan = readback.plan_issue;
+      if (plan === null || plan.status !== "in_progress") throw new Error("persisted_plan_source_invalid");
+      const finishCall = statusCall(
+        readback,
+        parseTaskIssueId(plan.issue_id),
+        plan.revision,
+        this.#workflow.stage_states.done,
+      );
+      const command = bindCycleTaskManageCommand({
+        snapshot: readback,
+        workflow: this.#workflow,
+        caller_issuer: this.#callerIssuer,
+        task_manager: this.#taskManager,
+        mutation_manifest: [finishCall],
+      });
+      const finishedPlan = appliedUpdatedIssue((await command.update_issue(
+        finishCall,
+        this.#execution(epoch),
+      )).output);
+      this.#assertActive(epoch);
+      this.#remember(bindCycleAdvanceRequest({
+        ...readback,
+        plan_issue: { ...plan, revision: finishedPlan.revision, status: "done" },
+      }));
+      return result(request, "advanced");
+    } catch {
+      this.#assertActive(epoch);
+      return this.#failCycle(request, "plan_phase_failed", "failed", epoch);
+    }
+  }
+
+  async #quarantineMaterialization(
+    request: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
+    epoch: number,
+  ): Promise<CycleAdvanceRequest> {
+    const observed = await this.#materializer.readCurrent(request).catch(() => request);
+    this.#assertActive(epoch);
+    await this.#planCompletionRecordWriter.persistPlanInvalidation(
+      observed,
+      basis,
+      built,
+      this.#execution(epoch),
+    );
+    this.#assertActive(epoch);
+    return observed;
+  }
+
   async #planAndMaterialize(
     request: CycleAdvanceRequest,
     epoch: number,
@@ -497,6 +639,10 @@ export class CyclePlanMachine implements CycleMachineInterface {
     try {
       const planStage = request.plan_issue;
       if (planStage === null) throw new Error("plan_issue_missing");
+      const basis = await this.#readSealedBasis(request);
+      if (parseTaskIssueId(planStage.issue_id) !== basis.specification.plan_issue_id) {
+        throw new Error("plan_issue_identity_mismatch");
+      }
       const startCall = statusCall(
         request,
         parseTaskIssueId(planStage.issue_id),
@@ -558,6 +704,10 @@ export class CyclePlanMachine implements CycleMachineInterface {
         correlation_id: request.correlation_id,
         cycle_description_markdown: request.specification.cycle_description_markdown,
         root_adr_markdown: request.specification.root_adr_markdown,
+        approved_work_groups: basis.specification.approved_work_groups.map((group) => Object.freeze({
+          work_group_id: group.work_group_id,
+          depends_on_work_group_ids: group.depends_on_work_group_ids,
+        })),
       }, target);
       let rawPlanResult;
       try {
@@ -569,13 +719,40 @@ export class CyclePlanMachine implements CycleMachineInterface {
       const planResult = parsePlanResult(rawPlanResult, planRequest);
       if (planResult.outcome !== "completed") {
         planTerminalStatus = planResult.outcome;
+        await this.#planCompletionRecordWriter.persistPlanTerminal(
+          startedSnapshot,
+          basis,
+          planResult.outcome,
+          planResult.sanitized_reason,
+          this.#execution(epoch),
+        );
+        this.#assertActive(epoch);
         throw new Error(planResult.outcome === "failed" ? "plan_failed" : "plan_canceled");
       }
-      const readback = await this.#materializer.materialize(
+      const built = buildPlanGraphManifest({
+        basis,
+        ordered_work_group_ids: planResult.ordered_work_group_ids,
+        plan_title: planStage.title,
+        plan_instruction_markdown: planStage.description_markdown,
+      });
+      await this.#planCompletionRecordWriter.persistCompleted(
         startedSnapshot,
-        planResult,
+        basis,
+        built,
         this.#execution(epoch),
       );
+      this.#assertActive(epoch);
+      let readback: CycleAdvanceRequest;
+      try {
+        readback = await this.#materializer.materialize(
+          startedSnapshot,
+          built,
+          this.#execution(epoch),
+        );
+      } catch {
+        failureSnapshot = await this.#quarantineMaterialization(startedSnapshot, basis, built, epoch);
+        throw new Error("partial_graph_materialization");
+      }
       this.#assertActive(epoch);
       failureSnapshot = readback;
       this.#sealedGraphDigest = readback.sealed_graph_digest;
@@ -611,6 +788,16 @@ export class CyclePlanMachine implements CycleMachineInterface {
       this.#assertActive(epoch);
       return this.#failCycle(failureSnapshot, "plan_phase_failed", planTerminalStatus, epoch);
     }
+  }
+
+  async #readSealedBasis(request: CycleAdvanceRequest): Promise<SealedCycleBasis> {
+    const basis = await this.#sealedBasisReader.readSealedCycleBasis(parseTaskIssueId(request.cycle_id));
+    if (
+      basis.specification.cycle_id !== parseTaskIssueId(request.cycle_id)
+      || basis.specification.root_id !== request.root_id
+      || basis.specification.specification_seal_digest === null
+    ) throw new Error("sealed_cycle_basis_mismatch");
+    return basis;
   }
 
   async #failCycle(

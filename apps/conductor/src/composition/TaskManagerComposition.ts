@@ -18,6 +18,8 @@ import {
   type ArchiveIssueResult,
   type CreateIssueCall,
   type CreateIssueResult,
+  type CreateIssueCommentCall,
+  type CreateIssueCommentResult,
   type CreateRelationCall,
   type CreateRelationResult,
   type DeleteRelationCall,
@@ -36,6 +38,7 @@ import {
   type ListStatesResult,
   type UpdateIssueCall,
   type UpdateIssueResult,
+  type TaskMcpMutationCall,
 } from "../task-management/mcp/TaskMcpSchemas.js";
 import type { ConductorConfig } from "./config.js";
 
@@ -175,6 +178,13 @@ export class LinearTaskManageCommand implements TaskManageCommandInterface {
     return this.#mutation(call, execution);
   }
 
+  create_issue_comment(
+    call: CreateIssueCommentCall,
+    execution: TaskManageExecution,
+  ): Promise<CreateIssueCommentResult> {
+    return this.#mutation(call, execution);
+  }
+
   list_relations(call: ListRelationsCall, execution: TaskManageExecution): Promise<ListRelationsResult> {
     return this.#query(call, execution, () => this.queries.list_relations(call));
   }
@@ -207,17 +217,21 @@ export class LinearTaskManageCommand implements TaskManageCommandInterface {
     return result;
   }
 
-  async #mutation<C extends CreateIssueCall | UpdateIssueCall | ArchiveIssueCall | CreateRelationCall | DeleteRelationCall>(
+  async #mutation<C extends
+    CreateIssueCall | UpdateIssueCall | ArchiveIssueCall | CreateIssueCommentCall | CreateRelationCall | DeleteRelationCall>(
     call: C,
     execution: TaskManageExecution,
   ): Promise<C extends CreateIssueCall ? CreateIssueResult
     : C extends UpdateIssueCall ? UpdateIssueResult
       : C extends ArchiveIssueCall ? ArchiveIssueResult
-        : C extends CreateRelationCall ? CreateRelationResult
-          : DeleteRelationResult> {
+        : C extends CreateIssueCommentCall ? CreateIssueCommentResult
+          : C extends CreateRelationCall ? CreateRelationResult
+            : DeleteRelationResult> {
     this.verifier.assert(execution.caller, call);
     execution.assertActive();
-    const result = await this.commands.execute(call, execution);
+    const result = call.function === "create_issue_comment"
+      ? await this.commands.execute(call, execution)
+      : await this.commands.execute(call as TaskMcpMutationCall, execution);
     execution.assertActive();
     return result as never;
   }

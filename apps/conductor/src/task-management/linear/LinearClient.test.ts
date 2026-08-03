@@ -90,6 +90,10 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
       calls.push({ createIssue: input });
       return { success: true, issue: { sdk_private: true } };
     },
+    createComment: async (input: unknown) => {
+      calls.push({ createComment: input });
+      return { success: true, comment: { sdk_private: true } };
+    },
     updateIssue: async (id: string, input: unknown) => {
       calls.push({ updateIssue: { id, input } });
       return { success: true, issue: { sdk_private: true } };
@@ -219,6 +223,11 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
     label_ids: ["label:work"],
     delegate_id: null,
     priority: 2,
+  }), { success: true });
+  assert.deepEqual(await client.createIssueComment({
+    id: "33333333-3333-4333-8333-333333333333",
+    issue_id: "root-1",
+    body_markdown: "record body",
   }), { success: true });
   assert.deepEqual(await client.updateIssue("root-1", {
     title: "Updated",

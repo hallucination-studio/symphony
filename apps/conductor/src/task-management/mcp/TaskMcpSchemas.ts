@@ -43,7 +43,9 @@ export const TASK_MCP_FUNCTIONS = [
   "list_labels",
 ] as const;
 
-export type TaskMcpFunction = typeof TASK_MCP_FUNCTIONS[number];
+export type TaskMcpPublicFunction = typeof TASK_MCP_FUNCTIONS[number];
+export type TaskMcpFunction = TaskMcpPublicFunction | "create_issue_comment";
+const TASK_MCP_ALL_FUNCTIONS = [...TASK_MCP_FUNCTIONS, "create_issue_comment"] as const;
 
 export const TASK_MCP_CAPABILITIES = Object.freeze({
   get_issue: "task_manage:get_issue",
@@ -52,6 +54,7 @@ export const TASK_MCP_CAPABILITIES = Object.freeze({
   create_issue: "task_manage:create_issue",
   update_issue: "task_manage:update_issue",
   archive_issue: "task_manage:archive_issue",
+  create_issue_comment: "task_manage:create_issue_comment",
   list_relations: "task_manage:list_relations",
   create_relation: "task_manage:create_relation",
   delete_relation: "task_manage:delete_relation",
@@ -125,6 +128,14 @@ export type UpdateIssueCall = TaskMcpEnvelope<"update_issue"> & {
 export type ArchiveIssueCall = TaskMcpEnvelope<"archive_issue"> & {
   readonly input: { readonly issue_id: TaskIssueId; readonly expected_revision: TaskRevision };
 };
+export type CreateIssueCommentCall = TaskMcpEnvelope<"create_issue_comment"> & {
+  readonly input: {
+    readonly comment_id: string;
+    readonly issue_id: TaskIssueId;
+    readonly expected_issue_revision: TaskRevision;
+    readonly body_markdown: string;
+  };
+};
 export type CreateRelationCall = TaskMcpEnvelope<"create_relation"> & {
   readonly input: {
     readonly relation_id: TaskRelationId;
@@ -161,7 +172,8 @@ export type TaskMcpMutationCall =
   | CreateRelationCall
   | DeleteRelationCall;
 
-export type TaskMcpCall = TaskMcpQueryCall | TaskMcpMutationCall;
+export type TaskMcpWriteCall = TaskMcpMutationCall | CreateIssueCommentCall;
+export type TaskMcpCall = TaskMcpQueryCall | TaskMcpWriteCall;
 
 export interface TaskStateResource {
   readonly state_id: TaskStateId;
@@ -221,9 +233,35 @@ export interface TaskMutationOutput {
   readonly sanitized_reason: string | null;
 }
 
+export interface TaskCommentResource {
+  readonly comment_id: string;
+  readonly issue_id: TaskIssueId;
+  readonly provider_created_at: string;
+  readonly provider_updated_at: string;
+  readonly provider_edited_at: string | null;
+  readonly provider_archived_at: string | null;
+  readonly actor_id: string | null;
+  readonly body_digest: string;
+}
+
+export interface TaskCommentMutationOutput {
+  readonly outcome: "applied" | "not_applied" | "stale_before_effect" | "conflict_observed";
+  readonly effect_may_have_occurred: boolean;
+  readonly target: {
+    readonly kind: "comment";
+    readonly comment_id: string;
+    readonly issue_id: TaskIssueId;
+  };
+  readonly fresh_comment: TaskCommentResource | null;
+  readonly sanitized_reason: string | null;
+}
+
 export type CreateIssueResult = TaskMcpEnvelope<"create_issue"> & { readonly output: TaskMutationOutput };
 export type UpdateIssueResult = TaskMcpEnvelope<"update_issue"> & { readonly output: TaskMutationOutput };
 export type ArchiveIssueResult = TaskMcpEnvelope<"archive_issue"> & { readonly output: TaskMutationOutput };
+export type CreateIssueCommentResult = TaskMcpEnvelope<"create_issue_comment"> & {
+  readonly output: TaskCommentMutationOutput;
+};
 export type CreateRelationResult = TaskMcpEnvelope<"create_relation"> & { readonly output: TaskMutationOutput };
 export type DeleteRelationResult = TaskMcpEnvelope<"delete_relation"> & { readonly output: TaskMutationOutput };
 
@@ -234,7 +272,8 @@ export type TaskMcpMutationResult =
   | CreateRelationResult
   | DeleteRelationResult;
 
-export type TaskMcpResult = TaskMcpQueryResult | TaskMcpMutationResult;
+export type TaskMcpWriteResult = TaskMcpMutationResult | CreateIssueCommentResult;
+export type TaskMcpResult = TaskMcpQueryResult | TaskMcpWriteResult;
 
 const ENVELOPE_KEYS = [
   "schema_version", "function", "root_id", "runtime_generation", "correlation_id", "capability",
@@ -259,6 +298,13 @@ function parseDescription(value: unknown): string | null {
   if (value === null) return null;
   if (typeof value !== "string" || value.length > 100_000 || /\0/u.test(value)) {
     throw new Error("invalid_task_description");
+  }
+  return value;
+}
+
+function parseCommentBody(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 100_000 || /\0/u.test(value)) {
+    throw new Error("invalid_comment_body");
   }
   return value;
 }
@@ -308,8 +354,10 @@ function parseUpdateDesired(value: unknown): UpdateIssueDesired {
   return Object.freeze(desired) as UpdateIssueDesired;
 }
 
-function parseCallerUuid(value: unknown, kind: "issue" | "relation"): string {
-  const parsed = kind === "issue" ? parseTaskIssueId(value) : parseTaskRelationId(value);
+function parseCallerUuid(value: unknown, kind: "issue" | "relation" | "comment"): string {
+  const parsed = kind === "issue"
+    ? parseTaskIssueId(value)
+    : kind === "relation" ? parseTaskRelationId(value) : parseBoundedString(value, "invalid_comment_id", 128);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(parsed)) {
     throw new Error(`invalid_${kind}_uuid`);
   }
@@ -345,7 +393,7 @@ function parseCallEnvelope<F extends TaskMcpFunction>(
 export function parseTaskMcpCall(value: unknown, expected: RuntimeTarget): TaskMcpCall {
   const record = asRecord(value);
   assertExactKeys(record, [...ENVELOPE_KEYS, "input"]);
-  const functionName = parseEnum(record.function, TASK_MCP_FUNCTIONS);
+  const functionName = parseEnum(record.function, TASK_MCP_ALL_FUNCTIONS);
   const input = asRecord(record.input);
   switch (functionName) {
     case "get_issue": {
@@ -396,6 +444,14 @@ export function parseTaskMcpCall(value: unknown, expected: RuntimeTarget): TaskM
         issue_id: parseTaskIssueId(input.issue_id),
         expected_revision: parseTaskRevision(input.expected_revision),
       }) });
+    case "create_issue_comment":
+      assertExactKeys(input, ["comment_id", "issue_id", "expected_issue_revision", "body_markdown"]);
+      return Object.freeze({ ...parseCallEnvelope(record, functionName, expected), input: Object.freeze({
+        comment_id: parseCallerUuid(input.comment_id, "comment"),
+        issue_id: parseTaskIssueId(input.issue_id),
+        expected_issue_revision: parseTaskRevision(input.expected_issue_revision),
+        body_markdown: parseCommentBody(input.body_markdown),
+      }) });
     case "create_relation": {
       assertExactKeys(input, [
         "relation_id", "relation_type", "source_issue_id", "expected_source_revision", "target_issue_id",
@@ -434,7 +490,7 @@ export function parseTaskMcpCall(value: unknown, expected: RuntimeTarget): TaskM
 }
 
 function assertResultEnvelope(record: Record<string, unknown>, call: TaskMcpCall): void {
-  const functionName = parseEnum(record.function, TASK_MCP_FUNCTIONS);
+  const functionName = parseEnum(record.function, TASK_MCP_ALL_FUNCTIONS);
   if (functionName !== call.function) throw new Error("function_mismatch");
   if (parseRootIssueId(record.root_id) !== call.root_id) throw new Error("runtime_root_mismatch");
   if (parseRuntimeGeneration(record.runtime_generation) !== call.runtime_generation) throw new Error("stale_generation");
@@ -533,6 +589,65 @@ function isMutationCall(call: TaskMcpCall): call is TaskMcpMutationCall {
     || call.function === "delete_relation";
 }
 
+function parseCommentResource(value: unknown): TaskCommentResource {
+  const record = asRecord(value);
+  assertExactKeys(record, [
+    "comment_id", "issue_id", "provider_created_at", "provider_updated_at", "provider_edited_at",
+    "provider_archived_at", "actor_id", "body_digest",
+  ]);
+  const timestamp = (entry: unknown) => {
+    const parsed = parseBoundedString(entry, "invalid_comment_timestamp", 64);
+    if (Number.isNaN(Date.parse(parsed))) throw new Error("invalid_comment_timestamp");
+    return parsed;
+  };
+  const nullableTimestamp = (entry: unknown) => entry === null ? null : timestamp(entry);
+  const digest = parseBoundedString(record.body_digest, "invalid_comment_digest", 64);
+  if (!/^[0-9a-f]{64}$/u.test(digest)) throw new Error("invalid_comment_digest");
+  return Object.freeze({
+    comment_id: parseBoundedString(record.comment_id, "invalid_comment_id", 128),
+    issue_id: parseTaskIssueId(record.issue_id),
+    provider_created_at: timestamp(record.provider_created_at),
+    provider_updated_at: timestamp(record.provider_updated_at),
+    provider_edited_at: nullableTimestamp(record.provider_edited_at),
+    provider_archived_at: nullableTimestamp(record.provider_archived_at),
+    actor_id: record.actor_id === null ? null : parseBoundedString(record.actor_id, "invalid_comment_actor", 128),
+    body_digest: digest,
+  });
+}
+
+function parseCommentMutationOutput(value: unknown, call: CreateIssueCommentCall): TaskCommentMutationOutput {
+  const record = asRecord(value);
+  assertExactKeys(record, ["outcome", "effect_may_have_occurred", "target", "fresh_comment", "sanitized_reason"]);
+  const outcome = parseEnum(record.outcome, [
+    "applied", "not_applied", "stale_before_effect", "conflict_observed",
+  ] as const);
+  if (typeof record.effect_may_have_occurred !== "boolean"
+    || record.effect_may_have_occurred !== (outcome === "applied" || outcome === "conflict_observed")) {
+    throw new Error("invalid_effect_ambiguity");
+  }
+  const target = asRecord(record.target);
+  assertExactKeys(target, ["kind", "comment_id", "issue_id"]);
+  if (target.kind !== "comment" || target.comment_id !== call.input.comment_id
+    || target.issue_id !== call.input.issue_id) throw new Error("mutation_target_mismatch");
+  const freshComment = record.fresh_comment === null ? null : parseCommentResource(record.fresh_comment);
+  if (freshComment !== null
+    && (freshComment.comment_id !== call.input.comment_id || freshComment.issue_id !== call.input.issue_id)) {
+    throw new Error("mutation_resource_mismatch");
+  }
+  const reason = record.sanitized_reason === null
+    ? null : parseBoundedString(record.sanitized_reason, "invalid_mutation_reason", 256);
+  if (outcome === "applied" ? reason !== null || freshComment === null : reason === null) {
+    throw new Error("invalid_mutation_reason");
+  }
+  return Object.freeze({
+    outcome,
+    effect_may_have_occurred: record.effect_may_have_occurred,
+    target: Object.freeze({ kind: "comment", comment_id: call.input.comment_id, issue_id: call.input.issue_id }),
+    fresh_comment: freshComment,
+    sanitized_reason: reason,
+  });
+}
+
 function parsePageOutput<T>(
   value: unknown,
   key: string,
@@ -578,6 +693,7 @@ export function parseTaskMcpResult(value: unknown, call: ListLabelsCall): ListLa
 export function parseTaskMcpResult(value: unknown, call: CreateIssueCall): CreateIssueResult;
 export function parseTaskMcpResult(value: unknown, call: UpdateIssueCall): UpdateIssueResult;
 export function parseTaskMcpResult(value: unknown, call: ArchiveIssueCall): ArchiveIssueResult;
+export function parseTaskMcpResult(value: unknown, call: CreateIssueCommentCall): CreateIssueCommentResult;
 export function parseTaskMcpResult(value: unknown, call: CreateRelationCall): CreateRelationResult;
 export function parseTaskMcpResult(value: unknown, call: DeleteRelationCall): DeleteRelationResult;
 export function parseTaskMcpResult(value: unknown, call: TaskMcpCall): TaskMcpResult;
@@ -585,6 +701,12 @@ export function parseTaskMcpResult(value: unknown, call: TaskMcpCall): TaskMcpRe
   const record = asRecord(value);
   assertExactKeys(record, [...ENVELOPE_KEYS, "output"]);
   assertResultEnvelope(record, call);
+  if (call.function === "create_issue_comment") {
+    return Object.freeze({
+      ...parseCallEnvelope(record, call.function, call),
+      output: parseCommentMutationOutput(record.output, call),
+    });
+  }
   if (isMutationCall(call)) {
     const output = parseMutationOutput(record.output, call);
     switch (call.function) {

@@ -1,9 +1,6 @@
-import { randomUUID } from "node:crypto";
-
 import {
   parseSealedExecutionGraph,
   type CycleAdvanceRequest,
-  type PlanLocalKey,
   type SealedExecutionGraph,
 } from "../../contracts/cycle.js";
 import {
@@ -17,7 +14,6 @@ import type {
   TaskIssueSnapshot,
   TaskRelationSnapshot,
 } from "../../contracts/observation.js";
-import type { CompletedPlanResult } from "../../performer/api/StagePerformerInterface.js";
 import type {
   TaskManageCallerIssuer,
   TaskWorkflowIdentities,
@@ -38,6 +34,7 @@ import {
   bindCycleAdvanceRequest,
   type FreshCycleExecutionReader,
 } from "./CycleMachine.js";
+import { assertExactPlanGraph, type BuiltPlanGraphManifest } from "./PlanGraphManifest.js";
 
 export interface CycleGraphMaterializerOptions {
   readonly workflow: TaskWorkflowIdentities;
@@ -49,8 +46,9 @@ export interface CycleGraphMaterializerOptions {
 function issueCall(
   request: CycleAdvanceRequest,
   workflow: TaskWorkflowIdentities,
+  node: BuiltPlanGraphManifest["manifest"]["ordered_work_nodes"][number]
+    | BuiltPlanGraphManifest["manifest"]["verify_node"],
   kind: "work" | "verify",
-  title: string,
   description: string,
 ): CreateIssueCall {
   return Object.freeze({
@@ -61,11 +59,11 @@ function issueCall(
     correlation_id: request.correlation_id,
     capability: TASK_MCP_CAPABILITIES.create_issue,
     input: Object.freeze({
-      issue_id: parseTaskIssueId(randomUUID()),
+      issue_id: node.issue_id,
       parent_issue_id: parseTaskIssueId(request.cycle_id),
       expected_parent_revision: request.cycle_revision,
       desired: Object.freeze({
-        title,
+        title: node.title,
         description,
         state_id: workflow.stage_states.todo,
         label_ids: Object.freeze([workflow.labels[kind]]),
@@ -78,6 +76,7 @@ function issueCall(
 
 function relationCall(
   request: CycleAdvanceRequest,
+  relationId: TaskRelationId,
   source: TaskIssueSnapshot,
   target: TaskIssueSnapshot,
 ): CreateRelationCall {
@@ -89,7 +88,7 @@ function relationCall(
     correlation_id: request.correlation_id,
     capability: TASK_MCP_CAPABILITIES.create_relation,
     input: Object.freeze({
-      relation_id: parseTaskRelationId(randomUUID()),
+      relation_id: relationId,
       relation_type: "blocks",
       source_issue_id: source.issue_id,
       expected_source_revision: source.revision,
@@ -193,6 +192,25 @@ function stageIssue(
   });
 }
 
+function hasExactPersistedGraph(
+  request: CycleAdvanceRequest,
+  built: BuiltPlanGraphManifest,
+): boolean {
+  const empty = request.sealed_work_issues.length === 0
+    && request.verify_issue === null
+    && request.sealed_relations.length === 0;
+  if (empty) return false;
+  const plan = request.plan_issue;
+  if (
+    plan === null
+    || plan.status !== "in_progress"
+    || request.sealed_work_issues.some(({ status }) => status !== "todo")
+    || request.verify_issue?.status !== "todo"
+  ) throw new Error("partial_graph_materialization");
+  assertExactPlanGraph(request, built);
+  return true;
+}
+
 function assertExactReadback(
   request: CycleAdvanceRequest,
   snapshot: CycleAdvanceRequest,
@@ -253,25 +271,37 @@ export class CycleGraphMaterializer {
     this.#reader = options.reader;
   }
 
+  async readCurrent(request: CycleAdvanceRequest): Promise<CycleAdvanceRequest> {
+    const raw = await this.#reader.read(Object.freeze({
+      root_id: request.root_id,
+      cycle_id: request.cycle_id,
+      runtime_generation: request.runtime_generation,
+      correlation_id: request.correlation_id,
+    }));
+    if (raw === null) throw new Error("materialized_graph_missing");
+    return bindCycleAdvanceRequest(raw);
+  }
+
   async materialize(
     request: CycleAdvanceRequest,
-    plan: CompletedPlanResult,
+    built: BuiltPlanGraphManifest,
     execution: TaskManageBoundaryExecution,
   ): Promise<CycleAdvanceRequest> {
     execution.assertActive();
-    const workCalls = plan.work_items.map((item) => issueCall(
+    if (hasExactPersistedGraph(request, built)) return request;
+    const workCalls = built.manifest.ordered_work_nodes.map((node) => issueCall(
       request,
       this.#workflow,
+      node,
       "work",
-      item.title,
-      item.description_markdown,
+      built.instructions_by_issue_id[node.issue_id]!,
     ));
     const verifyCall = issueCall(
       request,
       this.#workflow,
+      built.manifest.verify_node,
       "verify",
-      plan.verify.title,
-      plan.verify.description_markdown,
+      built.instructions_by_issue_id[built.manifest.verify_issue_id]!,
     );
     const createCommand = bindCycleTaskManageCommand({
       snapshot: request,
@@ -281,36 +311,36 @@ export class CycleGraphMaterializer {
       mutation_manifest: [...workCalls, verifyCall],
     });
     const work: TaskIssueSnapshot[] = [];
-    const byLocalKey = new Map<PlanLocalKey, TaskIssueSnapshot>();
+    const byIssueId = new Map<TaskIssueId, TaskIssueSnapshot>();
     const identities = new Set<TaskIssueId>();
     for (let index = 0; index < workCalls.length; index += 1) {
       const call = workCalls[index];
-      const item = plan.work_items[index];
-      if (call === undefined || item === undefined) throw new Error("plan_materialization_index_invalid");
+      const node = built.manifest.ordered_work_nodes[index];
+      if (call === undefined || node === undefined) throw new Error("plan_materialization_index_invalid");
       const issue = appliedIssue(
         (await createCommand.create_issue(call, execution)).output,
       );
       if (identities.has(issue.issue_id)) throw new Error("duplicate_materialized_issue_identity");
       identities.add(issue.issue_id);
       work.push(issue);
-      byLocalKey.set(item.local_key, issue);
+      if (issue.issue_id !== node.issue_id) throw new Error("materialized_issue_identity_mismatch");
+      byIssueId.set(issue.issue_id, issue);
     }
     const verify = appliedIssue(
       (await createCommand.create_issue(verifyCall, execution)).output,
     );
     if (identities.has(verify.issue_id)) throw new Error("duplicate_materialized_issue_identity");
 
-    const relationCalls: CreateRelationCall[] = [];
-    for (const item of plan.work_items) {
-      const dependent = byLocalKey.get(item.local_key);
-      if (dependent === undefined) throw new Error("materialized_local_key_missing");
-      for (const dependencyKey of item.depends_on_local_keys) {
-        const prerequisite = byLocalKey.get(dependencyKey);
-        if (prerequisite === undefined) throw new Error("materialized_dependency_missing");
-        relationCalls.push(relationCall(request, prerequisite, dependent));
-      }
+    if (verify.issue_id !== built.manifest.verify_issue_id) {
+      throw new Error("materialized_issue_identity_mismatch");
     }
-    for (const issue of work) relationCalls.push(relationCall(request, issue, verify));
+    byIssueId.set(verify.issue_id, verify);
+    const relationCalls: CreateRelationCall[] = built.manifest.relations.map((relation) => {
+      const source = byIssueId.get(relation.source_issue_id);
+      const target = byIssueId.get(relation.target_issue_id);
+      if (source === undefined || target === undefined) throw new Error("materialized_relation_endpoint_missing");
+      return relationCall(request, parseTaskRelationId(relation.relation_id), source, target);
+    });
     const relationCommand = bindCycleTaskManageCommand({
       snapshot: request,
       workflow: this.#workflow,

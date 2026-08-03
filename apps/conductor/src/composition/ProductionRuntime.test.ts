@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +13,13 @@ import {
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseTaskIssueId,
+  parseTaskRevision,
 } from "../contracts/identity.js";
+import { deriveCycleUuid } from "../contracts/cycle-identities.js";
+import { renderTaskIssueRecordProjectionMarkdown } from "../contracts/cycle-record-markdown.js";
+import { parseRootDefinition } from "../contracts/cycle.js";
+import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import { parseGitSnapshot, parseTaskSnapshot, type TaskSnapshot } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import { parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
@@ -205,14 +212,100 @@ function snapshot(plan?: { readonly revision: string; readonly status: string; r
   });
 }
 
+function persistedApprovalFixture(actorId = "actor:symphony") {
+  const version = "symphony-identity:v1";
+  const currentRootRevision = parseTaskRevision(`symphony:v1:${"a".repeat(64)}`);
+  const deterministicCycleId = parseTaskIssueId(deriveCycleUuid(
+    version, "cycle_issue", rootId, "first_cycle", "first_cycle",
+  ));
+  const anchors = [
+    "### Execution Anchors", "",
+    `- Cycle ID: \`${deterministicCycleId}\``,
+    "- Predecessor Cycle ID: None",
+    "- Predecessor Terminal Record ID: `first_cycle`",
+    `- Approval Record ID: \`${deriveCycleUuid(version, "cycle_approval_record", deterministicCycleId)}\``,
+    `- Plan Issue ID: \`${deriveCycleUuid(version, "plan_issue", deterministicCycleId)}\``,
+    `- Plan Completion Record ID: \`${deriveCycleUuid(version, "plan_completion_record", deterministicCycleId)}\``,
+    `- Plan Invalidation Record ID: \`${deriveCycleUuid(version, "plan_invalidation_record", deterministicCycleId)}\``,
+    `- Cycle Completion Record ID: \`${deriveCycleUuid(version, "cycle_completion_record", deterministicCycleId)}\``,
+    `- Cycle Invalidation Record ID: \`${deriveCycleUuid(version, "cycle_invalidation_record", deterministicCycleId)}\``,
+    `- Delivery Completion Record ID: \`${deriveCycleUuid(version, "delivery_completion_record", deterministicCycleId)}\``,
+    `- Delivery Invalidation Record ID: \`${deriveCycleUuid(version, "delivery_invalidation_record", deterministicCycleId)}\``,
+    `- Identity Derivation Version: \`${version}\``,
+    `- Workspace Base Revision: \`${"b".repeat(64)}\``, "",
+    "### Execution Directives", "", "#### Directive: `directive:runtime`", "", "Implement runtime.", "",
+    "##### Dependencies", "", "- None", "", "##### Acceptance Criteria", "", "- `acceptance:runtime`", "",
+    "### Approved Work Groups", "", "#### Work Group: `group:runtime`", "", "##### Directives", "",
+    "- `directive:runtime`", "", "##### Dependencies", "", "- None", "",
+    "### Verification Directives", "", "#### Verification Directive: `verify:runtime`", "", "Verify runtime.", "",
+    "##### Acceptance Criteria", "", "- `acceptance:runtime`",
+  ].join("\n");
+  const description = cycleDescription.replace("`revision:root:1`", `\`${currentRootRevision}\``).replace(
+    "Exercise startup and serial scheduling tests.",
+    `Exercise startup and serial scheduling tests.\n\n${anchors}`,
+  );
+  const correlation = parseCorrelationId("corr:persisted-approval");
+  const definition = parseRootDefinition({
+    schema_version: 1,
+    root_id: rootId,
+    root_revision: currentRootRevision,
+    correlation_id: correlation,
+    root_description_markdown: rootDescription,
+  }, { root_id: rootId, root_revision: currentRootRevision, correlation_id: correlation });
+  const prepared = prepareCycleApproval({
+    root_id: rootId,
+    cycle_id: deterministicCycleId,
+    cycle_revision: parseTaskRevision(`symphony:v1:${"c".repeat(64)}`),
+    cycle_status: "Draft",
+    cycle_description_markdown: description,
+    root_definition: definition,
+  });
+  const body = renderTaskIssueRecordProjectionMarkdown(prepared.projection);
+  const timestamp = "2026-08-02T01:00:00.000Z";
+  const task = parseTaskSnapshot({
+    root_id: rootId,
+    issues: [
+      {
+        issue_id: rootId, revision: currentRootRevision, status: "state:root:in-progress", title: "Root",
+        description: rootDescription, parent_id: null, labels: [workflow.labels.root], delegate_id: "actor:agent", priority: 1,
+      },
+      {
+        issue_id: deterministicCycleId, revision: `symphony:v1:${"d".repeat(64)}`,
+        status: workflow.cycle_states.in_progress, title: "Cycle", description, parent_id: rootId,
+        labels: [workflow.labels.cycle], delegate_id: null, priority: null,
+      },
+    ],
+    relations: [],
+  });
+  return {
+    cycle_id: deterministicCycleId,
+    task,
+    comment: {
+      comment_id: prepared.specification.approval_record_id,
+      issue_id: deterministicCycleId,
+      provider_created_at: timestamp,
+      provider_updated_at: timestamp,
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: actorId,
+      body_digest: createHash("sha256").update(body, "utf8").digest("hex"),
+      body_markdown: body,
+    },
+  } as const;
+}
+
 test("production Cycle reader seals approved facts once and preserves Stage immutable revisions", async () => {
   let current = snapshot();
   const reader = new ProductionCycleReader(
     { root_id: rootId, runtime_generation: generation },
     workflow,
-    { readRootSnapshot: async () => current },
+    {
+      readRootSnapshot: async () => current,
+      readIssueRecordComments: async () => [],
+    },
     { read: async () => git },
     workspace,
+    "actor:symphony",
   );
   reader.rememberRootTurn(parseCorrelationId("corr:approval"));
   const first = await reader.read({
@@ -255,9 +348,13 @@ test("production Cycle reader rejects a mutation of sealed Stage content", async
   const reader = new ProductionCycleReader(
     { root_id: rootId, runtime_generation: generation },
     workflow,
-    { readRootSnapshot: async () => current },
+    {
+      readRootSnapshot: async () => current,
+      readIssueRecordComments: async () => [],
+    },
     { read: async () => git },
     workspace,
+    "actor:symphony",
   );
   await reader.read({
     root_id: rootId,
@@ -277,6 +374,40 @@ test("production Cycle reader rejects a mutation of sealed Stage content", async
     runtime_generation: generation,
     correlation_id: parseCorrelationId("corr:second"),
   }), /sealed_execution_graph_mismatch/u);
+});
+
+test("production Cycle reader rebuilds the sealed basis only from the exact persisted approval", async () => {
+  const fixture = persistedApprovalFixture();
+  const reader = new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => fixture.task,
+      readIssueRecordComments: async () => [fixture.comment],
+    },
+    { read: async () => git },
+    workspace,
+    "actor:symphony",
+  );
+
+  const basis = await reader.readSealedCycleBasis(fixture.cycle_id);
+
+  assert.equal(basis.specification.cycle_id, fixture.cycle_id);
+  assert.equal(basis.approval_record.record_id, basis.specification.approval_record_id);
+
+  const foreign = persistedApprovalFixture("actor:external");
+  const foreignReader = new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => foreign.task,
+      readIssueRecordComments: async () => [foreign.comment],
+    },
+    { read: async () => git },
+    workspace,
+    "actor:symphony",
+  );
+  await assert.rejects(foreignReader.readSealedCycleBasis(foreign.cycle_id), /record_actor_mismatch/u);
 });
 
 test("exact Git diff returns the bounded committed patch at the observed revision", async (context) => {

@@ -16,11 +16,18 @@ import {
   parseCycleDraftForRoot,
   parseRootDefinition,
   parseRootDefinitionMarkdown,
-  sealCycleSpecification,
   type CycleExecutionSnapshot,
   type CycleSealDigest,
   type RootDefinition,
 } from "../contracts/cycle.js";
+import { parseCycleApprovalRecord } from "../contracts/cycle-records.js";
+import { prepareCycleApproval, type PreparedCycleApproval } from "../cycle/internal/CycleApproval.js";
+import {
+  appliedTaskIssueRecord,
+  createTaskIssueRecordCall,
+  readExactTaskIssueRecord,
+} from "../cycle/internal/CycleRecords.js";
+import type { LinearIssueRecordComment } from "../task-management/linear/LinearQueries.js";
 import { reduceCycleTransition } from "../cycle/internal/CycleTransition.js";
 import {
   parseTaskSnapshot,
@@ -46,6 +53,8 @@ import {
   type ArchiveIssueResult,
   type CreateIssueCall,
   type CreateIssueResult,
+  type CreateIssueCommentCall,
+  type CreateIssueCommentResult,
   type CreateRelationCall,
   type CreateRelationResult,
   type DeleteRelationCall,
@@ -86,6 +95,10 @@ export interface RootTaskSnapshotReader {
   readRootSnapshot(rootId: RootIssueId): Promise<TaskSnapshot>;
 }
 
+export interface RootRecordReader {
+  readIssueRecordComments(issueId: TaskIssueId): Promise<readonly LinearIssueRecordComment[]>;
+}
+
 export interface BindRootTaskManageCommandOptions {
   readonly target: {
     readonly root_id: RootIssueId;
@@ -95,6 +108,8 @@ export interface BindRootTaskManageCommandOptions {
   readonly caller_issuer: TaskManageCallerIssuer;
   readonly task_manager: TaskManageCommandInterface;
   readonly snapshot_reader: RootTaskSnapshotReader;
+  readonly record_reader: RootRecordReader;
+  readonly service_actor_id: string;
   readonly approved_cycle_reader: RootApprovedCycleReader;
   readonly accepted_revision_issuer: AcceptedRevisionIssuer;
 }
@@ -144,6 +159,7 @@ interface RootUpdateAuthorization {
 interface PendingCycleApproval {
   readonly definition: RootDefinition;
   readonly draft: TaskIssueSnapshot;
+  readonly prepared: PreparedCycleApproval;
 }
 
 interface PendingCycleAcceptance {
@@ -342,6 +358,8 @@ export class RootTaskManageCommandBinding {
     private readonly callerIssuer: TaskManageCallerIssuer,
     private readonly taskManager: TaskManageCommandInterface,
     private readonly snapshotReader: RootTaskSnapshotReader,
+    private readonly recordReader: RootRecordReader,
+    private readonly serviceActorId: string,
     private readonly approvedCycleReader: RootApprovedCycleReader,
     private readonly acceptedRevisionIssuer: AcceptedRevisionIssuer,
     private readonly correlationId: CorrelationId | null,
@@ -371,6 +389,8 @@ export class RootTaskManageCommandBinding {
       options.caller_issuer,
       options.task_manager,
       options.snapshot_reader,
+      options.record_reader,
+      options.service_actor_id,
       options.approved_cycle_reader,
       options.accepted_revision_issuer,
       null,
@@ -392,6 +412,8 @@ export class RootTaskManageCommandBinding {
       this.callerIssuer,
       this.taskManager,
       this.snapshotReader,
+      this.recordReader,
+      this.serviceActorId,
       this.approvedCycleReader,
       this.acceptedRevisionIssuer,
       parseCorrelationId(correlationId),
@@ -558,6 +580,14 @@ export class RootTaskManageCommandBinding {
   ): Promise<RootUpdateIssueResult> {
     const scope = await this.#scope(call, "update_issue", execution);
     const authorization = await this.#authorizeUpdateIssue(scope, call);
+    const preparedApproval = authorization.approval_definition === null
+      ? null
+      : await this.#persistCycleApproval(
+          scope,
+          call,
+          authorization.approval_definition,
+          execution,
+        );
     const value = await this.#callProvider(() => this.taskManager.update_issue(
       call, this.#providerExecution(call, execution, authorization.caller_cycle),
     ));
@@ -574,7 +604,7 @@ export class RootTaskManageCommandBinding {
       : null;
     const sealDigest = this.#approvalSeal(
       result,
-      authorization.approval_definition,
+      preparedApproval,
       approvalScope,
     );
     if (
@@ -595,6 +625,7 @@ export class RootTaskManageCommandBinding {
       this.#pendingCycleApprovals.set(call.input.issue_id, Object.freeze({
         definition: authorization.approval_definition,
         draft,
+        prepared: preparedApproval ?? invalidBoundary(),
       }));
     }
     if (
@@ -677,6 +708,14 @@ export class RootTaskManageCommandBinding {
 
   async create_relation(call: CreateRelationCall, execution: TaskManageBoundaryExecution): Promise<CreateRelationResult> {
     await this.#scope(call, "create_relation", execution);
+    return callDenied();
+  }
+
+  async create_issue_comment(
+    call: CreateIssueCommentCall,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<CreateIssueCommentResult> {
+    await this.#scope(call, "create_issue_comment", execution);
     return callDenied();
   }
 
@@ -902,20 +941,18 @@ export class RootTaskManageCommandBinding {
 
   #approvalSeal(
     result: UpdateIssueResult,
-    definition: RootDefinition | null,
+    prepared: PreparedCycleApproval | null,
     approvalScope: RootScope | null,
   ): CycleSealDigest | null {
-    if (definition === null || result.output.outcome !== "applied") return null;
+    if (prepared === null || result.output.outcome !== "applied") return null;
     const fresh = result.output.fresh_resource;
     if (
       fresh === null
       || !("issue_id" in fresh)
       || approvalScope === null
     ) return invalidBoundary();
-    return this.#sealApprovedCycleIssue(
-      this.#approvedIssueFromScope(approvalScope, fresh),
-      definition,
-    );
+    this.#assertApprovedProjection(this.#approvedIssueFromScope(approvalScope, fresh), prepared);
+    return prepared.specification.specification_seal_digest as CycleSealDigest;
   }
 
   #resolvePendingApproval(
@@ -940,10 +977,8 @@ export class RootTaskManageCommandBinding {
       || issue.delegate_id !== draft.delegate_id
       || issue.priority !== draft.priority
     ) invalidBoundary();
-    return this.#sealApprovedCycleIssue(
-      this.#approvedIssueFromScope(approvalScope, issue),
-      pending.definition,
-    );
+    this.#assertApprovedProjection(this.#approvedIssueFromScope(approvalScope, issue), pending.prepared);
+    return pending.prepared.specification.specification_seal_digest as CycleSealDigest;
   }
 
   async #resolvePendingAcceptance(
@@ -1001,36 +1036,64 @@ export class RootTaskManageCommandBinding {
     return current;
   }
 
-  #sealApprovedCycleIssue(
-    issue: TaskIssueSnapshot,
+  async #persistCycleApproval(
+    scope: RootScope,
+    statusCall: UpdateIssueCall,
     definition: RootDefinition,
-  ): CycleSealDigest {
-    const correlationId = this.correlationId;
-    if (
-      issue.description === null
-      || issue.status !== this.workflow.cycle_states.in_progress
-      || correlationId === null
-    ) return invalidBoundary();
+    execution: TaskManageBoundaryExecution,
+  ): Promise<PreparedCycleApproval> {
+    const draft = scope.issues.get(statusCall.input.issue_id);
+    if (draft?.description === null || draft?.description === undefined) return invalidBoundary();
+    let prepared: PreparedCycleApproval;
     try {
-      const cycleId = parseCycleIssueId(issue.issue_id);
-      const draft = parseCycleDraftForRoot(issue.description, definition);
-      const target = Object.freeze({
+      prepared = prepareCycleApproval({
         root_id: this.root_id,
-        cycle_id: cycleId,
-        root_definition_revision: definition.root_revision,
-        cycle_revision: issue.revision,
-        correlation_id: correlationId,
+        cycle_id: draft.issue_id,
+        cycle_revision: draft.revision,
+        cycle_status: "Draft",
+        cycle_description_markdown: draft.description,
+        root_definition: definition,
       });
-      return sealCycleSpecification({
-        schema_version: 1,
-        ...target,
-        cycle_description_markdown: issue.description,
-        root_adr_markdown: draft.root_adr_markdown,
-        status: "in_progress",
-      }, definition, target).seal_digest;
     } catch {
-      return invalidBoundary();
+      return callDenied();
     }
+    const recordCall = createTaskIssueRecordCall(statusCall, {
+      record_id: prepared.specification.approval_record_id,
+      issue_id: draft.issue_id,
+      expected_issue_revision: draft.revision,
+      projection: prepared.projection,
+    });
+    if (this.taskManager.create_issue_comment === undefined) return invalidBoundary();
+    const raw = await this.#callProvider(() => this.taskManager.create_issue_comment!(
+      recordCall,
+      this.#providerExecution(recordCall, execution),
+    ));
+    execution.assertActive();
+    const result = validateResult<CreateIssueCommentResult>(raw, recordCall, () => undefined);
+    const applied = parseCycleApprovalRecord(
+      appliedTaskIssueRecord(recordCall, result, this.serviceActorId),
+      prepared.specification,
+    );
+    const comments = await this.recordReader.readIssueRecordComments(draft.issue_id);
+    execution.assertActive();
+    const projected = readExactTaskIssueRecord(
+      comments,
+      draft.issue_id,
+      prepared.specification.approval_record_id,
+      this.serviceActorId,
+    );
+    if (projected === null) return invalidBoundary();
+    const fresh = parseCycleApprovalRecord(projected, prepared.specification);
+    if (fresh.revision !== applied.revision) return invalidBoundary();
+    return prepared;
+  }
+
+  #assertApprovedProjection(issue: TaskIssueSnapshot, prepared: PreparedCycleApproval): void {
+    if (
+      issue.description !== prepared.specification.cycle_specification_markdown
+      || issue.status !== this.workflow.cycle_states.in_progress
+      || issue.issue_id !== prepared.specification.cycle_id
+    ) invalidBoundary();
   }
 
   async #approvedCycleContext(
