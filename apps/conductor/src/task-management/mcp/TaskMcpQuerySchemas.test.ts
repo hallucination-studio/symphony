@@ -34,7 +34,7 @@ const issueFields = {
   status_id: "state:todo",
   status: "Todo",
   title: "Implement query contracts",
-  description_markdown: null,
+  description_markdown: "# Implement query contracts",
   parent_issue_id: "LIN-1",
   label_ids: ["label:work"],
   delegate_id: "actor:1",
@@ -109,7 +109,12 @@ test("every list query requires explicit cursor pagination and returns a bounded
       function: "list_states" as const,
       input: { cursor: null, page_size: 50 },
       output: {
-        states: [{ state_id: "state:todo", revision: "revision:state:1", name: "Todo", archived: false }],
+        states: [{
+          state_id: "state:todo",
+          revision: canonicalTaskRevision({ state_id: "state:todo", name: "Todo", archived: false }),
+          name: "Todo",
+          archived: false,
+        }],
         next_cursor: null,
       },
     },
@@ -117,7 +122,11 @@ test("every list query requires explicit cursor pagination and returns a bounded
       function: "list_labels" as const,
       input: { cursor: null, page_size: 50 },
       output: {
-        labels: [{ label_id: "label:work", revision: "revision:label:1", name: "Work" }],
+        labels: [{
+          label_id: "label:work",
+          revision: canonicalTaskRevision({ label_id: "label:work", name: "Work" }),
+          name: "Work",
+        }],
         next_cursor: null,
       },
     },

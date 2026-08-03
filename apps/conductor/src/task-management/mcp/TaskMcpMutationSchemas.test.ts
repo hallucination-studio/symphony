@@ -37,7 +37,7 @@ const issueFields = {
   status_id: "state:todo",
   status: "Todo",
   title: "Implement mutation contracts",
-  description_markdown: null,
+  description_markdown: "# Implement mutation contracts",
   parent_issue_id: "LIN-1",
   label_ids: ["label:work"],
   delegate_id: "actor:1",
@@ -46,8 +46,19 @@ const issueFields = {
   trashed: false,
 } as const;
 const issue = { ...issueFields, revision: canonicalTaskRevision(issueFields) };
+const rootIssueFields = {
+  ...issueFields,
+  issue_id: "LIN-1",
+  kind: "root",
+  title: "Root issue",
+  parent_issue_id: null,
+  label_ids: ["label:root"],
+} as const;
+const rootIssue = { ...rootIssueFields, revision: canonicalTaskRevision(rootIssueFields) };
+const targetIssueFields = { ...issueFields, issue_id: "LIN-3", title: "Target issue" } as const;
+const targetIssue = { ...targetIssueFields, revision: canonicalTaskRevision(targetIssueFields) };
 
-const relation = {
+const relationFields = {
   relation_id: RELATION_UUID,
   provider_created_at: "2026-08-03T00:00:00.000Z",
   provider_updated_at: "2026-08-03T00:00:00.000Z",
@@ -56,8 +67,8 @@ const relation = {
   type: "blocks",
   source_issue_id: "LIN-2",
   target_issue_id: "LIN-3",
-};
-Object.assign(relation, { revision: canonicalTaskRevision(relation) });
+} as const;
+const relation = { ...relationFields, revision: canonicalTaskRevision(relationFields) };
 
 test("all five mutation calls require exact fresh preconditions", () => {
   const cases = [
@@ -67,7 +78,7 @@ test("all five mutation calls require exact fresh preconditions", () => {
       input: {
         issue_id: ISSUE_UUID,
         parent_issue_id: "LIN-1",
-        expected_parent_revision: "revision:root:1",
+        expected_parent_revision: rootIssue.revision,
         desired: {
           title: "New issue",
           description: null,
@@ -83,14 +94,14 @@ test("all five mutation calls require exact fresh preconditions", () => {
       requiredPreconditions: ["expected_revision"],
       input: {
         issue_id: "LIN-2",
-        expected_revision: "revision:2",
+        expected_revision: issue.revision,
         desired: { title: "Updated title" },
       },
     },
     {
       function: "archive_issue" as const,
       requiredPreconditions: ["expected_revision"],
-      input: { issue_id: "LIN-2", expected_revision: "revision:2" },
+      input: { issue_id: "LIN-2", expected_revision: issue.revision },
     },
     {
       function: "create_relation" as const,
@@ -99,9 +110,9 @@ test("all five mutation calls require exact fresh preconditions", () => {
         relation_id: RELATION_UUID,
         relation_type: "blocks",
         source_issue_id: "LIN-2",
-        expected_source_revision: "revision:2",
+        expected_source_revision: issue.revision,
         target_issue_id: "LIN-3",
-        expected_target_revision: "revision:3",
+        expected_target_revision: targetIssue.revision,
       },
     },
     {
@@ -113,11 +124,11 @@ test("all five mutation calls require exact fresh preconditions", () => {
       ],
       input: {
         relation_id: "relation:1",
-        expected_relation_revision: "revision:relation:1",
+        expected_relation_revision: relation.revision,
         source_issue_id: "LIN-2",
-        expected_source_revision: "revision:2",
+        expected_source_revision: issue.revision,
         target_issue_id: "LIN-3",
-        expected_target_revision: "revision:3",
+        expected_target_revision: targetIssue.revision,
       },
     },
   ];
@@ -141,7 +152,7 @@ test("create_issue_comment binds an exact absent record to one fresh issue basis
   const input = {
     comment_id: COMMENT_UUID,
     issue_id: "LIN-2",
-    expected_issue_revision: "revision:2",
+    expected_issue_revision: issue.revision,
     body_markdown: "<!-- symphony:record -->\n{\"record_kind\":\"stage_completion\"}",
   };
   const call = parseTaskMcpCall({
@@ -175,7 +186,7 @@ test("create_issue_comment binds an exact absent record to one fresh issue basis
 test("update_issue is a strict non-empty partial update", () => {
   const base = {
     ...envelope("update_issue"),
-    input: { issue_id: "LIN-2", expected_revision: "revision:2", desired: { title: "Updated" } },
+    input: { issue_id: "LIN-2", expected_revision: issue.revision, desired: { title: "Updated" } },
   };
   assert.equal(parseTaskMcpCall(base, target).function, "update_issue");
   assert.throws(
@@ -199,7 +210,7 @@ test("update_issue is a strict non-empty partial update", () => {
 test("mutation results expose exact no-CAS outcomes with effect ambiguity", () => {
   const call = parseTaskMcpCall({
     ...envelope("update_issue"),
-    input: { issue_id: "LIN-2", expected_revision: "revision:2", desired: { title: "Updated" } },
+    input: { issue_id: "LIN-2", expected_revision: issue.revision, desired: { title: "Updated" } },
   }, target);
   if (call.function !== "update_issue") assert.fail("expected update_issue call");
 
@@ -209,7 +220,11 @@ test("mutation results expose exact no-CAS outcomes with effect ambiguity", () =
       outcome: "applied",
       effect_may_have_occurred: true,
       target: { kind: "issue", issue_id: "LIN-2" },
-      fresh_resource: { ...issue, title: "Updated", revision: "revision:3" },
+      fresh_resource: {
+        ...issueFields,
+        title: "Updated",
+        revision: canonicalTaskRevision({ ...issueFields, title: "Updated" }),
+      },
       concrete_diff: [{ kind: "field_changed", issue_id: "LIN-2", field: "title", before: issue.title, after: "Updated" }],
       sanitized_reason: null,
     },
@@ -247,9 +262,9 @@ test("relation mutation results bind relation identity and endpoint identities",
       relation_id: RELATION_UUID,
       relation_type: "blocks",
       source_issue_id: "LIN-2",
-      expected_source_revision: "revision:2",
-      target_issue_id: "LIN-3",
-      expected_target_revision: "revision:3",
+        expected_source_revision: issue.revision,
+        target_issue_id: "LIN-3",
+        expected_target_revision: targetIssue.revision,
     },
   }, target);
   if (call.function !== "create_relation") assert.fail("expected create_relation call");

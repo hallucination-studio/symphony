@@ -3,31 +3,43 @@ import test from "node:test";
 
 import { parseRootIssueId, parseRuntimeGeneration } from "./identity.js";
 import { parseRootFactDiff } from "./observation.js";
+import { canonicalTaskRevision } from "./task-management.js";
 
 const target = {
   root_id: parseRootIssueId("LIN-1"),
   runtime_generation: parseRuntimeGeneration(3),
 };
 
-const issue = {
+const issueFields = {
   issue_id: "LIN-2",
-  revision: "revision:2",
+  provider_created_at: "2026-08-03T00:00:00.000Z",
+  provider_updated_at: "2026-08-03T00:00:00.000Z",
+  creation_actor_id: "actor:1",
+  kind: "work",
+  status_id: "state:todo",
   status: "Todo",
   title: "Implement the contract",
-  description: null,
-  parent_id: "LIN-1",
-  labels: ["symphony:kind/work"],
+  description_markdown: "# Implement the contract",
+  parent_issue_id: "LIN-1",
+  label_ids: ["label:work"],
   delegate_id: "actor:1",
   priority: 2,
-};
+  archived: false,
+  trashed: false,
+} as const;
+const issue = { ...issueFields, revision: canonicalTaskRevision(issueFields) };
 
-const relation = {
+const relationFields = {
   relation_id: "relation:1",
-  revision: "revision:relation:1",
+  provider_created_at: "2026-08-03T00:00:00.000Z",
+  provider_updated_at: "2026-08-03T00:00:00.000Z",
+  creation_actor_id: "actor:1",
+  creation_evidence_id: "evidence:relation:1",
   type: "blocks",
   source_issue_id: "LIN-2",
   target_issue_id: "LIN-3",
-};
+} as const;
+const relation = { ...relationFields, revision: canonicalTaskRevision(relationFields) };
 
 const diff = {
   schema_version: 1,
