@@ -20,7 +20,7 @@ import { deriveCycleUuid } from "../contracts/cycle-identities.js";
 import { renderTaskIssueRecordProjectionMarkdown } from "../contracts/cycle-record-markdown.js";
 import { parseRootDefinition } from "../contracts/cycle.js";
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
-import { parseGitSnapshot, parseTaskSnapshot, type TaskSnapshot } from "../contracts/observation.js";
+import { parseGitSnapshot, parseTaskSnapshot } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import { parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
 import { ExactGitDiffReader, ProductionCycleReader } from "./ProductionRuntime.js";
@@ -28,7 +28,6 @@ import { ExactGitDiffReader, ProductionCycleReader } from "./ProductionRuntime.j
 const exec = promisify(execFile);
 
 const rootId = parseRootIssueId("ROOT-1");
-const cycleId = parseCycleIssueId("CYCLE-1");
 const generation = parseRuntimeGeneration(1);
 const workflow = parseTaskWorkflowIdentities({
   labels: {
@@ -170,49 +169,10 @@ async function exactDiffReader(directory: string): Promise<ExactGitDiffReader> {
   return new ExactGitDiffReader({ read: async () => snapshot }, directory, workspace);
 }
 
-function snapshot(plan?: { readonly revision: string; readonly status: string; readonly title?: string }): TaskSnapshot {
-  return parseTaskSnapshot({
-    root_id: rootId,
-    issues: [
-      {
-        issue_id: rootId,
-        revision: "revision:root:1",
-        status: "state:root:in-progress",
-        title: "Root",
-        description: rootDescription,
-        parent_id: null,
-        labels: [workflow.labels.root],
-        delegate_id: "actor:agent",
-        priority: 1,
-      },
-      {
-        issue_id: cycleId,
-        revision: "revision:cycle:sealed",
-        status: workflow.cycle_states.in_progress,
-        title: "Cycle",
-        description: cycleDescription,
-        parent_id: rootId,
-        labels: [workflow.labels.cycle],
-        delegate_id: null,
-        priority: null,
-      },
-      ...(plan === undefined ? [] : [{
-        issue_id: "PLAN-1",
-        revision: plan.revision,
-        status: plan.status,
-        title: plan.title ?? "Plan approved Cycle",
-        description: "## Plan\n\nCompile the sealed graph.",
-        parent_id: cycleId,
-        labels: [workflow.labels.plan],
-        delegate_id: null,
-        priority: null,
-      }]),
-    ],
-    relations: [],
-  });
-}
-
-function persistedApprovalFixture(actorId = "actor:symphony") {
+function persistedApprovalFixture(
+  actorId = "actor:symphony",
+  plan: Readonly<{ revision: string; status: string; title?: string }> | null = null,
+) {
   const version = "symphony-identity:v1";
   const currentRootRevision = parseTaskRevision(`symphony:v1:${"a".repeat(64)}`);
   const deterministicCycleId = parseTaskIssueId(deriveCycleUuid(
@@ -274,6 +234,17 @@ function persistedApprovalFixture(actorId = "actor:symphony") {
         status: workflow.cycle_states.in_progress, title: "Cycle", description, parent_id: rootId,
         labels: [workflow.labels.cycle], delegate_id: null, priority: null,
       },
+      ...(plan === null ? [] : [{
+        issue_id: prepared.specification.plan_issue_id,
+        revision: plan.revision,
+        status: plan.status,
+        title: plan.title ?? "Plan approved Cycle",
+        description: "## Plan\n\nCompile the approved Cycle into one sealed Work and Verify graph.",
+        parent_id: deterministicCycleId,
+        labels: [workflow.labels.plan],
+        delegate_id: null,
+        priority: null,
+      }]),
     ],
     relations: [],
   });
@@ -294,86 +265,87 @@ function persistedApprovalFixture(actorId = "actor:symphony") {
   } as const;
 }
 
-test("production Cycle reader seals approved facts once and preserves Stage immutable revisions", async () => {
-  let current = snapshot();
-  const reader = new ProductionCycleReader(
+test("production Cycle reader rebuilds stable seals without retained workflow state", async () => {
+  const firstFixture = persistedApprovalFixture("actor:symphony", {
+    revision: "revision:plan:1",
+    status: workflow.stage_states.todo,
+  });
+  const firstReader = new ProductionCycleReader(
     { root_id: rootId, runtime_generation: generation },
     workflow,
     {
-      readRootSnapshot: async () => current,
-      readIssueRecordComments: async () => [],
+      readRootSnapshot: async () => firstFixture.task,
+      readIssueRecordComments: async () => [firstFixture.comment],
     },
     { read: async () => git },
     workspace,
     "actor:symphony",
   );
-  reader.rememberRootTurn(parseCorrelationId("corr:approval"));
-  const first = await reader.read({
+  const first = await firstReader.read({
     root_id: rootId,
-    cycle_id: cycleId,
+    cycle_id: parseCycleIssueId(firstFixture.cycle_id),
     runtime_generation: generation,
     correlation_id: parseCorrelationId("corr:poll"),
   });
   assert.ok(first);
   assert.equal(first.correlation_id, "corr:poll");
-  assert.equal(first.specification.correlation_id, "corr:approval");
-  assert.equal(first.plan_issue, null);
+  assert.ok(first.plan_issue);
 
-  current = snapshot({ revision: "revision:plan:1", status: workflow.stage_states.todo });
-  const created = await reader.read({
-    root_id: rootId,
-    cycle_id: cycleId,
-    runtime_generation: generation,
-    correlation_id: parseCorrelationId("corr:second"),
+  const secondFixture = persistedApprovalFixture("actor:symphony", {
+    revision: "revision:plan:2",
+    status: workflow.stage_states.in_progress,
   });
-  assert.ok(created?.plan_issue);
-  assert.equal(created.correlation_id, "corr:second");
-  assert.equal(created.specification.seal_digest, first.specification.seal_digest);
-  assert.equal(created.specification.correlation_id, "corr:approval");
-  assert.equal(created.plan_issue.sealed_revision, "revision:plan:1");
-
-  current = snapshot({ revision: "revision:plan:2", status: workflow.stage_states.in_progress });
-  const started = await reader.read({
-    root_id: rootId,
-    cycle_id: cycleId,
-    runtime_generation: generation,
-    correlation_id: parseCorrelationId("corr:third"),
-  });
-  assert.equal(started?.plan_issue?.revision, "revision:plan:2");
-  assert.equal(started?.plan_issue?.sealed_revision, "revision:plan:1");
-});
-
-test("production Cycle reader rejects a mutation of sealed Stage content", async () => {
-  let current = snapshot({ revision: "revision:plan:1", status: workflow.stage_states.todo });
-  const reader = new ProductionCycleReader(
+  const secondReader = new ProductionCycleReader(
     { root_id: rootId, runtime_generation: generation },
     workflow,
     {
-      readRootSnapshot: async () => current,
-      readIssueRecordComments: async () => [],
+      readRootSnapshot: async () => secondFixture.task,
+      readIssueRecordComments: async () => [secondFixture.comment],
     },
     { read: async () => git },
     workspace,
     "actor:symphony",
   );
-  await reader.read({
+  const started = await secondReader.read({
     root_id: rootId,
-    cycle_id: cycleId,
+    cycle_id: parseCycleIssueId(secondFixture.cycle_id),
     runtime_generation: generation,
-    correlation_id: parseCorrelationId("corr:first"),
+    correlation_id: parseCorrelationId("corr:second"),
   });
-  current = snapshot({
+  assert.equal(started?.specification.seal_digest, first.specification.seal_digest);
+  assert.equal(started?.plan_issue?.revision, "revision:plan:2");
+  assert.equal(started?.plan_issue?.sealed_revision, first.plan_issue.sealed_revision);
+});
+
+test("production Cycle reader derives changed Stage seals from fresh immutable content", async () => {
+  const original = persistedApprovalFixture("actor:symphony", {
+    revision: "revision:plan:1",
+    status: workflow.stage_states.todo,
+  });
+  const changed = persistedApprovalFixture("actor:symphony", {
     revision: "revision:plan:2",
     status: workflow.stage_states.in_progress,
     title: "Substituted Plan",
   });
-
-  await assert.rejects(reader.read({
+  const read = async (fixture: typeof original) => new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => fixture.task,
+      readIssueRecordComments: async () => [fixture.comment],
+    },
+    { read: async () => git },
+    workspace,
+    "actor:symphony",
+  ).read({
     root_id: rootId,
-    cycle_id: cycleId,
+    cycle_id: parseCycleIssueId(fixture.cycle_id),
     runtime_generation: generation,
-    correlation_id: parseCorrelationId("corr:second"),
-  }), /sealed_execution_graph_mismatch/u);
+    correlation_id: parseCorrelationId("corr:first"),
+  });
+  const before = await read(original);
+  const after = await read(changed);
+  assert.notEqual(before?.plan_issue?.sealed_revision, after?.plan_issue?.sealed_revision);
 });
 
 test("production Cycle reader rebuilds the sealed basis only from the exact persisted approval", async () => {

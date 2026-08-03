@@ -16,7 +16,6 @@ import {
   type RootIssueId,
   type Revision,
   type RuntimeGeneration,
-  type StageIssueId,
   type TaskIssueId,
 } from "../contracts/identity.js";
 import {
@@ -45,6 +44,7 @@ import {
   parseMarkdownText,
   parseBoundedString,
 } from "../contracts/validation.js";
+import { canonicalTaskRevision } from "../contracts/task-management.js";
 import { isSensitiveWorkspacePath } from "../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import type { RootToolBridgeLog } from "../codex-app-server/internal/DynamicToolBridge.js";
 import { CycleMachineHost, type CycleMachineReadRequest, type FreshCycleExecutionReader } from "../cycle/internal/CycleMachine.js";
@@ -187,10 +187,6 @@ function executionStage(stage: StageExecutionSnapshot) {
 }
 
 export class ProductionCycleReader implements FreshCycleExecutionReader, RootApprovedCycleReader, FreshSealedCycleBasisReader {
-  readonly #sealedSpecifications = new Map<CycleIssueId, CycleSpecification>();
-  readonly #sealedStages = new Map<StageIssueId, SealedStageIssue>();
-  #latestRootTurnCorrelation: CorrelationId | null = null;
-
   constructor(
     private readonly target: Readonly<{ root_id: RootIssueId; runtime_generation: RuntimeGeneration }>,
     private readonly workflow: TaskWorkflowIdentities,
@@ -199,10 +195,6 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     private readonly workspace: RootWorkspaceIdentity,
     private readonly serviceActorId: string,
   ) {}
-
-  rememberRootTurn(correlationId: CorrelationId): void {
-    this.#latestRootTurnCorrelation = parseCorrelationId(correlationId);
-  }
 
   readApprovedCycle(
     cycleId: TaskIssueId,
@@ -219,6 +211,11 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     const task = await this.snapshots.readRootSnapshot(this.target.root_id);
     const parsedCycleId = parseTaskIssueId(cycleId);
     const cycle = taskIssue(task, parsedCycleId);
+    return this.#sealedBasis(task, cycle);
+  }
+
+  async #sealedBasis(task: TaskSnapshot, cycle: TaskIssueSnapshot): Promise<SealedCycleBasis> {
+    const parsedCycleId = parseTaskIssueId(cycle.issue_id);
     if (
       cycle.parent_id !== parseTaskIssueId(this.target.root_id)
       || kindOf(cycle, this.workflow) !== "cycle"
@@ -229,11 +226,11 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       throw new Error("sealed_cycle_basis_root_invalid");
     }
     const draft = parseCycleDraftMarkdown(cycle.description);
-    const correlationId = parseCorrelationId(randomUUID());
+    const correlationId = parseCorrelationId(`approval:${parsedCycleId}`);
     const definition = parseRootDefinition({
       schema_version: 1,
       root_id: this.target.root_id,
-      root_revision: root.revision,
+      root_revision: draft.root_definition_revision,
       correlation_id: correlationId,
       root_description_markdown: root.description,
     }, {
@@ -281,7 +278,8 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       || kindOf(cycle, this.workflow) !== "cycle"
       || cycle.description === null
     ) throw new Error("cycle_reader_contract_invalid");
-    const specification = this.#specification(task, cycle, request);
+    const basis = await this.#sealedBasis(task, cycle);
+    const specification = this.#specification(task, cycle, basis);
     if (cycle.description !== specification.cycle_description_markdown) {
       throw new Error("sealed_spec_changed");
     }
@@ -340,44 +338,39 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
   #specification(
     task: TaskSnapshot,
     cycle: TaskIssueSnapshot,
-    request: CycleMachineReadRequest,
+    basis: SealedCycleBasis,
   ): CycleSpecification {
-    const existing = this.#sealedSpecifications.get(request.cycle_id);
-    if (existing !== undefined) return existing;
-    const root = taskIssue(task, parseTaskIssueId(request.root_id));
+    const draft = parseCycleDraftMarkdown(cycle.description);
+    const root = taskIssue(task, parseTaskIssueId(this.target.root_id));
     if (root.description === null || kindOf(root, this.workflow) !== "root") {
       throw new Error("root_definition_invalid");
     }
-    const draft = parseCycleDraftMarkdown(cycle.description);
-    const sealCorrelation = this.#latestRootTurnCorrelation ?? request.correlation_id;
+    const sealCorrelation = parseCorrelationId(`approval:${basis.approval_record.record_id}`);
     const definition = parseRootDefinition({
       schema_version: 1,
-      root_id: request.root_id,
-      root_revision: root.revision,
+      root_id: this.target.root_id,
+      root_revision: draft.root_definition_revision,
       correlation_id: sealCorrelation,
       root_description_markdown: root.description,
     }, {
-      root_id: request.root_id,
+      root_id: this.target.root_id,
       root_revision: draft.root_definition_revision,
       correlation_id: sealCorrelation,
     });
     const expected = Object.freeze({
-      root_id: request.root_id,
-      cycle_id: request.cycle_id,
+      root_id: this.target.root_id,
+      cycle_id: parseCycleIssueId(cycle.issue_id),
       root_definition_revision: draft.root_definition_revision,
-      cycle_revision: cycle.revision,
+      cycle_revision: basis.approval_record.basis_issue_revision,
       correlation_id: sealCorrelation,
     });
-    const specification = sealCycleSpecification({
+    return sealCycleSpecification({
       schema_version: 1,
       ...expected,
       cycle_description_markdown: cycle.description,
       root_adr_markdown: draft.root_adr_markdown,
       status: "in_progress",
     }, definition, expected);
-    this.#sealedSpecifications.set(request.cycle_id, specification);
-    this.#latestRootTurnCorrelation = null;
-    return specification;
   }
 
   #stage(issue: TaskIssueSnapshot, cycleId: CycleIssueId): StageExecutionSnapshot {
@@ -387,16 +380,20 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     }
     const issueId = parseStageIssueId(issue.issue_id);
     const description = parseMarkdownText(issue.description, "cycle_reader_stage_invalid");
-    const existing = this.#sealedStages.get(issueId);
-    const sealed = existing ?? Object.freeze({
+    const sealed = Object.freeze({
       issue_id: issueId,
-      sealed_revision: issue.revision,
+      sealed_revision: canonicalTaskRevision({
+        issue_id: issueId,
+        kind,
+        title: issue.title,
+        description_markdown: description,
+        parent_cycle_id: cycleId,
+      }),
       kind,
       title: issue.title,
       description_markdown: description,
       parent_cycle_id: cycleId,
     });
-    if (existing === undefined) this.#sealedStages.set(issueId, sealed);
     return Object.freeze({
       ...sealed,
       revision: issue.revision,
@@ -409,9 +406,14 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
   }
 
   #sealedStage(stage: StageExecutionSnapshot): SealedStageIssue {
-    return this.#sealedStages.get(stage.issue_id) ?? (() => {
-      throw new Error("cycle_reader_stage_unsealed");
-    })();
+    return Object.freeze({
+      issue_id: stage.issue_id,
+      sealed_revision: stage.sealed_revision,
+      kind: stage.kind,
+      title: stage.title,
+      description_markdown: stage.description_markdown,
+      parent_cycle_id: stage.parent_cycle_id,
+    });
   }
 }
 
@@ -543,7 +545,6 @@ class DeliveringRootReconcill implements RootReconcillInterface {
     private readonly inner: RootReconcillInterface,
     private readonly taskBinding: RootTaskManageCommandBinding,
     private readonly delivery: AcceptedRevisionDeliveryCoordinator,
-    private readonly rememberRootTurn: (correlationId: CorrelationId) => void,
     private readonly log: (entry: ProductionRuntimeLog) => void,
   ) {}
 
@@ -558,7 +559,6 @@ class DeliveringRootReconcill implements RootReconcillInterface {
     } catch {
       turnFailed = true;
     }
-    this.rememberRootTurn(input.correlation_id);
     const authorization = this.taskBinding.takeAcceptedRevisionAuthorization();
     if (authorization !== null) {
       this.log(Object.freeze({
@@ -762,7 +762,6 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         root,
         taskBinding,
         delivery,
-        (correlationId) => reader.rememberRootTurn(correlationId),
         this.options.log,
       ),
     });

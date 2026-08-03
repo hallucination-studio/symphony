@@ -9,7 +9,12 @@ export interface GitCommandOptions {
 export class GitCommand {
   constructor(private readonly options: GitCommandOptions) {}
 
-  run(cwd: string, args: readonly string[], acceptedExitCodes: readonly number[] = [0]): Promise<Buffer> {
+  run(
+    cwd: string,
+    args: readonly string[],
+    acceptedExitCodes: readonly number[] = [0],
+    extraEnvironment: Readonly<Record<string, string>> = {},
+  ): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
       const child = spawn(this.options.executable, [
         "-c", "core.hooksPath=/dev/null",
@@ -29,6 +34,7 @@ export class GitCommand {
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_CONFIG_GLOBAL: "/dev/null",
           GIT_TERMINAL_PROMPT: "0",
+          ...extraEnvironment,
         },
       });
       const stdout: Buffer[] = [];

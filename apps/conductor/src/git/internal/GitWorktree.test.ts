@@ -12,6 +12,7 @@ import {
   parseRepositoryId,
   parseRevision,
   parseRootIssueId,
+  parseTaskIssueId,
 } from "../../contracts/identity.js";
 import { createDeliveryIdentity } from "../../delivery/api/DeliveryInterface.js";
 import type {
@@ -88,6 +89,12 @@ function commitRequest(
     correlation_id: parseCorrelationId(`commit:${workspaceIdentity.root_id}`),
     expected_head_revision: observation.head_revision,
     expected_diff_digest: observation.diff_digest,
+    proof: {
+      cycle_id: parseTaskIssueId("CYCLE-GIT-WORKTREE"),
+      specification_seal_digest: "1".repeat(64),
+      graph_seal_digest: "2".repeat(64),
+      work_completion_set_digest: "3".repeat(64),
+    },
   };
 }
 
@@ -212,7 +219,11 @@ test("commit records the entire exact Root worktree once and accepts only its im
   assert.equal(await git(worktreePath, ["ls-tree", "--name-only", "HEAD", "artifact.bin"]), "artifact.bin");
   assert.equal(await git(worktreePath, ["ls-tree", "--name-only", "HEAD", "obsolete.txt"]), "");
   assert.deepEqual(await readFile(path.join(worktreePath, "artifact.bin")), Buffer.from([0, 1, 2, 255]));
-  assert.match(await git(worktreePath, ["log", "-1", "--format=%B"]), /Symphony-Diff-Digest:/u);
+  const proof = await f.workspace.readCommitProof(root, committed.head_revision);
+  assert.equal(proof.carrying_object_id, committed.head_revision);
+  assert.equal(proof.parent_revision, f.revision);
+  assert.equal(proof.diff_digest, before.diff_digest);
+  assert.deepEqual(proof, { ...request.proof, ...proof });
 });
 
 test("commit refuses clean, stale-diff, and foreign-HEAD inputs without creating a commit", async (context) => {

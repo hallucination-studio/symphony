@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   CycleAdvanceRequest,
   StageExecutionSnapshot,
@@ -11,6 +13,7 @@ import {
 import { parseMutationResult } from "../../contracts/mutation.js";
 import type { GitSnapshot, TaskIssueSnapshot } from "../../contracts/observation.js";
 import type {
+  GitCommitProof,
   GitWorkspaceInterface,
   RootWorkspaceIdentity,
 } from "../../git/api/GitWorkspaceInterface.js";
@@ -38,6 +41,7 @@ import {
 } from "./CycleMachine.js";
 import type { CycleTransition } from "./CycleTransition.js";
 import type { BuiltPlanGraphManifest } from "./PlanGraphManifest.js";
+import type { PersistedCommitBasis } from "./PlanCompletionRecord.js";
 
 type CommitAndVerifyTransition = Extract<CycleTransition, { readonly action: "commit_and_verify" }>;
 
@@ -55,6 +59,11 @@ export interface CycleCommitVerifierOptions {
   readonly git_workspace: GitWorkspaceInterface;
   readonly performer_factory: CycleVerifyPerformerFactory;
   readonly completion_writer: {
+    readCommitBasis(
+      snapshot: CycleAdvanceRequest,
+      basis: SealedCycleBasis,
+      built: BuiltPlanGraphManifest,
+    ): Promise<PersistedCommitBasis>;
     persistVerify(
       snapshot: CycleAdvanceRequest,
       basis: SealedCycleBasis,
@@ -310,6 +319,26 @@ function assertCommitted(before: GitSnapshot, after: GitSnapshot): void {
   ) throw new Error("commit_readback_mismatch");
 }
 
+function digest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function assertCommitProof(
+  proof: GitCommitProof,
+  carryingObjectId: NonNullable<GitSnapshot["head_revision"]>,
+  persisted: PersistedCommitBasis,
+): void {
+  if (
+    proof.carrying_object_id !== carryingObjectId
+    || digest(proof.parent_revision) !== persisted.workspace_parent_revision_digest
+    || digest(proof.diff_digest) !== persisted.workspace_diff_digest
+    || proof.cycle_id !== persisted.proof.cycle_id
+    || proof.specification_seal_digest !== persisted.proof.specification_seal_digest
+    || proof.graph_seal_digest !== persisted.proof.graph_seal_digest
+    || proof.work_completion_set_digest !== persisted.proof.work_completion_set_digest
+  ) throw new Error("commit_proof_mismatch");
+}
+
 function workspaceIdentity(request: CycleAdvanceRequest): RootWorkspaceIdentity {
   return Object.freeze({
     root_id: request.root_id,
@@ -353,44 +382,59 @@ export class CycleCommitVerifier {
     this.#active = true;
     const epoch = this.#epoch;
     let current = request;
-    let verifyStarted = false;
-    let verifyTerminalAttempted = false;
     try {
       const verify = assertTransition(request, transition);
       const identity = workspaceIdentity(request);
+      const persistedCommitBasis = await this.#completionWriter.readCommitBasis(request, basis, built);
+      this.#assertActive(epoch);
       const before = await this.#gitWorkspace.read(identity);
       this.#assertActive(epoch);
       current = bindCycleAdvanceRequest({ ...request, git: before });
-      if (!sameGit(before, request.git) || before.workspace_state !== "dirty") {
+      if (!sameGit(before, request.git)) {
         throw new Error("commit_precondition_mismatch");
       }
-
-      const rawMutation = await this.#gitWorkspace.commit(Object.freeze({
-        ...identity,
-        correlation_id: request.correlation_id,
-        expected_head_revision: transition.expected_head_revision,
-        expected_diff_digest: transition.expected_diff_digest,
-      }));
-      this.#assertActive(epoch);
-      let mutation: ReturnType<typeof parseMutationResult> | null = null;
-      try {
-        mutation = parseMutationResult(rawMutation);
-      } catch {
-        mutation = null;
+      let committed: GitSnapshot;
+      if (before.workspace_state === "dirty") {
+        if (
+          before.head_revision === null
+          || digest(before.head_revision) !== persistedCommitBasis.workspace_parent_revision_digest
+          || digest(before.diff_digest) !== persistedCommitBasis.workspace_diff_digest
+        ) throw new Error("work_completion_git_basis_mismatch");
+        const rawMutation = await this.#gitWorkspace.commit(Object.freeze({
+          ...identity,
+          correlation_id: request.correlation_id,
+          expected_head_revision: transition.expected_head_revision,
+          expected_diff_digest: transition.expected_diff_digest,
+          proof: persistedCommitBasis.proof,
+        }));
+        this.#assertActive(epoch);
+        let mutation: ReturnType<typeof parseMutationResult> | null = null;
+        try {
+          mutation = parseMutationResult(rawMutation);
+        } catch {
+          mutation = null;
+        }
+        committed = await this.#gitWorkspace.read(identity);
+        this.#assertActive(epoch);
+        current = bindCycleAdvanceRequest({ ...current, git: committed });
+        if (
+          mutation === null
+          || mutation.outcome !== "applied"
+          || mutation.target_id !== request.root_id
+          || mutation.correlation_id !== request.correlation_id
+        ) throw new Error("commit_mutation_failed");
+        assertCommitted(before, committed);
+      } else if (before.workspace_state === "clean" && before.head_revision !== null) {
+        committed = before;
+      } else {
+        throw new Error("commit_precondition_mismatch");
       }
-      const committed = await this.#gitWorkspace.read(identity);
+      if (committed.head_revision === null) throw new Error("committed_head_missing");
+      const commitProof = await this.#gitWorkspace.readCommitProof(identity, committed.head_revision);
       this.#assertActive(epoch);
-      current = bindCycleAdvanceRequest({ ...current, git: committed });
-      if (
-        mutation === null
-        || mutation.outcome !== "applied"
-        || mutation.target_id !== request.root_id
-        || mutation.correlation_id !== request.correlation_id
-      ) throw new Error("commit_mutation_failed");
-      assertCommitted(before, committed);
+      assertCommitProof(commitProof, committed.head_revision, persistedCommitBasis);
 
       current = await this.#transitionVerify(current, verify, "in_progress", epoch);
-      verifyStarted = true;
       const startedVerify = current.verify_issue;
       if (startedVerify === null || startedVerify.status !== "in_progress") {
         throw new Error("started_verify_missing");
@@ -443,10 +487,8 @@ export class CycleCommitVerifier {
         Object.freeze({ assertActive: () => this.#assertActive(epoch) }),
       );
       this.#assertActive(epoch);
-      verifyTerminalAttempted = true;
       if (verifyResult.conclusion !== "passed") {
         current = await this.#transitionVerify(current, startedVerify, "failed", epoch);
-        current = await this.#transitionCycle(current, "failed", epoch);
         return Object.freeze({
           snapshot: current,
           outcome: "failed",
@@ -461,22 +503,7 @@ export class CycleCommitVerifier {
       });
     } catch {
       if (!this.#isActive(epoch)) throw new CycleCommitVerificationError(current);
-      if (verifyStarted && !verifyTerminalAttempted && current.verify_issue?.status === "in_progress") {
-        verifyTerminalAttempted = true;
-        try {
-          current = await this.#transitionVerify(current, current.verify_issue, "failed", epoch);
-        } catch {
-          // The Cycle failure below is still attempted from the last exact read-back.
-        }
-      }
       await this.#closePerformerIfCurrent(epoch);
-      if (current.cycle_status === "in_progress") {
-        try {
-          current = await this.#transitionCycle(current, "failed", epoch);
-        } catch {
-          throw new CycleCommitVerificationError(current);
-        }
-      }
       return Object.freeze({ snapshot: current, outcome: "failed" });
     } finally {
       this.#active = false;
@@ -525,7 +552,7 @@ export class CycleCommitVerifier {
 
   async #transitionCycle(
     request: CycleAdvanceRequest,
-    status: "awaiting_acceptance" | "failed",
+    status: "awaiting_acceptance",
     epoch: number,
   ): Promise<CycleAdvanceRequest> {
     const call = statusCall(

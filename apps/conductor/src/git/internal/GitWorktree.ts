@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readlink, realpath } from "node:fs/promises";
+import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -8,16 +9,19 @@ import {
   parseRepositoryId,
   parseRevision,
   parseRootIssueId,
-  type ObservationDigest,
+  parseTaskIssueId,
+  type Revision,
   type RootIssueId,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
 import type { GitSnapshot } from "../../contracts/observation.js";
-import { parseBoundedString } from "../../contracts/validation.js";
+import { asRecord, assertExactKeys, parseBoundedString } from "../../contracts/validation.js";
 import { createRootHeadBranch } from "../../delivery/api/DeliveryInterface.js";
 import type {
   GitWorkspaceInterface,
   CommitWorkspaceRequest,
+  GitCommitProof,
+  GitCommitProofBasis,
   PrepareWorkspaceRequest,
   RootWorkspaceIdentity,
 } from "../api/GitWorkspaceInterface.js";
@@ -70,8 +74,27 @@ function parseWorktrees(output: Buffer): readonly WorktreeEntry[] {
   return entries;
 }
 
-function commitMessage(rootId: RootIssueId, diffDigest: ObservationDigest): string {
-  return `symphony: complete ${rootId}\n\nSymphony-Diff-Digest: ${diffDigest}`;
+function commitMessage(rootId: RootIssueId, proof: GitCommitProofBasis): string {
+  const encoded = Buffer.from(JSON.stringify(proof), "utf8").toString("base64url");
+  return `symphony: complete ${rootId}\n\nSymphony-Commit-Proof: ${encoded}`;
+}
+
+function parseProof(value: unknown): GitCommitProofBasis {
+  const record = asRecord(value);
+  assertExactKeys(record, [
+    "cycle_id", "specification_seal_digest", "graph_seal_digest", "work_completion_set_digest",
+  ]);
+  const digest = (entry: unknown, code: string) => {
+    const parsed = parseBoundedString(entry, code, 64);
+    if (!/^[0-9a-f]{64}$/u.test(parsed)) throw new Error(code);
+    return parsed;
+  };
+  return Object.freeze({
+    cycle_id: parseTaskIssueId(record.cycle_id),
+    specification_seal_digest: digest(record.specification_seal_digest, "invalid_commit_specification_seal"),
+    graph_seal_digest: digest(record.graph_seal_digest, "invalid_commit_graph_seal"),
+    work_completion_set_digest: digest(record.work_completion_set_digest, "invalid_commit_completion_set"),
+  });
 }
 
 export class GitWorktree implements GitWorkspaceInterface {
@@ -225,7 +248,7 @@ export class GitWorktree implements GitWorkspaceInterface {
       ) return mutation(normalized, "precondition_failed", "staged_workspace_mismatch");
       await this.#commands.run(worktreePath, [
         "commit", "--no-gpg-sign", "-m",
-        commitMessage(normalized.root_id, normalized.expected_diff_digest),
+        commitMessage(normalized.root_id, normalized.proof),
       ]);
     } catch {
       return this.#classifyFailedCommit(normalized);
@@ -234,6 +257,43 @@ export class GitWorktree implements GitWorkspaceInterface {
     return await this.#isCommitPostcondition(normalized, after)
       ? mutation(normalized, "applied")
       : mutation(normalized, "readback_mismatch", "commit_postcondition_mismatch");
+  }
+
+  async readCommitProof(
+    identity: RootWorkspaceIdentity,
+    carryingObjectId: Revision,
+  ): Promise<GitCommitProof> {
+    await this.#assertIdentity(identity);
+    const objectId = parseRevision(carryingObjectId);
+    const worktreePath = this.pathFor(identity.root_id);
+    const [parent, tree, message] = await Promise.all([
+      this.#commands.run(worktreePath, ["rev-parse", "--verify", `${objectId}^1`]),
+      this.#commands.run(worktreePath, ["rev-parse", "--verify", `${objectId}^{tree}`]),
+      this.#commands.run(worktreePath, ["log", "-1", "--format=%B", objectId]),
+    ]);
+    const prefix = `symphony: complete ${identity.root_id}\n\nSymphony-Commit-Proof: `;
+    const body = message.toString("utf8").trim();
+    if (!body.startsWith(prefix) || body.slice(prefix.length).includes("\n")) {
+      throw new Error("git_commit_proof_missing");
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(Buffer.from(body.slice(prefix.length), "base64url").toString("utf8"));
+    } catch {
+      throw new Error("git_commit_proof_invalid");
+    }
+    const proof = parseProof(decoded);
+    const parentRevision = parseRevision(parent.toString("utf8").trim());
+    return Object.freeze({
+      ...proof,
+      carrying_object_id: objectId,
+      parent_revision: parentRevision,
+      diff_digest: parseObservationDigest(`sha256:${createHash("sha256")
+        .update(parentRevision, "utf8")
+        .update("\0", "utf8")
+        .update(tree.toString("utf8").trim(), "utf8")
+        .digest("hex")}`),
+    });
   }
 
   async #assertIdentity(identity: RootWorkspaceIdentity): Promise<void> {
@@ -298,15 +358,15 @@ export class GitWorktree implements GitWorkspaceInterface {
       || observation.head_revision === null
       || observation.head_revision === request.expected_head_revision
     ) return false;
-    const worktreePath = this.pathFor(request.root_id);
     try {
-      const [parent, message] = await Promise.all([
-        this.#commands.run(worktreePath, ["rev-parse", "--verify", `${observation.head_revision}^1`]),
-        this.#commands.run(worktreePath, ["log", "-1", "--format=%B", observation.head_revision]),
-      ]);
+      const proof = await this.readCommitProof(request, observation.head_revision);
       if (
-        parseRevision(parent.toString("utf8").trim()) !== request.expected_head_revision
-        || message.toString("utf8").trim() !== commitMessage(request.root_id, request.expected_diff_digest)
+        proof.parent_revision !== request.expected_head_revision
+        || proof.diff_digest !== request.expected_diff_digest
+        || proof.cycle_id !== request.proof.cycle_id
+        || proof.specification_seal_digest !== request.proof.specification_seal_digest
+        || proof.graph_seal_digest !== request.proof.graph_seal_digest
+        || proof.work_completion_set_digest !== request.proof.work_completion_set_digest
       ) return false;
       const confirmed = await this.read(request);
       return confirmed.workspace_state === "clean" && confirmed.head_revision === observation.head_revision;
@@ -316,24 +376,21 @@ export class GitWorktree implements GitWorkspaceInterface {
   }
 
   async #diffDigest(worktreePath: string): Promise<ReturnType<typeof parseObservationDigest>> {
-    const [tracked, untrackedOutput] = await Promise.all([
-      this.#commands.run(worktreePath, [
-        "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--",
-      ]),
-      this.#commands.run(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]),
-    ]);
-    const hash = createHash("sha256").update("tracked\0").update(tracked);
-    const untracked = untrackedOutput.toString("utf8").split("\0").filter(Boolean).sort();
-    for (const relative of untracked) {
-      const absolute = path.resolve(worktreePath, relative);
-      if (!contains(worktreePath, absolute)) throw new Error("git_diff_path_escape");
-      const stat = await lstat(absolute);
-      if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error("git_diff_unsupported_file");
-      const content = stat.isSymbolicLink()
-        ? Buffer.from(await readlink(absolute), "utf8")
-        : await readFile(absolute);
-      hash.update("\0untracked\0").update(Buffer.from(relative, "utf8")).update("\0").update(content);
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-git-index-"));
+    const index = path.join(temporary, "index");
+    const environment = { GIT_INDEX_FILE: index };
+    try {
+      const parent = parseRevision((await this.#commands.run(
+        worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"], [0], environment,
+      )).toString("utf8").trim());
+      await this.#commands.run(worktreePath, ["read-tree", "HEAD"], [0], environment);
+      await this.#commands.run(worktreePath, ["add", "-A", "--"], [0], environment);
+      const tree = (await this.#commands.run(worktreePath, ["write-tree"], [0], environment))
+        .toString("utf8").trim();
+      return parseObservationDigest(`sha256:${createHash("sha256")
+        .update(parent, "utf8").update("\0", "utf8").update(tree, "utf8").digest("hex")}`);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
     }
-    return parseObservationDigest(`sha256:${hash.digest("hex")}`);
   }
 }

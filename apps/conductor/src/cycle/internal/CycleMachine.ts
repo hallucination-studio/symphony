@@ -14,7 +14,6 @@ import {
   parseTaskRevision,
   type CorrelationId,
   type CycleIssueId,
-  type TaskIssueId,
 } from "../../contracts/identity.js";
 import {
   parseCycleAdvanceResult,
@@ -123,12 +122,11 @@ function executionStages(snapshot: CycleAdvanceRequest): readonly StageExecution
   ];
 }
 
-function executionFacts(snapshot: CycleAdvanceRequest): string {
-  return JSON.stringify({
-    ...snapshot,
-    correlation_id: null,
-    git: snapshot.cycle_status === "awaiting_acceptance" ? snapshot.git : null,
-  });
+function requiresLiveContext(snapshot: CycleAdvanceRequest): boolean {
+  if (executionStages(snapshot).some(({ status }) => status === "in_progress")) return true;
+  const firstPendingWork = snapshot.sealed_work_issues.findIndex(({ status }) => status === "todo");
+  return firstPendingWork > 0
+    && snapshot.sealed_work_issues.slice(0, firstPendingWork).some(({ status }) => status === "done");
 }
 
 export function bindCycleAdvanceRequest(value: CycleAdvanceRequest): CycleAdvanceRequest {
@@ -195,10 +193,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
   readonly #reader: FreshCycleExecutionReader;
   readonly #started = new WeakSet<PreparedCycleAction>();
   readonly #target: RuntimeTarget;
-  readonly #stageOwners = new Map<TaskIssueId, TaskIssueId>();
-  readonly #terminalCycles = new Set<CycleIssueId>();
   readonly #workflow: TaskWorkflowIdentities;
-  #acceptanceEvidence: CycleAdvanceRequest | null = null;
   #active: ActiveCycle | null = null;
   #epoch = 0;
   #inFlight: PreparedCycleAction | null = null;
@@ -247,8 +242,6 @@ export class CycleMachineHost implements CycleMachineHostInterface {
         return this.#paused("invalid_contract", "cycle_generation_baseline_root_mismatch", correlationId);
       }
     }
-    if (previousAcceptedTask !== null) this.#rememberObservedIdentities(previousAcceptedTask);
-
     const rootTaskId = parseTaskIssueId(this.#target.root_id);
     const cycles = task.issues.filter((issue) => issue.labels.includes(this.#workflow.labels.cycle));
     for (const cycle of cycles) {
@@ -259,7 +252,6 @@ export class CycleMachineHost implements CycleMachineHostInterface {
         return this.#paused("invalid_contract", "cycle_admission_state_invalid", correlationId);
       }
     }
-    this.#rememberObservedIdentities(task);
     const nonTerminal = cycles.filter((cycle) => {
       const status = cycleStatus(cycle, this.#workflow);
       return status === "draft" || status === "in_progress" || status === "awaiting_acceptance";
@@ -269,48 +261,19 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     }
     const candidate = nonTerminal[0];
     if (candidate === undefined) {
-      if (this.#active !== null) {
-        const terminal = cycles.find(
-          ({ issue_id }) => issue_id === parseTaskIssueId(this.#active!.cycle_id),
-        );
-        if (terminal === undefined) {
-          return this.#paused("invalid_contract", "active_cycle_missing", correlationId);
-        }
-        const terminalStatus = cycleStatus(terminal, this.#workflow);
-        if (terminalStatus === "succeeded" || terminalStatus === "rejected") {
-          if (this.#acceptanceEvidence === null || this.#active.ownership === "lost") {
-            return this.#paused("readback_mismatch", "active_cycle_acceptance_bypassed", correlationId);
-          }
-        }
-        this.#terminalCycles.add(this.#active.cycle_id);
-        this.#active = null;
-        this.#acceptanceEvidence = null;
-      }
+      this.#active = null;
       return ROOT_AVAILABLE;
     }
     const status = cycleStatus(candidate, this.#workflow);
     const cycleId = parseCycleIssueId(candidate.issue_id);
     if (status === "draft") {
-      if (this.#terminalCycles.has(cycleId)) {
-        return this.#paused("readback_mismatch", "terminal_cycle_reopened", correlationId);
-      }
-      if (this.#active !== null && candidate.issue_id !== parseTaskIssueId(this.#active.cycle_id)) {
-        return this.#paused("invalid_contract", "active_cycle_rebound", correlationId);
-      }
-      if (this.#active !== null) {
-        return this.#paused("readback_mismatch", "active_cycle_state_regressed", correlationId);
-      }
+      this.#active = null;
       return ROOT_AVAILABLE;
     }
     if (this.#active !== null && this.#active.cycle_id !== cycleId) {
       return this.#paused("invalid_contract", "active_cycle_rebound", correlationId);
     }
-    const ownership = this.#terminalCycles.has(cycleId)
-      ? "lost"
-      : this.#active?.ownership
-        ?? (status === "in_progress" && this.#wasApprovedInGeneration(candidate, previousAcceptedTask)
-          ? "live"
-          : "lost");
+    const ownership = this.#active?.ownership ?? "live";
     return this.#readAction(cycleId, correlationId, candidate, task, ownership);
   }
 
@@ -362,14 +325,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       && result.outcome !== "precondition_failed"
     ) throw new Error("cycle_machine_lost_execution_not_failed");
     if (result.outcome === "terminal_failed") {
-      this.#terminalCycles.add(prepared.request.cycle_id);
       this.#active = null;
-      this.#acceptanceEvidence = null;
-    } else if (
-      result.outcome === "no_action"
-      && prepared.request.cycle_status === "awaiting_acceptance"
-    ) {
-      this.#acceptanceEvidence = prepared.request;
     }
     return result;
   }
@@ -378,7 +334,6 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     if (this.#retirement !== null) return this.#retirement;
     this.#retired = true;
     this.#active = null;
-    this.#acceptanceEvidence = null;
     this.#ready = null;
     this.#epoch += 1;
     let retirement: Promise<void>;
@@ -444,32 +399,16 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       || task === null
       || this.#matchesFreshTask(snapshot, observedCycle, task);
     if (!matchesTask) ownership = "lost";
-    for (const stage of executionStages(snapshot)) {
-      const stageId = parseTaskIssueId(stage.issue_id);
-      const owner = this.#stageOwners.get(stageId);
-      if (owner !== undefined && owner !== parseTaskIssueId(snapshot.cycle_id)) {
-        ownership = "lost";
-      } else if (owner === undefined && ownership === "live") {
-        this.#stageOwners.set(stageId, parseTaskIssueId(snapshot.cycle_id));
-      }
-    }
     if (
       this.#active === null
       && ownership === "live"
-      && (
-        snapshot.plan_issue !== null
-        || snapshot.sealed_work_issues.length > 0
-        || snapshot.verify_issue !== null
-        || snapshot.sealed_relations.length > 0
-      )
+      && requiresLiveContext(snapshot)
     ) ownership = "lost";
     if (
-      this.#acceptanceEvidence !== null
-      && ownership === "live"
-      && snapshot.cycle_status === "awaiting_acceptance"
+      snapshot.cycle_status === "awaiting_acceptance"
       && matchesTask
-      && executionFacts(snapshot) === executionFacts(this.#acceptanceEvidence)
     ) {
+      this.#active = null;
       return ROOT_AVAILABLE;
     }
     if (this.#active === null) {
@@ -531,39 +470,6 @@ export class CycleMachineHost implements CycleMachineHostInterface {
         && taskRelation.source_issue_id === parseTaskIssueId(relation.prerequisite_issue_id)
         && taskRelation.target_issue_id === parseTaskIssueId(relation.dependent_issue_id);
     });
-  }
-
-  #wasApprovedInGeneration(
-    cycle: TaskIssueSnapshot,
-    previousAcceptedTask: TaskSnapshot | null,
-  ): boolean {
-    if (previousAcceptedTask === null) return false;
-    const previous = previousAcceptedTask.issues.find(({ issue_id }) => issue_id === cycle.issue_id);
-    if (previous === undefined) return true;
-    return previous.revision !== cycle.revision
-      && previous.parent_id === parseTaskIssueId(this.#target.root_id)
-      && hasOnlyTaskKind(previous, "cycle", this.#workflow)
-      && cycleStatus(previous, this.#workflow) === "draft";
-  }
-
-  #rememberObservedIdentities(task: TaskSnapshot): void {
-    for (const issue of task.issues) {
-      if (hasOnlyTaskKind(issue, "cycle", this.#workflow)) {
-        const status = cycleStatus(issue, this.#workflow);
-        if (
-          status === "succeeded"
-          || status === "rejected"
-          || status === "failed"
-          || status === "canceled"
-        ) this.#terminalCycles.add(parseCycleIssueId(issue.issue_id));
-        continue;
-      }
-      const isStage = hasOnlyTaskKind(issue, "plan", this.#workflow)
-        || hasOnlyTaskKind(issue, "work", this.#workflow)
-        || hasOnlyTaskKind(issue, "verify", this.#workflow);
-      if (!isStage || issue.parent_id === null) continue;
-      if (!this.#stageOwners.has(issue.issue_id)) this.#stageOwners.set(issue.issue_id, issue.parent_id);
-    }
   }
 
   #assertAvailable(): void {

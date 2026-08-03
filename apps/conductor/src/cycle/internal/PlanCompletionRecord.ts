@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 import {
+  parseCycleCompletionRecord,
+  parseCycleInvalidationRecord,
   parseStageCompletionRecord,
   parseStageInvalidationRecord,
   type SealedCycleBasis,
@@ -9,6 +11,7 @@ import {
 } from "../../contracts/cycle-records.js";
 import { parseTaskIssueId, type TaskIssueId } from "../../contracts/identity.js";
 import type { CycleAdvanceRequest } from "../../contracts/cycle.js";
+import type { GitCommitProofBasis } from "../../git/api/GitWorkspaceInterface.js";
 import type { VerifyResult, WorkResult } from "../../performer/api/StagePerformerInterface.js";
 import type { TaskManageCallerIssuer } from "../../task-management/api/TaskManageCapability.js";
 import type { TaskWorkflowIdentities } from "../../task-management/api/TaskManageCapability.js";
@@ -39,12 +42,27 @@ export interface PlanCompletionRecordWriterOptions {
   readonly service_actor_id: string;
 }
 
+export interface PersistedCommitBasis {
+  readonly proof: GitCommitProofBasis;
+  readonly workspace_parent_revision_digest: string;
+  readonly workspace_diff_digest: string;
+}
+
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function graphSeal(built: BuiltPlanGraphManifest): string {
   return digest(JSON.stringify(built.manifest));
+}
+
+function stageListForDigest(snapshot: CycleAdvanceRequest): unknown {
+  return {
+    plan_issue: snapshot.plan_issue,
+    sealed_work_issues: snapshot.sealed_work_issues,
+    verify_issue: snapshot.verify_issue,
+    sealed_relations: snapshot.sealed_relations,
+  };
 }
 
 function traceability(built: BuiltPlanGraphManifest): string {
@@ -216,6 +234,299 @@ export class PlanCompletionRecordWriter {
     ) throw new Error("plan_completion_manifest_mismatch");
     if (plan.status === "done") assertExactPlanGraph(snapshot, built);
     return built;
+  }
+
+  async readStageCompletion(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
+    stageId: TaskIssueId,
+  ): Promise<StageCompletionRecord | null> {
+    const plan = snapshot.plan_issue;
+    const stage = [
+      ...(plan === null ? [] : [plan]),
+      ...snapshot.sealed_work_issues,
+      ...(snapshot.verify_issue === null ? [] : [snapshot.verify_issue]),
+    ].find(({ issue_id }) => parseTaskIssueId(issue_id) === stageId);
+    const node = stage?.kind === "plan"
+      ? built.manifest.plan
+      : stage?.kind === "work"
+        ? built.manifest.ordered_work_nodes.find(({ issue_id }) => issue_id === stageId)
+        : stage?.kind === "verify" ? built.manifest.verify_node : undefined;
+    if (stage === undefined || node === undefined || node.issue_id !== stageId) {
+      throw new Error("stage_completion_anchor_mismatch");
+    }
+    const comments = await this.options.record_reader.readIssueRecordComments(stageId);
+    const projected = readExactTaskIssueRecord(
+      comments,
+      stageId,
+      node.completion_record_id,
+      this.options.service_actor_id,
+    );
+    if (projected === null) return null;
+    const record = stage.kind === "plan"
+      ? parseStageCompletionRecord(projected, "plan", basis)
+      : stage.kind === "work"
+        ? parseStageCompletionRecord(projected, "work", basis)
+        : parseStageCompletionRecord(projected, "verify", basis);
+    if (
+      record.stage_id !== stageId
+      || record.basis_document_digest !== digest(stage.description_markdown)
+      || record.completion.instruction_digest !== node.instruction_digest
+    ) throw new Error("stage_completion_basis_mismatch");
+    return record;
+  }
+
+  async assertAcceptanceEvidence(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
+  ): Promise<void> {
+    if (
+      snapshot.cycle_status !== "awaiting_acceptance"
+      || snapshot.git.workspace_state !== "clean"
+      || snapshot.git.head_revision === null
+      || snapshot.verify_issue?.status !== "done"
+      || snapshot.sealed_work_issues.some(({ status }) => status !== "done")
+    ) throw new Error("acceptance_evidence_source_invalid");
+    for (const work of snapshot.sealed_work_issues) {
+      const record = await this.readStageCompletion(
+        snapshot,
+        basis,
+        built,
+        parseTaskIssueId(work.issue_id),
+      );
+      if (
+        record === null
+        || !("outcome" in record.completion)
+        || record.completion.outcome !== "completed"
+      ) {
+        throw new Error("work_completion_record_missing");
+      }
+    }
+    const verify = await this.readStageCompletion(
+      snapshot,
+      basis,
+      built,
+      parseTaskIssueId(snapshot.verify_issue.issue_id),
+    );
+    if (
+      verify === null
+      || !("conclusion" in verify.completion)
+      || verify.completion.conclusion !== "passed"
+      || verify.completion.exact_revision !== digest(snapshot.git.head_revision)
+    ) throw new Error("verify_completion_evidence_mismatch");
+  }
+
+  async readCommitBasis(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest,
+  ): Promise<PersistedCommitBasis> {
+    if (basis.specification.specification_seal_digest === null) {
+      throw new Error("commit_basis_specification_unsealed");
+    }
+    const records: StageCompletionRecord[] = [];
+    for (const node of built.manifest.ordered_work_nodes) {
+      const stage = snapshot.sealed_work_issues.find(
+        ({ issue_id }) => parseTaskIssueId(issue_id) === node.issue_id,
+      );
+      if (stage?.status !== "done") throw new Error("commit_basis_work_incomplete");
+      const record = await this.readStageCompletion(snapshot, basis, built, node.issue_id);
+      if (
+        record === null
+        || !("outcome" in record.completion)
+        || record.completion.outcome !== "completed"
+      ) throw new Error("commit_basis_work_record_invalid");
+      records.push(record);
+    }
+    const final = records.at(-1);
+    if (final === undefined || !("workspace_parent_revision" in final.completion)) {
+      throw new Error("commit_basis_final_work_missing");
+    }
+    return Object.freeze({
+      proof: Object.freeze({
+        cycle_id: basis.specification.cycle_id,
+        specification_seal_digest: basis.specification.specification_seal_digest,
+        graph_seal_digest: snapshot.sealed_graph_digest,
+        work_completion_set_digest: digest(JSON.stringify(records.map((record) => ({
+          stage_id: record.stage_id,
+          record_id: record.record_id,
+          revision: record.revision,
+        })))),
+      }),
+      workspace_parent_revision_digest: final.completion.workspace_parent_revision,
+      workspace_diff_digest: final.completion.workspace_diff_digest,
+    });
+  }
+
+  async persistStageFailure(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest | null,
+    stageId: TaskIssueId,
+    reasonCode: string,
+    reasonMarkdown: string,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<StageCompletionRecord> {
+    const stage = [
+      ...(snapshot.plan_issue === null ? [] : [snapshot.plan_issue]),
+      ...snapshot.sealed_work_issues,
+      ...(snapshot.verify_issue === null ? [] : [snapshot.verify_issue]),
+    ].find(({ issue_id }) => parseTaskIssueId(issue_id) === stageId);
+    if (stage === undefined || stage.status !== "in_progress") {
+      throw new Error("stage_failure_source_invalid");
+    }
+    if (stage.kind === "plan") {
+      const comments = await this.options.record_reader.readIssueRecordComments(stageId);
+      const projected = readExactTaskIssueRecord(
+        comments,
+        stageId,
+        basis.specification.plan_completion_record_id,
+        this.options.service_actor_id,
+      );
+      if (projected !== null) return parseStageCompletionRecord(projected, "plan", basis);
+      return this.persistPlanTerminal(
+        snapshot,
+        basis,
+        "failed",
+        reasonMarkdown,
+        execution,
+      );
+    }
+    if (built === null) throw new Error("stage_failure_manifest_missing");
+    const existing = await this.readStageCompletion(snapshot, basis, built, stageId);
+    if (existing !== null) return existing;
+    const node = stage.kind === "work"
+      ? built.manifest.ordered_work_nodes.find(({ issue_id }) => issue_id === stageId)
+      : built.manifest.verify_node;
+    if (node === undefined || node.issue_id !== stageId) throw new Error("stage_failure_anchor_mismatch");
+    const common = {
+      record_id: node.completion_record_id,
+      stage_id: stageId,
+      stage_revision: stage.revision,
+      stage_description: stage.description_markdown,
+      stage_kind: stage.kind,
+    } as const;
+    return this.#persistStage(snapshot, basis, execution, stage.kind === "work" ? {
+      ...common,
+      projection: {
+        outcome: "failed",
+        instruction_digest: node.instruction_digest,
+        workspace_parent_revision: digest(snapshot.git.head_revision ?? "unborn"),
+        workspace_diff_digest: digest(snapshot.git.diff_digest),
+        checks_markdown: "## Checks\n\n- not_run: live Work context was lost",
+        normalized_handoff_markdown: reasonMarkdown,
+        reason_code: reasonCode,
+        reason_markdown: reasonMarkdown,
+      },
+    } : {
+      ...common,
+      projection: {
+        conclusion: "inconclusive",
+        instruction_digest: node.instruction_digest,
+        exact_revision: digest(snapshot.git.head_revision ?? "unborn"),
+        checks_markdown: "## Checks\n\n- not_run: live Verify context was lost",
+        evidence_markdown: reasonMarkdown,
+        reason_code: reasonCode,
+        reason_markdown: reasonMarkdown,
+      },
+    });
+  }
+
+  async persistCycleFailure(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    reasonCode: string,
+    reasonMarkdown: string,
+    failedStageId: TaskIssueId | null,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<void> {
+    if (snapshot.cycle_status !== "in_progress" && snapshot.cycle_status !== "awaiting_acceptance") {
+      throw new Error("cycle_failure_source_invalid");
+    }
+    const awaiting = snapshot.cycle_status === "awaiting_acceptance";
+    const recordId = awaiting
+      ? basis.specification.cycle_invalidation_record_id
+      : basis.specification.cycle_completion_record_id;
+    const projection = awaiting ? {
+      issue_id: parseTaskIssueId(snapshot.cycle_id),
+      cycle_id: basis.specification.cycle_id,
+      basis_issue_revision: snapshot.cycle_revision,
+      basis_status: "Awaiting Acceptance",
+      basis_document_digest: digest(snapshot.specification.cycle_description_markdown),
+      record_kind: "cycle_invalidation",
+      last_valid_phase: "awaiting_acceptance",
+      expected_status: "Awaiting Acceptance",
+      observed_status: "Awaiting Acceptance",
+      observed_cycle_document_digest: digest(snapshot.specification.cycle_description_markdown),
+      observed_execution_graph_digest: digest(JSON.stringify(stageListForDigest(snapshot))),
+      offending_resources: [{
+        evidence_kind: "present_digest_mismatch",
+        resource_kind: "record",
+        resource_id: basis.specification.cycle_invalidation_record_id,
+        expected_digest: digest(snapshot.sealed_graph_digest),
+        observed_digest: digest(JSON.stringify(snapshot.git)),
+        observed_revision: snapshot.cycle_revision,
+        creation_evidence_digest: null,
+      }],
+      observed_history_digest: digest(snapshot.cycle_revision),
+      observed_record_set_digest: digest(recordId),
+      reason_code: reasonCode,
+      reason_markdown: reasonMarkdown,
+      invalidation_kind: "sealed_fact_mutated",
+      terminal_status: "Failed",
+      successor_policy: "permanently_quarantined",
+      successor_evidence: null,
+    } : {
+      issue_id: parseTaskIssueId(snapshot.cycle_id),
+      cycle_id: basis.specification.cycle_id,
+      basis_issue_revision: snapshot.cycle_revision,
+      basis_status: "In Progress",
+      basis_document_digest: digest(snapshot.specification.cycle_description_markdown),
+      record_kind: "cycle_completion",
+      successor_policy: "allowed",
+      completion: {
+        outcome: "failed",
+        failure_phase: "in_progress",
+        specification_seal_digest: basis.specification.specification_seal_digest,
+        graph_seal_digest: snapshot.sealed_graph_digest,
+        observed_execution_graph_digest: digest(JSON.stringify(stageListForDigest(snapshot))),
+        observed_cycle_document_digest: digest(snapshot.specification.cycle_description_markdown),
+        failed_stage_id: failedStageId,
+        reason_code: reasonCode,
+        reason_markdown: reasonMarkdown,
+      },
+    };
+    const call = createTaskIssueRecordCall(snapshot, {
+      record_id: recordId,
+      issue_id: parseTaskIssueId(snapshot.cycle_id),
+      expected_issue_revision: snapshot.cycle_revision,
+      projection,
+    });
+    const command = bindCycleTaskManageCommand({
+      snapshot,
+      workflow: this.options.workflow,
+      caller_issuer: this.options.caller_issuer,
+      task_manager: this.options.task_manager,
+      mutation_manifest: [call],
+    });
+    const result = await command.create_issue_comment(call, execution);
+    execution.assertActive();
+    const applied = appliedTaskIssueRecord(call, result, this.options.service_actor_id);
+    if (awaiting) parseCycleInvalidationRecord(applied);
+    else parseCycleCompletionRecord(applied);
+    const comments = await this.options.record_reader.readIssueRecordComments(parseTaskIssueId(snapshot.cycle_id));
+    execution.assertActive();
+    const fresh = readExactTaskIssueRecord(
+      comments,
+      parseTaskIssueId(snapshot.cycle_id),
+      recordId,
+      this.options.service_actor_id,
+    );
+    if (fresh === null) throw new Error("cycle_failure_record_missing");
+    if (awaiting) parseCycleInvalidationRecord(fresh);
+    else parseCycleCompletionRecord(fresh);
   }
 
   async persistWork(

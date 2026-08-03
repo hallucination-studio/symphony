@@ -32,6 +32,7 @@ import {
 import {
   parseCycleApprovalRecord,
   parseCycleSpecification as parseRecordCycleSpecification,
+  type StageCompletionRecord,
 } from "../../contracts/cycle-records.js";
 import {
   parsePlanResult,
@@ -293,6 +294,21 @@ const planCompletionRecordWriter = Object.freeze({
       }) as unknown as BuiltPlanGraphManifest;
     })()
     : null,
+  readStageCompletion: async () => null,
+  assertAcceptanceEvidence: async () => undefined,
+  readCommitBasis: async (snapshot: CycleAdvanceRequest) => ({
+    proof: {
+      cycle_id: parseTaskIssueId(snapshot.cycle_id),
+      specification_seal_digest: recordSpecification.specification_seal_digest!,
+      graph_seal_digest: snapshot.sealed_graph_digest,
+      work_completion_set_digest: "4".repeat(64),
+    },
+    workspace_parent_revision_digest: createHash("sha256")
+      .update(snapshot.git.head_revision ?? "unborn", "utf8").digest("hex"),
+    workspace_diff_digest: createHash("sha256").update(snapshot.git.diff_digest, "utf8").digest("hex"),
+  }),
+  persistStageFailure: async () => undefined,
+  persistCycleFailure: async () => undefined,
   persistWork: async () => undefined,
   persistVerify: async () => undefined,
   persistPlanInvalidation: async () => undefined,
@@ -306,7 +322,7 @@ const emptyGraph = parseSealedExecutionGraph({
 }, cycleId);
 
 function emptyRequest(): CycleAdvanceRequest {
-  const cycleRevision = parseTaskRevision("revision:cycle:current");
+  const cycleRevision = parseTaskRevision(`symphony:v1:${"9".repeat(64)}`);
   return parseCycleExecutionSnapshot({
     schema_version: 1,
     root_id: rootId,
@@ -367,6 +383,7 @@ const unexpectedCommitVerifyDependencies = Object.freeze({
   git_workspace: {
     prepare: async () => { throw new Error("unexpected_git_prepare"); },
     read: async () => { throw new Error("unexpected_git_read"); },
+    readCommitProof: async () => { throw new Error("unexpected_git_commit_proof"); },
     commit: async () => { throw new Error("unexpected_git_commit"); },
   } satisfies GitWorkspaceInterface,
   verify_performer_factory: {
@@ -396,7 +413,7 @@ function requestWithGraph(
     readonly verify_status?: "todo" | "in_progress" | "done" | "failed" | "canceled";
   } = {},
 ): CycleAdvanceRequest {
-  const cycleRevision = parseTaskRevision("revision:cycle:current");
+  const cycleRevision = parseTaskRevision(`symphony:v1:${"9".repeat(64)}`);
   const planStatus = input.plan_status ?? "todo";
   const planRevision = parseTaskRevision(input.plan_revision ?? "revision:plan:created");
   const stageFromIssue = (
@@ -798,6 +815,8 @@ interface ControlledCommitVerifyOptions {
   readonly conclusion?: VerifyResult["conclusion"];
   readonly result_revision_mismatch?: boolean;
   readonly post_verify_drift?: "head" | "workspace";
+  readonly proof_mismatch?: "missing" | "parent" | "diff" | "completion_set";
+  readonly work_basis_mismatch?: "parent" | "diff";
   readonly verify?: (request: VerifyRequest) => Promise<VerifyResult>;
   readonly close?: () => Promise<void>;
 }
@@ -816,21 +835,22 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
     repository_id: repositoryId,
     base_branch: "main",
   });
-  const initialGit = Object.freeze({
+  const dirtyGit = Object.freeze({
     repository_id: repositoryId,
     base_branch: deliveryIdentity.base_branch,
     head_branch: deliveryIdentity.head_branch,
     head_revision: parseRevision("a".repeat(40)),
-    workspace_state: options.initial_workspace_state ?? "dirty",
+    workspace_state: "dirty" as const,
     diff_digest: parseObservationDigest("sha256:controlled-before"),
     pull_request: null,
   }) satisfies GitSnapshot;
   const committedGit = Object.freeze({
-    ...initialGit,
+    ...dirtyGit,
     head_revision: parseRevision("b".repeat(40)),
     workspace_state: "clean" as const,
     diff_digest: parseObservationDigest("sha256:controlled-clean"),
   });
+  const initialGit = options.initial_workspace_state === "clean" ? committedGit : dirtyGit;
   const initial = bindCycleAdvanceRequest({
     ...fixture.snapshot(doneWork, "done"),
     git: initialGit,
@@ -889,7 +909,9 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
     cycleStatus = desired === workflow.cycle_states.awaiting_acceptance
       ? "awaiting_acceptance"
       : "failed";
-    cycleRevision = parseTaskRevision(`revision:cycle:controlled:${cycleStatus}`);
+    cycleRevision = parseTaskRevision(`symphony:v1:${cycleStatus === "awaiting_acceptance"
+      ? "7".repeat(64)
+      : "8".repeat(64)}`);
     events.push(`cycle_${cycleStatus}`);
     return appliedIssueResult(call, {
       issue_id: parseTaskIssueId(cycleId),
@@ -921,12 +943,42 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
         reason: "controlled_commit_conflict",
       }
   );
+  const controlledCommitBasis = {
+    proof: {
+      cycle_id: parseTaskIssueId(initial.cycle_id),
+      specification_seal_digest: recordSpecification.specification_seal_digest!,
+      graph_seal_digest: initial.sealed_graph_digest,
+      work_completion_set_digest: "4".repeat(64),
+    },
+    workspace_parent_revision_digest: createHash("sha256")
+      .update(options.work_basis_mismatch === "parent" ? "foreign-parent" : dirtyGit.head_revision!, "utf8")
+      .digest("hex"),
+    workspace_diff_digest: createHash("sha256")
+      .update(options.work_basis_mismatch === "diff" ? "foreign-diff" : dirtyGit.diff_digest, "utf8")
+      .digest("hex"),
+  } as const;
   const gitWorkspace: GitWorkspaceInterface = {
     prepare: async () => { throw new Error("unexpected_git_prepare"); },
     commit: async () => {
       gitCommits += 1;
       events.push("git_commit");
       return mutation(commitOutcome);
+    },
+    readCommitProof: async (_identity, carryingObjectId) => {
+      if (options.proof_mismatch === "missing") throw new Error("controlled_commit_proof_missing");
+      return {
+        ...controlledCommitBasis.proof,
+        work_completion_set_digest: options.proof_mismatch === "completion_set"
+          ? "5".repeat(64)
+          : controlledCommitBasis.proof.work_completion_set_digest,
+        carrying_object_id: carryingObjectId,
+        parent_revision: options.proof_mismatch === "parent"
+          ? parseRevision("c".repeat(40))
+          : dirtyGit.head_revision!,
+        diff_digest: options.proof_mismatch === "diff"
+          ? parseObservationDigest("sha256:controlled-foreign-diff")
+          : dirtyGit.diff_digest,
+      };
     },
     read: async () => {
       gitReads += 1;
@@ -937,7 +989,9 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
           ? Object.freeze({ ...initialGit, head_revision: parseRevision("c".repeat(40)) })
           : initialGit;
       } else if (gitReads === 2) {
-        observedGit = commitOutcome === "applied" ? committedGit : initialGit;
+        observedGit = initialGit.workspace_state === "clean"
+          ? committedGit
+          : commitOutcome === "applied" ? committedGit : initialGit;
       } else if (options.post_verify_drift === "head") {
         observedGit = Object.freeze({ ...committedGit, head_revision: parseRevision("d".repeat(40)) });
       } else if (options.post_verify_drift === "workspace") {
@@ -952,9 +1006,29 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
       return observedGit;
     },
   };
+  let persistedVerifyGit: GitSnapshot | null = null;
+  const controlledRecordWriter = {
+    ...planCompletionRecordWriter,
+    readCommitBasis: async () => controlledCommitBasis,
+    persistVerify: async (
+      _snapshot: CycleAdvanceRequest,
+      _basis: unknown,
+      _built: BuiltPlanGraphManifest,
+      result: VerifyResult,
+    ) => {
+      persistedVerifyGit = _snapshot.git;
+      assert.equal(result.revision, _snapshot.git.head_revision);
+    },
+    assertAcceptanceEvidence: async (request: CycleAdvanceRequest) => {
+      if (
+        persistedVerifyGit === null
+        || JSON.stringify(request.git) !== JSON.stringify(persistedVerifyGit)
+      ) throw new Error("controlled_acceptance_evidence_mismatch");
+    },
+  };
   const machine = new CyclePlanMachine({
     sealed_basis_reader: sealedBasisReader,
-    plan_completion_record_writer: planCompletionRecordWriter,
+    plan_completion_record_writer: controlledRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -2077,6 +2151,11 @@ test("restart continues an exact persisted Plan manifest without rerunning Plan 
         events.push("read_persisted_manifest");
         return built;
       },
+      readStageCompletion: async () => null,
+      assertAcceptanceEvidence: async () => undefined,
+      readCommitBasis: planCompletionRecordWriter.readCommitBasis,
+      persistStageFailure: async () => undefined,
+      persistCycleFailure: async () => undefined,
       persistWork: async () => undefined,
       persistVerify: async () => undefined,
       persistPlanInvalidation: async () => undefined,
@@ -2098,7 +2177,9 @@ test("restart continues an exact persisted Plan manifest without rerunning Plan 
 });
 
 for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
-  test(`lost ${lostPhase} execution context closes active status and fails the Cycle`, async () => {
+  test(lostPhase === "awaiting_acceptance"
+    ? "fresh complete Awaiting Acceptance ignores lost live context"
+    : `lost ${lostPhase} execution context closes active status and fails the Cycle`, async () => {
     const fixture = singleWorkGraph();
     const doneWork = Object.freeze({
       ...fixture.work,
@@ -2163,15 +2244,74 @@ for (const lostPhase of ["work", "verify", "awaiting_acceptance"] as const) {
 
     const outcome = await machine.advance(request, LOST_EXECUTION);
 
-    assert.equal(outcome.outcome, "terminal_failed");
+    assert.equal(outcome.outcome, lostPhase === "awaiting_acceptance" ? "no_action" : "terminal_failed");
     assert.deepEqual(
       events,
       lostPhase === "awaiting_acceptance"
-        ? ["cycle_failed"]
+        ? []
         : [`${lostPhase}_failed`, "cycle_failed"],
     );
   });
 }
+
+test("restart projects a persisted Work completion without repeating the Work turn", async () => {
+  const fixture = singleWorkGraph();
+  const activeWork = Object.freeze({
+    ...fixture.work,
+    revision: parseTaskRevision("revision:work:projection:active"),
+    status: workflow.stage_states.in_progress,
+  });
+  const doneWork = Object.freeze({
+    ...activeWork,
+    revision: parseTaskRevision("revision:work:projection:done"),
+    status: workflow.stage_states.done,
+  });
+  const active = requestWithGraph(fixture.graph, {
+    plan_status: "done",
+    plan_revision: "revision:plan:done",
+    work_issues: [activeWork],
+    work_statuses: ["in_progress"],
+    verify_issue: fixture.verify,
+  });
+  const projected = requestWithGraph(fixture.graph, {
+    plan_status: "done",
+    plan_revision: "revision:plan:done",
+    work_issues: [doneWork],
+    work_statuses: ["done"],
+    verify_issue: fixture.verify,
+  });
+  const events: string[] = [];
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    assert.equal(call.input.issue_id, parseTaskIssueId(activeWork.issue_id));
+    assert.equal(call.input.desired.state_id, workflow.stage_states.done);
+    events.push("project_work_done");
+    return appliedIssueResult(call, doneWork, workflow.stage_states.in_progress);
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: {
+      ...planCompletionRecordWriter,
+      readStageCompletion: async () => ({
+        basis_issue_revision: activeWork.revision,
+        completion: { outcome: "completed" },
+      }) as StageCompletionRecord,
+    },
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { events.push("read_projected_work"); return projected; } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+
+  const outcome = await machine.advance(active, LOST_EXECUTION);
+
+  assert.equal(outcome.outcome, "advanced");
+  assert.deepEqual(events, ["project_work_done", "read_projected_work"]);
+});
 
 test("ready Work advances in persisted manifest order through separate turns on one Cycle performer", async () => {
   const workB = Object.freeze({
@@ -2370,9 +2510,27 @@ test("ready Work advances in persisted manifest order through separate turns on 
     close: async () => { events.push("close_work_performer"); },
   };
   let performerCreates = 0;
+  const completedWork = new Set<string>();
+  const persistedRecordWriter = {
+    ...planCompletionRecordWriter,
+    persistWork: async (
+      _snapshot: CycleAdvanceRequest,
+      _basis: unknown,
+      _built: BuiltPlanGraphManifest,
+      result: WorkResult,
+    ) => {
+      completedWork.add(result.work_issue_id);
+    },
+    readStageCompletion: async (
+      _snapshot: CycleAdvanceRequest,
+      _basis: unknown,
+      _built: BuiltPlanGraphManifest,
+      stageId: TaskIssueId,
+    ) => completedWork.has(stageId) ? ({} as never) : null,
+  };
   const machine = new CyclePlanMachine({
     sealed_basis_reader: sealedBasisReader,
-    plan_completion_record_writer: planCompletionRecordWriter,
+    plan_completion_record_writer: persistedRecordWriter,
     workflow,
     caller_issuer: callerAuthority.issuer,
     task_manager: manager,
@@ -2383,6 +2541,7 @@ test("ready Work advances in persisted manifest order through separate turns on 
         gitReads += 1;
         throw new Error("unexpected_git_read");
       },
+      readCommitProof: async () => { throw new Error("unexpected_git_commit_proof"); },
       commit: async () => { throw new Error("unexpected_git_commit"); },
     },
     reader,
@@ -2961,6 +3120,7 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
       events.push("git_read");
       return workspace.read(identity);
     },
+    readCommitProof: (identity, carryingObjectId) => workspace.readCommitProof(identity, carryingObjectId),
     commit: async (request) => {
       events.push("git_commit");
       return workspace.commit(request);
@@ -3073,14 +3233,22 @@ test("Awaiting Acceptance requires the retained exact Verify and Git evidence", 
   assert.equal(fixture.verifyTurns(), 1);
 });
 
+test("restart from the matching clean carrying commit dispatches Verify without a second commit", async () => {
+  const fixture = controlledCommitVerify({ initial_workspace_state: "clean" });
+
+  const outcome = await fixture.machine.advance(fixture.initial, LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "awaiting_acceptance");
+  assert.equal(fixture.gitCommits(), 0);
+  assert.equal(fixture.gitReads(), 2);
+  assert.equal(fixture.verifyCreates(), 1);
+  assert.equal(fixture.verifyTurns(), 1);
+  assert.equal(fixture.verifyStatus(), "done");
+  assert.equal(fixture.cycleStatus(), "awaiting_acceptance");
+});
+
 test("Git precondition and commit conflicts fail the Cycle before Verify", async (context) => {
   const scenarios = [
-    {
-      name: "clean workspace",
-      options: { initial_workspace_state: "clean" as const },
-      expectedCommits: 0,
-      expectedReads: 1,
-    },
     {
       name: "fresh HEAD mismatch",
       options: { before_head_mismatch: true },
@@ -3119,8 +3287,40 @@ test("Git precondition and commit conflicts fail the Cycle before Verify", async
       assert.equal(fixture.gitReads(), scenario.expectedReads);
       assert.equal(fixture.verifyCreates(), 0);
       assert.equal(fixture.verifyTurns(), 0);
-      assert.equal(fixture.taskReads(), 1);
+      assert.equal(fixture.taskReads(), 0);
       assert.ok(!fixture.events.some((event) => event === "verify_in_progress"));
+    });
+  }
+});
+
+test("Work completion and carrying-object proof mismatches fail before Verify", async (context) => {
+  const scenarios = [
+    { name: "Work parent basis", options: { work_basis_mismatch: "parent" as const }, commits: 0, reads: 1 },
+    { name: "Work diff basis", options: { work_basis_mismatch: "diff" as const }, commits: 0, reads: 1 },
+    { name: "missing proof", options: { proof_mismatch: "missing" as const }, commits: 1, reads: 2 },
+    { name: "proof parent", options: { proof_mismatch: "parent" as const }, commits: 1, reads: 2 },
+    { name: "proof tree diff", options: { proof_mismatch: "diff" as const }, commits: 1, reads: 2 },
+    { name: "proof completion set", options: { proof_mismatch: "completion_set" as const }, commits: 1, reads: 2 },
+    {
+      name: "restart completion set",
+      options: { initial_workspace_state: "clean" as const, proof_mismatch: "completion_set" as const },
+      commits: 0,
+      reads: 1,
+    },
+  ];
+  for (const scenario of scenarios) {
+    await context.test(scenario.name, async () => {
+      const fixture = controlledCommitVerify(scenario.options);
+
+      const outcome = await fixture.machine.advance(fixture.initial, LIVE_EXECUTION);
+
+      assert.equal(outcome.outcome, "terminal_failed");
+      assert.equal(fixture.gitCommits(), scenario.commits);
+      assert.equal(fixture.gitReads(), scenario.reads);
+      assert.equal(fixture.verifyCreates(), 0);
+      assert.equal(fixture.verifyTurns(), 0);
+      assert.equal(fixture.verifyStatus(), "todo");
+      assert.equal(fixture.cycleStatus(), "failed");
     });
   }
 });
@@ -3139,7 +3339,7 @@ test("failed and inconclusive Verify each fail exactly once without a repair tur
       assert.equal(fixture.gitReads(), 3);
       assert.equal(fixture.verifyCreates(), 1);
       assert.equal(fixture.verifyTurns(), 1);
-      assert.equal(fixture.taskReads(), 3);
+      assert.equal(fixture.taskReads(), 2);
       assert.deepEqual(
         fixture.events.filter((event) => event.startsWith("verify_") || event.startsWith("cycle_")),
         ["verify_in_progress", "verify_turn", "verify_failed", "cycle_failed"],
@@ -3171,7 +3371,7 @@ test("Verify result mismatch and post-Verify Git drift fail the sealed Verify an
       assert.equal(fixture.gitReads(), 3);
       assert.equal(fixture.verifyCreates(), 1);
       assert.equal(fixture.verifyTurns(), 1);
-      assert.equal(fixture.taskReads(), 3);
+      assert.equal(fixture.taskReads(), 1);
     });
   }
 });

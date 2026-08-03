@@ -147,6 +147,33 @@ const planGraph = parseSealedExecutionGraph({
   verify_issue: null,
   relations: [],
 }, cycleId);
+const workIssueId = parseStageIssueId("WORK-HOST");
+const verifyIssueId = parseStageIssueId("VERIFY-HOST");
+const completeGraph = parseSealedExecutionGraph({
+  plan_issue: sealedPlan,
+  work_issues: [{
+    issue_id: workIssueId,
+    sealed_revision: "revision:work:sealed",
+    kind: "work",
+    title: "Work host",
+    description_markdown: "Execute the approved host change.",
+    parent_cycle_id: cycleId,
+  }],
+  verify_issue: {
+    issue_id: verifyIssueId,
+    sealed_revision: "revision:verify:sealed",
+    kind: "verify",
+    title: "Verify host",
+    description_markdown: "Verify the approved host change.",
+    parent_cycle_id: cycleId,
+  },
+  relations: [{
+    relation_id: "REL-HOST",
+    revision: "revision:relation:sealed",
+    prerequisite_issue_id: workIssueId,
+    dependent_issue_id: verifyIssueId,
+  }],
+}, cycleId);
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root",
@@ -294,6 +321,88 @@ function snapshotWithPlan(correlationId: string): CycleAdvanceRequest {
   });
 }
 
+function awaitingAcceptanceSnapshot(correlationId: string): CycleAdvanceRequest {
+  const base = snapshot(correlationId);
+  return parseCycleExecutionSnapshot({
+    schema_version: base.schema_version,
+    root_id: base.root_id,
+    cycle_id: base.cycle_id,
+    runtime_generation: base.runtime_generation,
+    correlation_id: base.correlation_id,
+    cycle_revision: base.cycle_revision,
+    cycle_status: "awaiting_acceptance",
+    specification: base.specification,
+    plan_issue: {
+      issue_id: sealedPlan.issue_id,
+      revision: "revision:plan:done",
+      kind: sealedPlan.kind,
+      title: sealedPlan.title,
+      description_markdown: sealedPlan.description_markdown,
+      parent_cycle_id: sealedPlan.parent_cycle_id,
+      status: "done",
+    },
+    sealed_work_issues: [{
+      issue_id: completeGraph.work_issues[0]!.issue_id,
+      revision: "revision:work:done",
+      kind: completeGraph.work_issues[0]!.kind,
+      title: completeGraph.work_issues[0]!.title,
+      description_markdown: completeGraph.work_issues[0]!.description_markdown,
+      parent_cycle_id: completeGraph.work_issues[0]!.parent_cycle_id,
+      status: "done",
+    }],
+    verify_issue: {
+      issue_id: completeGraph.verify_issue!.issue_id,
+      revision: "revision:verify:done",
+      kind: completeGraph.verify_issue!.kind,
+      title: completeGraph.verify_issue!.title,
+      description_markdown: completeGraph.verify_issue!.description_markdown,
+      parent_cycle_id: completeGraph.verify_issue!.parent_cycle_id,
+      status: "done",
+    },
+    sealed_relations: completeGraph.relations,
+    git: base.git,
+  }, {
+    root_id: rootId,
+    cycle_id: cycleId,
+    runtime_generation: generation,
+    correlation_id: parseCorrelationId(correlationId),
+    cycle_revision: base.cycle_revision,
+    specification,
+    sealed_graph: completeGraph,
+  });
+}
+
+function awaitingAcceptanceTaskSnapshot() {
+  const execution = awaitingAcceptanceSnapshot("corr:fresh-awaiting-acceptance");
+  const base = taskSnapshot("awaiting_acceptance");
+  return parseTaskSnapshot({
+    ...base,
+    issues: [
+      ...base.issues,
+      ...[execution.plan_issue, ...execution.sealed_work_issues, execution.verify_issue]
+        .filter((stage) => stage !== null)
+        .map((stage) => ({
+          issue_id: stage!.issue_id,
+          revision: stage!.revision,
+          status: workflow.stage_states[stage!.status],
+          title: stage!.title,
+          description: stage!.description_markdown,
+          parent_id: cycleId,
+          labels: [workflow.labels[stage!.kind]],
+          delegate_id: null,
+          priority: null,
+        })),
+    ],
+    relations: execution.sealed_relations.map((relation) => ({
+      relation_id: relation.relation_id,
+      revision: relation.revision,
+      type: "blocks",
+      source_issue_id: relation.prerequisite_issue_id,
+      target_issue_id: relation.dependent_issue_id,
+    })),
+  });
+}
+
 function result(
   request: CycleAdvanceRequest,
   outcome: CycleAdvanceResult["outcome"],
@@ -383,7 +492,7 @@ test("Cycle host admits only one fresh In Progress Cycle and leaves Root-owned s
   assert.equal(advances.length, 1);
 });
 
-test("Cycle host refreshes every continuation and rejects stale generation or changed seals", async () => {
+test("Cycle host refreshes every continuation and rejects stale generation or changed live seals", async () => {
   const reads: string[] = [];
   const machine: CycleMachineInterface = {
     advance: async (request) => result(
@@ -431,19 +540,14 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
     parseCorrelationId("corr:regressed"),
     null,
   );
-  assert.equal(regressed.kind, "paused");
-  assert.equal(regressed.kind === "paused" ? regressed.error.code : null, "readback_mismatch");
+  assert.equal(regressed.kind, "root_available");
 
   const bypassedAcceptance = await host.prepare(
     taskSnapshot("succeeded"),
     parseCorrelationId("corr:bypassed-acceptance"),
     null,
   );
-  assert.equal(bypassedAcceptance.kind, "paused");
-  assert.equal(
-    bypassedAcceptance.kind === "paused" ? bypassedAcceptance.error.code : null,
-    "readback_mismatch",
-  );
+  assert.equal(bypassedAcceptance.kind, "root_available");
   assert.equal(
     (await host.prepare(
       taskSnapshot("failed"),
@@ -572,7 +676,7 @@ test("Cycle host permits one action and fences output that arrives after retirem
   await assert.rejects(running, /cycle_machine_late_output/u);
 });
 
-test("Cycle host distinguishes a same-generation approval from restart and lost acceptance evidence", async () => {
+test("fresh hosts make the same decision for an approved Cycle without live role context", async () => {
   const ownership: string[] = [];
   const host = new CycleMachineHost({
     target: { root_id: rootId, runtime_generation: generation },
@@ -595,8 +699,8 @@ test("Cycle host distinguishes a same-generation approval from restart and lost 
   );
   assert.equal(restarted.kind, "cycle_action");
   if (restarted.kind !== "cycle_action") return;
-  assert.equal((await host.run(restarted)).outcome, "terminal_failed");
-  assert.deepEqual(ownership, ["lost"]);
+  assert.equal((await host.run(restarted)).outcome, "advanced");
+  assert.deepEqual(ownership, ["live"]);
 
   const liveHost = new CycleMachineHost({
     target: { root_id: rootId, runtime_generation: generation },
@@ -617,14 +721,44 @@ test("Cycle host distinguishes a same-generation approval from restart and lost 
   assert.equal(admitted.kind, "cycle_action");
   if (admitted.kind !== "cycle_action") return;
   assert.equal((await liveHost.run(admitted)).outcome, "advanced");
-  assert.deepEqual(ownership, ["lost", "live"]);
+  assert.deepEqual(ownership, ["live", "live"]);
 });
 
-test("Cycle host remembers terminal Cycle identities observed before admission", async () => {
+test("a complete fresh Awaiting Acceptance snapshot returns directly to Root", async () => {
+  let machineCalls = 0;
   const host = new CycleMachineHost({
     target: { root_id: rootId, runtime_generation: generation },
     workflow,
-    reader: { read: async (request) => snapshot(request.correlation_id) },
+    reader: { read: async (request) => awaitingAcceptanceSnapshot(request.correlation_id) },
+    machine: {
+      advance: async (request) => {
+        machineCalls += 1;
+        return result(request, "no_action", request.cycle_revision);
+      },
+    },
+  });
+
+  const prepared = await host.prepare(
+    awaitingAcceptanceTaskSnapshot(),
+    parseCorrelationId("corr:fresh-awaiting-acceptance"),
+    null,
+  );
+  assert.equal(prepared.kind, "root_available");
+  assert.equal(machineCalls, 0);
+});
+
+test("Cycle host derives terminal and Draft routing only from the fresh snapshot", async () => {
+  const host = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    reader: {
+      read: async (request) => snapshot(
+        request.correlation_id,
+        request.correlation_id === "corr:reopened-approved"
+          ? "revision:cycle:reopened-approved"
+          : "revision:cycle:current",
+      ),
+    },
     machine: {
       advance: async (request, execution) => result(
         request,
@@ -644,11 +778,7 @@ test("Cycle host remembers terminal Cycle identities observed before admission",
     parseCorrelationId("corr:reopened-draft"),
     null,
   );
-  assert.equal(draftReopen.kind, "paused");
-  assert.equal(
-    draftReopen.kind === "paused" ? draftReopen.error.reason : null,
-    "terminal_cycle_reopened",
-  );
+  assert.equal(draftReopen.kind, "root_available");
 
   const approvedReopen = await host.prepare(
     taskSnapshot("in_progress", "revision:cycle:reopened-approved"),
@@ -657,7 +787,7 @@ test("Cycle host remembers terminal Cycle identities observed before admission",
   );
   assert.equal(approvedReopen.kind, "cycle_action");
   if (approvedReopen.kind !== "cycle_action") return;
-  assert.equal((await host.run(approvedReopen)).outcome, "terminal_failed");
+  assert.equal((await host.run(approvedReopen)).outcome, "advanced");
 });
 
 test("Cycle host retains live ownership when a continuation first observes its created Plan", async () => {
