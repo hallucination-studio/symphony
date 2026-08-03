@@ -69,6 +69,7 @@ const initialObservation = {
   to_task_digest: "task-digest:1",
   task,
   task_changes: [],
+  task_change_origins: [],
 };
 
 const changedObservation = {
@@ -100,14 +101,30 @@ test("TaskObservationEvent accepts complete initial and changed polling observat
   assert.ok(Object.isFrozen(changed.task_changes));
 });
 
+test("TaskObservationEvent accepts an unchanged scheduled fresh snapshot", () => {
+  const unchanged = parseTaskObservationEvent({
+    ...initialObservation,
+    correlation_id: "corr:poll:unchanged",
+    from_task_digest: "task-digest:1",
+    to_task_digest: "task-digest:1",
+  });
+
+  assert.equal(unchanged.from_task_digest, unchanged.to_task_digest);
+  assert.deepEqual(unchanged.task_changes, []);
+});
+
 test("TaskObservationEvent rejects provider, runtime, incomplete, and non-adjacent input", () => {
   assert.throws(
     () => parseTaskObservationEvent({ ...initialObservation, task_changes: changedObservation.task_changes }),
     /initial_task_changes_forbidden/u,
   );
   assert.throws(
-    () => parseTaskObservationEvent({ ...changedObservation, to_task_digest: "task-digest:1" }),
-    /unchanged_task_observation/u,
+    () => parseTaskObservationEvent({
+      ...changedObservation,
+      from_task_digest: "task-digest:1",
+      to_task_digest: "task-digest:1",
+    }),
+    /unchanged_task_changes/u,
   );
   assert.throws(
     () => parseTaskObservationEvent({ ...changedObservation, root_id: "LIN-9" }),

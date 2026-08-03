@@ -8,6 +8,7 @@ import { GitScmDelivery } from "../delivery/internal/GitScmDelivery.js";
 import { GitWorktree } from "../git/internal/GitWorktree.js";
 import { RootHomeManager } from "../root-reconcill/internal/RootHome.js";
 import { RootRuntimeRegistry } from "../runtime/RootRuntimeRegistry.js";
+import { RootFamilyGuard } from "../runtime/RootFamilyGuard.js";
 import { SerialConductor } from "../runtime/SerialConductor.js";
 import type { SerialConductorLog, SerialRunResult } from "../runtime/SerialConductor.js";
 import { createTaskManageCallerAuthority } from "../task-management/api/TaskManageCapability.js";
@@ -179,10 +180,20 @@ export async function createProductionConductor(
     routes,
     log,
   }), homes);
+  const familyGuard = new RootFamilyGuard({
+    service_actor_id: startup.config.agent_actor_id,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: taskManager,
+    records: queries,
+    workflow: startup.config.workflow,
+    root_states: startup.config.root_states,
+  });
   const scheduler = new SerialConductor(registry, {
     agent_actor_id: startup.config.agent_actor_id,
     root_kind_label_id: startup.config.workflow.labels.root,
     root_states: startup.config.root_states,
+    workflow: startup.config.workflow,
+    family_guard: familyGuard,
     log: (entry) => log(entry),
   });
   const observer = new LinearObserver(queries, { log: (entry) => log(entry) });

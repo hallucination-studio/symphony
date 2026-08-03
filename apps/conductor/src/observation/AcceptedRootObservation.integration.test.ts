@@ -54,6 +54,7 @@ function taskEvent(snapshot: ReturnType<typeof taskSnapshot>, fromTaskDigest: st
     to_task_digest: taskSnapshotDigest(snapshot),
     task: snapshot,
     task_changes: [],
+    task_change_origins: [],
   });
 }
 

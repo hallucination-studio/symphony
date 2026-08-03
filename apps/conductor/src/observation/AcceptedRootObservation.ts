@@ -76,6 +76,78 @@ export class AcceptedRootObservation {
     return this.#accepted?.task ?? null;
   }
 
+  async prepareFresh(taskInput: unknown, workspace: RootWorkspaceIdentity): Promise<RootObservationAttempt> {
+    let taskEvent;
+    try {
+      taskEvent = parseTaskObservationEvent(taskInput);
+    } catch {
+      return Object.freeze({
+        kind: "paused",
+        error: boundaryError({
+          schema_version: 1,
+          code: "invalid_contract",
+          root_id: this.target.root_id,
+          runtime_generation: this.target.runtime_generation,
+          correlation_id: parseCorrelationId(this.#identityFactory()),
+          reason: "invalid_task_observation",
+        }),
+      });
+    }
+    if (taskEvent.root_id !== this.target.root_id || workspace.root_id !== this.target.root_id) {
+      return Object.freeze({
+        kind: "paused",
+        error: boundaryError({
+          schema_version: 1,
+          code: "invalid_contract",
+          root_id: this.target.root_id,
+          runtime_generation: this.target.runtime_generation,
+          correlation_id: taskEvent.correlation_id,
+          reason: "root_observation_target_mismatch",
+        }),
+      });
+    }
+    let git: GitSnapshot;
+    try {
+      git = parseGitSnapshot(await this.git.read(workspace));
+    } catch {
+      return Object.freeze({
+        kind: "paused",
+        error: boundaryError({
+          schema_version: 1,
+          code: "boundary_unavailable",
+          root_id: this.target.root_id,
+          runtime_generation: this.target.runtime_generation,
+          correlation_id: taskEvent.correlation_id,
+          reason: "git_snapshot_unavailable",
+        }),
+      });
+    }
+    const current = Object.freeze({
+      digest: rootObservationDigest(taskEvent.task, git),
+      task: taskEvent.task,
+      git,
+    });
+    const prepared = Object.freeze({
+      kind: "bootstrap" as const,
+      observation_digest: current.digest,
+      root_input: parseRootBootstrap({
+        schema_version: 1,
+        root_id: taskEvent.root_id,
+        runtime_generation: this.target.runtime_generation,
+        correlation_id: taskEvent.correlation_id,
+        observed_at: taskEvent.observed_at,
+        task: current.task,
+        git: current.git,
+      }, this.target),
+    });
+    candidates.set(prepared, Object.freeze({
+      owner: this,
+      expected_digest: this.#accepted?.digest ?? null,
+      current,
+    }));
+    return prepared;
+  }
+
   async prepare(taskInput: unknown, workspace: RootWorkspaceIdentity): Promise<RootObservationAttempt> {
     let taskEvent;
     try {

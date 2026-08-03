@@ -51,6 +51,7 @@ function event(snapshot: TaskSnapshot, correlationId: string, before: TaskSnapsh
     to_task_digest: taskSnapshotDigest(snapshot),
     task: snapshot,
     task_changes: [],
+    task_change_origins: [],
   });
 }
 
@@ -226,7 +227,7 @@ test("runtime hard-binds frozen target and workspace identities", async () => {
   );
 });
 
-test("runtime passes only its accepted generation baseline to Cycle admission", async () => {
+test("runtime never passes an accepted Task cache to fresh Cycle admission", async () => {
   const baselines: (TaskSnapshot | null)[] = [];
   const created = binding(async (input) => outcome(input.correlation_id, "quiescent"));
   const runtime = new RootRuntime({
@@ -249,5 +250,5 @@ test("runtime passes only its accepted generation baseline to Cycle admission", 
   runtime.accept(bootstrap);
   await runtime.prepare(event(latest, "corr:baseline:2", initial));
 
-  assert.deepEqual(baselines, [null, initial]);
+  assert.deepEqual(baselines, [null, null]);
 });

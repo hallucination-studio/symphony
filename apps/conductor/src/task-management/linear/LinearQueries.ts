@@ -13,6 +13,7 @@ import {
   parseTaskRelationSnapshot,
   parseTaskSnapshot,
   type TaskIssueSnapshot,
+  type TaskChangeOriginEvidence,
   type TaskRelationSnapshot,
   type TaskSnapshot,
 } from "../../contracts/observation.js";
@@ -42,7 +43,6 @@ const ROOT_STATUSES = ["Todo", "In Progress", "In Review", "Done"] as const;
 const CYCLE_STATUSES = [
   "Draft", "In Progress", "Awaiting Acceptance", "Succeeded", "Rejected", "Failed", "Canceled",
 ] as const;
-const ACTIVE_CYCLE_STATUSES = new Set(["Draft", "In Progress", "Awaiting Acceptance"]);
 const STAGE_KINDS = ["plan", "work", "verify"] as const;
 const STAGE_STATUSES = ["Todo", "In Progress", "Done", "Failed", "Canceled"] as const;
 
@@ -431,6 +431,22 @@ export class LinearQueries {
     });
   }
 
+  readLatestIssueChangeOrigin(issueId: TaskIssueId): Promise<TaskChangeOriginEvidence | null> {
+    return this.#boundary(async () => {
+      const page = parsePage(await this.client.listIssueHistory(issueId, null, 1), parseHistory, 1);
+      const entry = page.nodes[0];
+      if (entry === undefined) return null;
+      if (entry.issue_id !== issueId) fail("linear_history_issue_mismatch");
+      return Object.freeze({
+        issue_id: parseTaskIssueId(entry.issue_id),
+        change_origin: entry.actor_id === null
+          ? "unknown" as const
+          : entry.actor_id === this.#serviceActorId ? "symphony" as const : "external" as const,
+        changed_fields: entry.changed_fields,
+      });
+    });
+  }
+
   readIssueComments(issueId: TaskIssueId): Promise<readonly LinearIssueCommentEvidence[]> {
     return this.#boundary(async () => {
       const comments = await this.#all(
@@ -622,13 +638,11 @@ export class LinearQueries {
 
       const cycles = await this.#children(root.snapshot.issue_id);
       this.#assertUniqueIssues(cycles);
-      let activeCycles = 0;
       const issues = [root];
       for (const cycle of cycles) {
         if (cycle.snapshot.parent_id !== root.snapshot.issue_id) fail("linear_cycle_parent_mismatch");
         if (issueKind(cycle, labelNames) !== "cycle") fail("linear_cycle_kind_mismatch");
-        const status = parseProviderEnum(stateNames.get(cycle.snapshot.status), CYCLE_STATUSES);
-        if (ACTIVE_CYCLE_STATUSES.has(status)) activeCycles += 1;
+        parseProviderEnum(stateNames.get(cycle.snapshot.status), CYCLE_STATUSES);
         const stages = await this.#children(cycle.snapshot.issue_id);
         this.#assertUniqueIssues(stages);
         for (const stage of stages) {
@@ -642,7 +656,6 @@ export class LinearQueries {
         }
         issues.push(cycle, ...stages);
       }
-      if (activeCycles > 1) fail("linear_multiple_active_cycles");
       this.#assertUniqueIssues(issues);
 
       const relations = new Map<string, TaskRelationSnapshot>();

@@ -5,6 +5,7 @@ import type {
 
 export interface CycleMachineExecution {
   readonly ownership: "live" | "lost";
+  readonly closure?: "admission_lost";
 }
 
 export interface CycleMachineInterface {

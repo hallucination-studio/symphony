@@ -8,6 +8,7 @@ import {
   parseRootIssueId,
   parseRuntimeGeneration,
   parseStageIssueId,
+  parseTaskIssueId,
   parseTaskRevision,
   type RootIssueId,
 } from "../contracts/identity.js";
@@ -16,6 +17,7 @@ import {
   parseGitSnapshot,
   parseTaskObservationEvent,
   parseTaskSnapshot,
+  type TaskChangeOriginEvidence,
   type TaskObservationEvent,
   type TaskSnapshot,
 } from "../contracts/observation.js";
@@ -36,6 +38,31 @@ const rootStates = Object.freeze({
   in_progress: "state:root:in-progress",
   in_review: "state:root:in-review",
   done: "state:root:done",
+});
+const workflow = Object.freeze({
+  labels: {
+    root: rootLabelId,
+    cycle: "label:cycle",
+    plan: "label:plan",
+    work: "label:work",
+    verify: "label:verify",
+  },
+  cycle_states: {
+    draft: "state:cycle:draft",
+    in_progress: "state:cycle:in-progress",
+    awaiting_acceptance: "state:cycle:awaiting-acceptance",
+    succeeded: "state:cycle:succeeded",
+    rejected: "state:cycle:rejected",
+    failed: "state:cycle:failed",
+    canceled: "state:cycle:canceled",
+  },
+  stage_states: {
+    todo: "state:stage:todo",
+    in_progress: "state:stage:in-progress",
+    done: "state:stage:done",
+    failed: "state:stage:failed",
+    canceled: "state:stage:canceled",
+  },
 });
 
 interface TaskOptions {
@@ -61,6 +88,28 @@ function task(rootId: RootIssueId, options: TaskOptions = {}): TaskSnapshot {
       priority: 1,
     }],
     relations: [],
+  });
+}
+
+function cycleTask(
+  rootId: RootIssueId,
+  status: keyof typeof workflow.cycle_states = "in_progress",
+  options: TaskOptions = {},
+): TaskSnapshot {
+  const root = task(rootId, options);
+  return parseTaskSnapshot({
+    ...root,
+    issues: [...root.issues, {
+      issue_id: `${rootId}:CYCLE`,
+      revision: `revision:cycle:${status}`,
+      status: workflow.cycle_states[status],
+      title: "Cycle",
+      description: null,
+      parent_id: rootId,
+      labels: [workflow.labels.cycle],
+      delegate_id: agentActor,
+      priority: 2,
+    }],
   });
 }
 
@@ -112,6 +161,7 @@ function event(
   snapshot: TaskSnapshot,
   correlationId: string,
   from: TaskSnapshot | null = null,
+  origins: readonly TaskChangeOriginEvidence[] = [],
 ): TaskObservationEvent {
   return parseTaskObservationEvent({
     schema_version: 1,
@@ -122,6 +172,7 @@ function event(
     to_task_digest: taskSnapshotDigest(snapshot),
     task: snapshot,
     task_changes: [],
+    task_change_origins: origins,
   });
 }
 
@@ -243,6 +294,7 @@ function harness(
       agent_actor_id: agentActor,
       root_kind_label_id: rootLabelId,
       root_states: rootStates,
+      workflow,
       log: (entry) => logs.push(entry),
     }),
     creations,
@@ -292,7 +344,7 @@ test("Cycle actions park Root turns, own the global slot, and continue before an
     };
   });
   f.conductor.admit([
-    event(task(root1), "corr:root1:1"),
+    event(cycleTask(root1), "corr:root1:1"),
     event(task(root2), "corr:root2:1"),
   ]);
 
@@ -350,7 +402,7 @@ test("Root resumes after a Cycle reaches Awaiting Acceptance and a fresh observa
     };
   });
 
-  const initial = task(rootId);
+  const initial = cycleTask(rootId);
   f.conductor.admit([event(initial, "corr:cycle")]);
   assert.deepEqual(await f.conductor.runNext(), {
     kind: "cycle_action_completed",
@@ -360,7 +412,7 @@ test("Root resumes after a Cycle reaches Awaiting Acceptance and a fresh observa
   assert.equal(rootTurns, 0);
   assert.deepEqual(await f.conductor.runNext(), { kind: "idle" });
 
-  const fresh = task(rootId, { revision: "revision:root:2" });
+  const fresh = cycleTask(rootId, "awaiting_acceptance", { revision: "revision:root:2" });
   f.conductor.admit([event(fresh, "corr:acceptance", initial)]);
   assert.deepEqual(await f.conductor.runNext(), {
     kind: "turn_completed",
@@ -399,7 +451,7 @@ test("a Cycle precondition failure refreshes before another Root runs", async ()
     };
   });
   f.conductor.admit([
-    event(task(root1), "corr:root1"),
+    event(cycleTask(root1), "corr:root1"),
     event(task(root2), "corr:root2"),
   ]);
 
@@ -421,7 +473,7 @@ test("Cycle boundary failures are correlated, sanitized, and stop the Root runti
     run: async () => { throw new Error("secret-provider-cycle-payload"); },
     retire: async () => undefined,
   }));
-  const initial = task(rootId);
+  const initial = cycleTask(rootId);
   f.conductor.admit([event(initial, "corr:cycle:failed")]);
 
   assert.deepEqual(await f.conductor.runNext(), {
@@ -439,7 +491,7 @@ test("Cycle boundary failures are correlated, sanitized, and stop the Root runti
     reason_code: "cycle_boundary_failed",
   });
 
-  const fresh = task(rootId, { revision: "revision:root:2" });
+  const fresh = cycleTask(rootId, "in_progress", { revision: "revision:root:2" });
   f.conductor.admit([event(fresh, "corr:after-failure", initial)]);
   assert.deepEqual(await f.conductor.runNext(), { kind: "idle" });
 });
@@ -474,7 +526,64 @@ test("undelegated Roots stay idle until a fresh delegated observation arrives", 
   });
 });
 
-test("coalescing keeps the newest complete snapshot and diffs it from the accepted baseline", async () => {
+test("active admission loss selects Stage-first Cycle cancellation without a Root turn", async () => {
+  const rootId = parseRootIssueId("LIN-ADMISSION-LOSS");
+  let closure: string | undefined;
+  let rootTurns = 0;
+  const f = harness(async (input) => {
+    rootTurns += 1;
+    return {
+      schema_version: 1,
+      root_id: input.root_id,
+      runtime_generation: input.runtime_generation,
+      correlation_id: input.correlation_id,
+      outcome: "quiescent",
+    };
+  }, (createdRootId) => ({
+    target: Object.freeze({ root_id: createdRootId, runtime_generation: parseRuntimeGeneration(1) }),
+    prepare: async (_task, correlationId, _baseline, selectedClosure) => {
+      closure = selectedClosure;
+      return cycleAction(createdRootId, correlationId);
+    },
+    prepareContinuation: async () => Object.freeze({ kind: "root_available" }),
+    run: async (prepared) => cycleResult(prepared, "terminal_failed"),
+    retire: async () => undefined,
+  }));
+  const lost = cycleTask(rootId, "in_progress", { delegateId: null });
+  f.conductor.admit([event(lost, "corr:admission:lost")]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "cycle_action_completed",
+    root_id: rootId,
+    outcome: "terminal_failed",
+  });
+  assert.equal(closure, "admission_lost");
+  assert.equal(rootTurns, 0);
+  assert.equal(f.logs.some((entry) => entry.event === "fresh_route_selected"
+    && entry.selected_route === "WF-ROUTE-015"), true);
+});
+
+test("a bounded external Root edit selects Root after Cycle mechanics are quiet", async () => {
+  const rootId = parseRootIssueId("LIN-EXTERNAL-ROOT");
+  const f = harness();
+  const snapshot = cycleTask(rootId, "in_progress");
+  f.conductor.admit([event(snapshot, "corr:external:root", null, [{
+    issue_id: parseTaskIssueId(rootId),
+    change_origin: "external",
+    changed_fields: ["description"],
+  }])]);
+
+  assert.deepEqual(await f.conductor.runNext(), {
+    kind: "turn_completed",
+    root_id: rootId,
+    outcome: "quiescent",
+  });
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.logs.some((entry) => entry.event === "fresh_route_selected"
+    && entry.selected_route === "WF-ROUTE-005"), true);
+});
+
+test("coalescing keeps the newest complete snapshot for the next fresh Root turn", async () => {
   const rootId = parseRootIssueId("LIN-1");
   const f = harness();
   const initial = task(rootId, { title: "Initial" });
@@ -491,17 +600,11 @@ test("coalescing keeps the newest complete snapshot and diffs it from the accept
   await f.conductor.runNext();
 
   assert.equal(f.inputs.length, 2);
-  const diff = f.inputs[1];
-  assert.ok(diff && "task_changes" in diff);
-  if (!diff || !("task_changes" in diff)) return;
-  assert.equal(diff.correlation_id, "corr:poll:3");
-  assert.deepEqual(diff.task_changes, [{
-    kind: "field_changed",
-    issue_id: rootId,
-    field: "title",
-    before: "Initial",
-    after: "Latest",
-  }]);
+  const fresh = f.inputs[1];
+  assert.ok(fresh && "task" in fresh);
+  if (!fresh || !("task" in fresh)) return;
+  assert.equal(fresh.correlation_id, "corr:poll:3");
+  assert.deepEqual(fresh.task, latest);
 });
 
 test("one turn runs globally and an in-flight Root keeps later observations adjacent", async () => {
@@ -546,15 +649,9 @@ test("one turn runs globally and an in-flight Root keeps later observations adja
   assert.equal(f.maxActive(), 1);
   assert.deepEqual(f.inputs.map(({ root_id }) => root_id), [root1, root1, root2]);
   const adjacent = f.inputs[1];
-  assert.ok(adjacent && "task_changes" in adjacent);
-  if (!adjacent || !("task_changes" in adjacent)) return;
-  assert.deepEqual(adjacent.task_changes, [{
-    kind: "field_changed",
-    issue_id: root1,
-    field: "title",
-    before: "First",
-    after: "Latest",
-  }]);
+  assert.ok(adjacent && "task" in adjacent);
+  if (!adjacent || !("task" in adjacent)) return;
+  assert.deepEqual(adjacent.task, latest);
 });
 
 test("In Review and invalid admission facts park without blocking the next eligible Root", async () => {
@@ -574,11 +671,11 @@ test("In Review and invalid admission facts park without blocking the next eligi
     outcome: "quiescent",
   });
   assert.deepEqual(f.creations, [eligible]);
+  assert.deepEqual(await f.conductor.runNext(), { kind: "idle" });
   assert.equal(f.logs.some((entry) => entry.event === "root_admission_parked"
     && entry.root_id === inReview && entry.reason_code === "in_review"), true);
   assert.equal(f.logs.some((entry) => entry.event === "root_admission_parked"
     && entry.root_id === wrongKind && entry.reason_code === "invalid_root_kind"), true);
-  assert.deepEqual(await f.conductor.runNext(), { kind: "idle" });
 });
 
 test("turn boundary failures are sanitized and never advance the accepted baseline", async () => {
@@ -615,7 +712,7 @@ test("fresh Done fences an active Cycle continuation before another action", asy
     },
     retire: async () => { retirements += 1; },
   }));
-  const initial = task(rootId);
+  const initial = cycleTask(rootId);
   f.conductor.admit([event(initial, "corr:root:active")]);
   assert.deepEqual(await f.conductor.runNext(), {
     kind: "cycle_action_completed",

@@ -24,6 +24,8 @@ import type {
   RootReconcillInput,
   RootReconcillInterface,
 } from "../root-reconcill/api/RootReconcillInterface.js";
+import { boundaryError } from "../contracts/common-outcomes.js";
+import type { FreshRouteConsumer, FreshRouteMatch } from "./FreshTaskRouter.js";
 
 export type RootTurnInput = RootReconcillInput;
 
@@ -42,7 +44,7 @@ export interface RootRuntimeFactory {
 export interface RegisteredRootRuntime {
   readonly target: RuntimeTarget;
   readonly workspace: RootWorkspaceIdentity;
-  prepare(taskInput: unknown): Promise<RootRuntimePreparation>;
+  prepare(taskInput: unknown, selectedRoute?: FreshRouteMatch | FreshRouteConsumer | "auto"): Promise<RootRuntimePreparation>;
   prepareCycleContinuation(): Promise<CycleMachinePreparation>;
   run(prepared: PreparedRootObservation): Promise<RootTurnOutcome>;
   runCycle(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
@@ -97,7 +99,10 @@ export class RootRuntime implements RegisteredRootRuntime {
   get target(): RuntimeTarget { return this.#target; }
   get workspace(): RootWorkspaceIdentity { return this.#workspace; }
 
-  async prepare(taskInput: unknown): Promise<RootRuntimePreparation> {
+  async prepare(
+    taskInput: unknown,
+    selectedRoute: FreshRouteMatch | FreshRouteConsumer | "auto" = "auto",
+  ): Promise<RootRuntimePreparation> {
     let observation;
     try {
       observation = parseTaskObservationEvent(taskInput);
@@ -109,13 +114,40 @@ export class RootRuntime implements RegisteredRootRuntime {
       || taskSnapshotDigest(observation.task) !== observation.to_task_digest
     ) return this.#observations.prepare(observation, this.#workspace);
 
-    const cycle = await this.#cycle.prepare(
-      observation.task,
-      observation.correlation_id,
-      this.#observations.acceptedTask(),
-    );
-    if (cycle.kind !== "root_available") return cycle;
-    const attempt = await this.#observations.prepare(taskInput, this.#workspace);
+    const selectedConsumer = typeof selectedRoute === "object" ? selectedRoute.consumer : selectedRoute;
+    if (selectedConsumer === "cycle_machine") {
+      const cycle = await this.#cycle.prepare(
+        observation.task,
+        observation.correlation_id,
+        null,
+        typeof selectedRoute === "object" && selectedRoute.route_id === "WF-ROUTE-015"
+          ? "admission_lost"
+          : undefined,
+      );
+      if (cycle.kind !== "root_available") return cycle;
+      return Object.freeze({
+        kind: "paused",
+        error: boundaryError({
+          schema_version: 1,
+          code: "readback_mismatch",
+          root_id: this.#target.root_id,
+          runtime_generation: this.#target.runtime_generation,
+          correlation_id: observation.correlation_id,
+          reason: "selected_cycle_route_not_actionable",
+        }),
+      });
+    }
+    if (selectedConsumer === "auto") {
+      const cycle = await this.#cycle.prepare(
+        observation.task,
+        observation.correlation_id,
+        null,
+      );
+      if (cycle.kind !== "root_available") return cycle;
+    }
+    const attempt = selectedConsumer === "root_boundary"
+      ? await this.#observations.prepareFresh(taskInput, this.#workspace)
+      : await this.#observations.prepare(taskInput, this.#workspace);
     if (attempt.kind === "bootstrap" || attempt.kind === "diff") this.#prepared.add(attempt);
     return attempt;
   }

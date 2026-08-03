@@ -9,6 +9,7 @@ import {
 import {
   parseTaskObservationEvent,
   type TaskObservationEvent,
+  type TaskChangeOriginEvidence,
   type TaskSnapshot,
 } from "../../contracts/observation.js";
 import { taskSnapshotChanges, taskSnapshotDigest } from "../../observation/TaskFacts.js";
@@ -39,6 +40,7 @@ export type TaskObservationLog =
 interface LinearObserverQueries {
   inventoryRoots(): Promise<readonly { readonly root_id: RootIssueId }[]>;
   readRootSnapshot(rootId: RootIssueId): Promise<TaskSnapshot>;
+  readLatestIssueChangeOrigin(issueId: TaskSnapshot["issues"][number]["issue_id"]): Promise<TaskChangeOriginEvidence | null>;
 }
 
 interface PollingBaseline {
@@ -94,10 +96,10 @@ export class LinearObserver implements TaskManageObserverInterface {
         const current = await this.queries.readRootSnapshot(rootId);
         const digest = taskSnapshotDigest(current);
         const previous = this.#baselines.get(rootId);
-        if (previous?.digest === digest) {
-          this.#baselines.set(rootId, Object.freeze({ digest, snapshot: current }));
-          continue;
-        }
+        const taskChangeOrigins = (await Promise.all(current.issues.map(
+          ({ issue_id }) => this.queries.readLatestIssueChangeOrigin(issue_id),
+        ))).filter((entry): entry is TaskChangeOriginEvidence => entry !== null)
+          .sort((left, right) => left.issue_id.localeCompare(right.issue_id));
         const event = parseTaskObservationEvent({
           schema_version: 1,
           root_id: rootId,
@@ -106,7 +108,10 @@ export class LinearObserver implements TaskManageObserverInterface {
           from_task_digest: previous?.digest ?? null,
           to_task_digest: digest,
           task: current,
-          task_changes: previous === undefined ? [] : taskSnapshotChanges(previous.snapshot, current),
+          task_changes: previous === undefined || previous.digest === digest
+            ? []
+            : taskSnapshotChanges(previous.snapshot, current),
+          task_change_origins: taskChangeOrigins,
         });
         this.#baselines.set(rootId, Object.freeze({ digest, snapshot: current }));
         events.push(event);

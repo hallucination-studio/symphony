@@ -76,6 +76,7 @@ type CycleExecutionFailureReason =
   | "stage_failure_unconfirmed"
   | "lost_execution_context"
   | "lost_work_thread_context"
+  | "active_root_admission_lost"
   | "cycle_transition_failed";
 
 export interface CyclePlanPerformerFactory {
@@ -115,6 +116,7 @@ interface PlanCompletionRecordPersistence {
     reasonCode: string,
     reasonMarkdown: string,
     execution: TaskManageBoundaryExecution,
+    terminalOutcome?: "failed" | "canceled",
   ): Promise<unknown>;
   persistCycleFailure(
     request: CycleAdvanceRequest,
@@ -123,6 +125,7 @@ interface PlanCompletionRecordPersistence {
     reasonMarkdown: string,
     failedStageId: TaskIssueId | null,
     execution: TaskManageBoundaryExecution,
+    terminalOutcome?: "failed" | "canceled",
   ): Promise<unknown>;
   persistWork(...args: Parameters<PlanCompletionRecordWriter["persistWork"]>): Promise<unknown>;
   persistVerify(...args: Parameters<PlanCompletionRecordWriter["persistVerify"]>): Promise<unknown>;
@@ -189,6 +192,8 @@ function failureReasonMarkdown(reason: CycleExecutionFailureReason) {
       ? "Cycle failed because the live Plan execution context was lost."
       : reason === "lost_work_thread_context"
         ? "Cycle failed because the shared Work thread was lost before the next Work Item."
+      : reason === "active_root_admission_lost"
+        ? "Cycle was canceled because the active Root lost admission."
       : reason === "verify_phase_failed"
         ? "Cycle failed during exact commit or Verify execution."
       : reason === "work_phase_failed"
@@ -214,10 +219,14 @@ function parseExecution(value: CycleMachineExecution): CycleMachineExecution {
   if (
     typeof value !== "object"
     || value === null
-    || Object.keys(value).length !== 1
+    || Object.keys(value).some((key) => key !== "ownership" && key !== "closure")
     || (value.ownership !== "live" && value.ownership !== "lost")
+    || (value.closure !== undefined && value.closure !== "admission_lost")
   ) throw new Error("cycle_machine_execution_invalid");
-  return Object.freeze({ ownership: value.ownership });
+  return Object.freeze({
+    ownership: value.ownership,
+    ...(value.closure === undefined ? {} : { closure: value.closure }),
+  });
 }
 
 function createPlanCall(
@@ -420,6 +429,9 @@ export class CyclePlanMachine implements CycleMachineInterface {
     execution: CycleMachineExecution,
     epoch: number,
   ): Promise<CycleAdvanceResult> {
+    if (execution.closure === "admission_lost") {
+      return this.#failCycle(request, "active_root_admission_lost", "canceled", epoch, "canceled");
+    }
     if (request.cycle_status === "awaiting_acceptance") {
       try {
         const basis = await this.#readSealedBasis(request);
@@ -927,6 +939,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
     reason: CycleExecutionFailureReason,
     planStatus: PlanTerminalStatus,
     epoch: number,
+    terminalStatus: "failed" | "canceled" = "failed",
   ): Promise<CycleAdvanceResult> {
     this.#assertActive(epoch);
     if (request.cycle_status === "failed" || request.cycle_status === "canceled") {
@@ -951,6 +964,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
           reason === "lost_execution_context" ? "lost_execution_context" : `${stage.kind}_execution_failed`,
           failureReasonMarkdown(reason),
           this.#execution(epoch),
+          terminalStatus,
         );
         this.#assertActive(epoch);
       }
@@ -960,7 +974,8 @@ export class CyclePlanMachine implements CycleMachineInterface {
     }
 
     for (const stage of activeStages) {
-      const stageStatus = stage.kind === "plan" ? planStatus : "failed";
+      const stageStatus = terminalStatus === "canceled" ? "canceled"
+        : stage.kind === "plan" ? planStatus : "failed";
       const stageCall = statusCall(
         request,
         parseTaskIssueId(stage.issue_id),
@@ -994,6 +1009,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
         failureReasonMarkdown(reason),
         activeStages[0] === undefined ? null : parseTaskIssueId(activeStages[0].issue_id),
         this.#execution(epoch),
+        terminalStatus,
       );
       this.#assertActive(epoch);
     } catch {
@@ -1005,7 +1021,7 @@ export class CyclePlanMachine implements CycleMachineInterface {
       request,
       parseTaskIssueId(request.cycle_id),
       request.cycle_revision,
-      this.#workflow.cycle_states.failed,
+      this.#workflow.cycle_states[terminalStatus],
     );
     try {
       const cycleCommand = bindCycleTaskManageCommand({

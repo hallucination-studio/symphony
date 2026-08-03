@@ -64,6 +64,7 @@ export interface CycleMachineHostInterface {
     task: TaskSnapshot,
     correlationId: CorrelationId,
     previousAcceptedTask: TaskSnapshot | null,
+    closure?: CycleMachineExecution["closure"],
   ): Promise<CycleMachinePreparation>;
   prepareContinuation(): Promise<CycleMachinePreparation>;
   run(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
@@ -219,6 +220,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     taskValue: TaskSnapshot,
     correlationValue: CorrelationId,
     previousAcceptedTaskValue: TaskSnapshot | null,
+    closure: CycleMachineExecution["closure"] = undefined,
   ): Promise<CycleMachinePreparation> {
     this.#assertAvailable();
     const correlationId = parseCorrelationId(correlationValue);
@@ -274,7 +276,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       return this.#paused("invalid_contract", "active_cycle_rebound", correlationId);
     }
     const ownership = this.#active?.ownership ?? "live";
-    return this.#readAction(cycleId, correlationId, candidate, task, ownership);
+    return this.#readAction(cycleId, correlationId, candidate, task, ownership, closure);
   }
 
   async prepareContinuation(): Promise<CycleMachinePreparation> {
@@ -287,6 +289,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       null,
       null,
       this.#active.ownership,
+      undefined,
     );
   }
 
@@ -354,6 +357,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     observedCycle: TaskIssueSnapshot | null,
     task: TaskSnapshot | null,
     requestedOwnership: CycleMachineExecution["ownership"],
+    closure: CycleMachineExecution["closure"],
   ): Promise<CycleMachinePreparation> {
     let raw: CycleAdvanceRequest | null;
     try {
@@ -422,7 +426,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     }
     const prepared = Object.freeze({ kind: "cycle_action" as const, request: snapshot });
     this.#prepared.add(prepared);
-    this.#executions.set(prepared, Object.freeze({ ownership }));
+    this.#executions.set(prepared, Object.freeze({ ownership, ...(closure === undefined ? {} : { closure }) }));
     this.#ready = prepared;
     return prepared;
   }

@@ -319,9 +319,10 @@ test("inventory and snapshot fail closed on malformed facts, ambiguity, and raw 
     issue("cycle-1", "root-1", "Draft", ["symphony:kind/cycle"]),
     issue("cycle-2", "root-1", "In Progress", ["symphony:kind/cycle"]),
   ]);
-  await assert.rejects(
-    new LinearQueries(ambiguous, options()).readRootSnapshot(parseRootIssueId("root-1")),
-    /linear_multiple_active_cycles/u,
+  const overlap = await new LinearQueries(ambiguous, options()).readRootSnapshot(parseRootIssueId("root-1"));
+  assert.deepEqual(
+    overlap.issues.filter(({ parent_id }) => parent_id === "root-1").map(({ issue_id }) => issue_id),
+    ["cycle-1", "cycle-2"],
   );
 
   const providerFailure = new FakeLinearQueryClient();
@@ -435,6 +436,11 @@ test("complete history and comment reads paginate, classify origin, and never ex
   assert.deepEqual(history.slice(0, 3).map(({ change_origin }) => change_origin), [
     "symphony", "external", "unknown",
   ]);
+  assert.deepEqual(await queries.readLatestIssueChangeOrigin(parseTaskIssueId("root-1")), {
+    issue_id: "root-1",
+    change_origin: "symphony",
+    changed_fields: ["title"],
+  });
   const comments = await queries.readIssueComments(parseTaskIssueId("root-1"));
   assert.equal(comments.length, 51);
   assert.equal(comments[0]?.provider_edited_at, "2026-07-30T01:00:00.000Z");

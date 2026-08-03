@@ -92,7 +92,7 @@ export function parseTaskWorkflowIdentities(value: unknown): TaskWorkflowIdentit
 declare const taskManageCallerCapabilityBrand: unique symbol;
 
 export interface TaskManageCallerCapability {
-  readonly caller: "root" | "cycle_machine";
+  readonly caller: "root" | "cycle_machine" | "family_guard";
   readonly root_id: RootIssueId;
   readonly cycle_id: CycleIssueId | null;
   readonly runtime_generation: RuntimeGeneration;
@@ -143,7 +143,7 @@ export function createTaskManageCallerAuthority(): TaskManageCallerAuthority {
   const issuedCapabilities = new WeakSet<object>();
   const issuer: TaskManageCallerIssuer = Object.freeze({
     issue(input: IssueTaskManageCallerInput, call: TaskMcpCall): TaskManageCallerCapability {
-      if (input.caller !== "root" && input.caller !== "cycle_machine") {
+      if (input.caller !== "root" && input.caller !== "cycle_machine" && input.caller !== "family_guard") {
         throw new Error("invalid_task_caller_scope");
       }
       const rootId = parseRootIssueId(input.root_id);
@@ -154,6 +154,7 @@ export function createTaskManageCallerAuthority(): TaskManageCallerAuthority {
       const hasSealedScope = cycleSealDigest !== null && graphSealDigest !== null;
       if (
         (input.caller === "cycle_machine" && !hasCycleScope)
+        || (input.caller === "family_guard" && hasCycleScope)
         || hasCycleScope !== hasSealedScope
         || (cycleSealDigest === null) !== (graphSealDigest === null)
       ) throw new Error("invalid_task_caller_scope");

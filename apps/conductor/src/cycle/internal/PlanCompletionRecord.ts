@@ -368,6 +368,7 @@ export class PlanCompletionRecordWriter {
     reasonCode: string,
     reasonMarkdown: string,
     execution: TaskManageBoundaryExecution,
+    terminalOutcome: "failed" | "canceled" = "failed",
   ): Promise<StageCompletionRecord> {
     const stage = [
       ...(snapshot.plan_issue === null ? [] : [snapshot.plan_issue]),
@@ -389,7 +390,7 @@ export class PlanCompletionRecordWriter {
       return this.persistPlanTerminal(
         snapshot,
         basis,
-        "failed",
+        terminalOutcome,
         reasonMarkdown,
         execution,
       );
@@ -411,7 +412,7 @@ export class PlanCompletionRecordWriter {
     return this.#persistStage(snapshot, basis, execution, stage.kind === "work" ? {
       ...common,
       projection: {
-        outcome: "failed",
+        outcome: terminalOutcome,
         instruction_digest: node.instruction_digest,
         workspace_parent_revision: digest(snapshot.git.head_revision ?? "unborn"),
         workspace_diff_digest: digest(snapshot.git.diff_digest),
@@ -441,6 +442,7 @@ export class PlanCompletionRecordWriter {
     reasonMarkdown: string,
     failedStageId: TaskIssueId | null,
     execution: TaskManageBoundaryExecution,
+    terminalOutcome: "failed" | "canceled" = "failed",
   ): Promise<void> {
     if (snapshot.cycle_status !== "in_progress" && snapshot.cycle_status !== "awaiting_acceptance") {
       throw new Error("cycle_failure_source_invalid");
@@ -487,7 +489,7 @@ export class PlanCompletionRecordWriter {
       record_kind: "cycle_completion",
       successor_policy: "allowed",
       completion: {
-        outcome: "failed",
+        outcome: terminalOutcome,
         failure_phase: "in_progress",
         specification_seal_digest: basis.specification.specification_seal_digest,
         graph_seal_digest: snapshot.sealed_graph_digest,

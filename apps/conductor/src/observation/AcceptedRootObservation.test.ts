@@ -135,6 +135,7 @@ function event(
     to_task_digest: taskSnapshotDigest(snapshot),
     task: snapshot,
     task_changes: options.taskChanges ?? [],
+    task_change_origins: [],
   });
 }
 

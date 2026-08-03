@@ -14,7 +14,6 @@ import {
 } from "../contracts/observation.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
-import { rootObservationDigest } from "../observation/RootObservationFacts.js";
 import { LinearObserver } from "../task-management/linear/LinearObserver.js";
 import { RootRuntimeRegistry, type RootTurnInput } from "./RootRuntimeRegistry.js";
 import { SerialConductor } from "./SerialConductor.js";
@@ -64,7 +63,7 @@ function task(
   });
 }
 
-test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff", async () => {
+test("polling drives undelegated idle and complete fresh Root snapshots", async () => {
   const rootId = parseRootIssueId("LIN-401");
   const undelegated = task(rootId, "revision:root:1", "Undelegated", null);
   const delegated = task(rootId, "revision:root:2", "Delegated", agentActor);
@@ -79,6 +78,7 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
       if (snapshot === undefined) throw new Error("missing_test_snapshot");
       return snapshot;
     },
+    readLatestIssueChangeOrigin: async () => null,
   }, {
     log: () => undefined,
     identity_factory: () => correlations.shift() ?? "corr:unexpected",
@@ -155,6 +155,27 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
       in_review: "state:root:in-review",
       done: "state:root:done",
     },
+    workflow: {
+      labels: {
+        root: "label:root", cycle: "label:cycle", plan: "label:plan", work: "label:work", verify: "label:verify",
+      },
+      cycle_states: {
+        draft: "state:cycle:draft",
+        in_progress: "state:cycle:in-progress",
+        awaiting_acceptance: "state:cycle:awaiting-acceptance",
+        succeeded: "state:cycle:succeeded",
+        rejected: "state:cycle:rejected",
+        failed: "state:cycle:failed",
+        canceled: "state:cycle:canceled",
+      },
+      stage_states: {
+        todo: "state:stage:todo",
+        in_progress: "state:stage:in-progress",
+        done: "state:stage:done",
+        failed: "state:stage:failed",
+        canceled: "state:stage:canceled",
+      },
+    },
     log: () => undefined,
   });
 
@@ -204,20 +225,12 @@ test("polling drives undelegated idle, bootstrap, and an accepted-baseline diff"
   assert.equal(creations, 1);
   assert.equal(gitReads, 2);
   assert.equal(turnInputs.length, 2);
-  const diff = turnInputs[1];
-  assert.ok(diff && "task_changes" in diff);
-  if (!diff || !("task_changes" in diff)) return;
-  assert.equal(diff.correlation_id, "corr:poll:4");
-  assert.equal(diff.from_observation_digest, rootObservationDigest(delegated, gitSnapshot));
-  assert.equal(diff.to_observation_digest, rootObservationDigest(latest, gitSnapshot));
-  assert.deepEqual(diff.task_changes, [{
-    kind: "field_changed",
-    issue_id: rootId,
-    field: "title",
-    before: "Delegated",
-    after: "Latest",
-  }]);
-  assert.deepEqual(diff.git_changes, []);
+  const fresh = turnInputs[1];
+  assert.ok(fresh && "task" in fresh);
+  if (!fresh || !("task" in fresh)) return;
+  assert.equal(fresh.correlation_id, "corr:poll:4");
+  assert.deepEqual(fresh.task, latest);
+  assert.deepEqual(fresh.git, gitSnapshot);
   assert.deepEqual(await conductor.runNext(), { kind: "idle" });
   assert.equal(gitReads, 2);
   assert.equal(turnInputs.length, 2);

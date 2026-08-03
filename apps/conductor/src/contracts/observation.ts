@@ -68,6 +68,13 @@ export interface TaskObservationEvent {
   readonly to_task_digest: TaskDigest;
   readonly task: TaskSnapshot;
   readonly task_changes: readonly ConcreteTaskChange[];
+  readonly task_change_origins: readonly TaskChangeOriginEvidence[];
+}
+
+export interface TaskChangeOriginEvidence {
+  readonly issue_id: TaskIssueId;
+  readonly change_origin: "symphony" | "external" | "unknown";
+  readonly changed_fields: readonly string[];
 }
 
 export interface PullRequestSnapshot {
@@ -305,15 +312,31 @@ export function parseTaskObservationEvent(value: unknown): TaskObservationEvent 
   const record = asRecord(value);
   assertExactKeys(record, [
     "schema_version", "root_id", "correlation_id", "observed_at",
-    "from_task_digest", "to_task_digest", "task", "task_changes",
+    "from_task_digest", "to_task_digest", "task", "task_changes", "task_change_origins",
   ]);
   const rootId = parseRootIssueId(record.root_id);
   const task = parseTaskSnapshot(record.task);
   if (task.root_id !== rootId) throw new Error("task_observation_root_mismatch");
   const fromTaskDigest = parseNullable(record.from_task_digest, parseTaskDigest);
   const toTaskDigest = parseTaskDigest(record.to_task_digest);
-  if (fromTaskDigest === toTaskDigest) throw new Error("unchanged_task_observation");
   const taskChanges = parseArray(record.task_changes, parseConcreteTaskChange);
+  const taskChangeOrigins = parseArray(record.task_change_origins, (entry) => {
+    const evidence = asRecord(entry);
+    assertExactKeys(evidence, ["issue_id", "change_origin", "changed_fields"]);
+    return Object.freeze({
+      issue_id: parseTaskIssueId(evidence.issue_id),
+      change_origin: parseEnum(evidence.change_origin, ["symphony", "external", "unknown"] as const),
+      changed_fields: parseStringArray(evidence.changed_fields, (field) => (
+        parseBoundedString(field, "invalid_task_change_origin_field", 64)
+      )),
+    });
+  });
+  if (new Set(taskChangeOrigins.map(({ issue_id }) => issue_id)).size !== taskChangeOrigins.length) {
+    throw new Error("duplicate_task_change_origin_issue");
+  }
+  if (fromTaskDigest === toTaskDigest && taskChanges.length > 0) {
+    throw new Error("unchanged_task_changes");
+  }
   if (fromTaskDigest === null && taskChanges.length > 0) {
     throw new Error("initial_task_changes_forbidden");
   }
@@ -326,6 +349,7 @@ export function parseTaskObservationEvent(value: unknown): TaskObservationEvent 
     to_task_digest: toTaskDigest,
     task,
     task_changes: taskChanges,
+    task_change_origins: taskChangeOrigins,
   });
 }
 

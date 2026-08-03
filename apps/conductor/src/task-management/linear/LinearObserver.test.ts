@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseRootIssueId, type RootIssueId } from "../../contracts/identity.js";
-import { parseTaskSnapshot, type TaskSnapshot } from "../../contracts/observation.js";
+import { parseRootIssueId, parseTaskIssueId, type RootIssueId } from "../../contracts/identity.js";
+import { parseTaskSnapshot, type TaskChangeOriginEvidence, type TaskSnapshot } from "../../contracts/observation.js";
 import { LinearObserver, type TaskObservationLog } from "./LinearObserver.js";
 import type { RootInventoryItem } from "./LinearQueries.js";
 
@@ -80,6 +80,7 @@ class FakeObserverQueries {
   readonly readCalls: RootIssueId[] = [];
   readonly snapshots = new Map<RootIssueId, Array<TaskSnapshot | Error>>();
   inventories: Array<readonly RootInventoryItem[] | Error> = [];
+  readonly origins = new Map<string, TaskChangeOriginEvidence>();
 
   async inventoryRoots(): Promise<readonly RootInventoryItem[]> {
     const result = this.inventories.shift();
@@ -93,6 +94,10 @@ class FakeObserverQueries {
     if (result instanceof Error) throw result;
     if (result === undefined) throw new Error("missing_fake_snapshot");
     return result;
+  }
+
+  async readLatestIssueChangeOrigin(issueId: TaskSnapshot["issues"][number]["issue_id"]) {
+    return this.origins.get(issueId) ?? null;
   }
 }
 
@@ -109,10 +114,15 @@ function observer(
   });
 }
 
-test("poll_once emits complete first and concrete changed observations only", async () => {
+test("poll_once emits a complete fresh observation on every scheduled tick", async () => {
   const queries = new FakeObserverQueries();
   const rootId = parseRootIssueId("root-1");
   const initial = snapshot(rootId);
+  queries.origins.set(rootId as string, {
+    issue_id: parseTaskIssueId(rootId),
+    change_origin: "external",
+    changed_fields: ["title"],
+  });
   const reordered = snapshot(rootId, { reordered: true });
   const changed = snapshot(rootId, {
     childStatus: "Done",
@@ -128,11 +138,17 @@ test("poll_once emits complete first and concrete changed observations only", as
   const first = await polls.poll_once();
   assert.equal(first.length, 1);
   assert.equal(first[0]?.from_task_digest, null);
+  assert.deepEqual(first[0]?.task_change_origins, [queries.origins.get(rootId as string)]);
   assert.match(first[0]?.to_task_digest ?? "", /^sha256:[0-9a-f]{64}$/u);
   assert.deepEqual(first[0]?.task, initial);
   assert.deepEqual(first[0]?.task_changes, []);
 
-  assert.deepEqual(await polls.poll_once(), []);
+  const unchanged = await polls.poll_once();
+  assert.equal(unchanged.length, 1);
+  assert.equal(unchanged[0]?.from_task_digest, first[0]?.to_task_digest);
+  assert.equal(unchanged[0]?.to_task_digest, first[0]?.to_task_digest);
+  assert.deepEqual(unchanged[0]?.task, reordered);
+  assert.deepEqual(unchanged[0]?.task_changes, []);
 
   const next = await polls.poll_once();
   assert.equal(next.length, 1);
@@ -154,7 +170,7 @@ test("poll_once emits complete first and concrete changed observations only", as
   ]);
   assert.deepEqual(logs, [
     { event: "task_observation_poll_completed", correlation_id: "corr:1", roots_polled: 1, events_emitted: 1, failures: 0 },
-    { event: "task_observation_poll_completed", correlation_id: "corr:2", roots_polled: 1, events_emitted: 0, failures: 0 },
+    { event: "task_observation_poll_completed", correlation_id: "corr:2", roots_polled: 1, events_emitted: 1, failures: 0 },
     { event: "task_observation_poll_completed", correlation_id: "corr:3", roots_polled: 1, events_emitted: 1, failures: 0 },
   ]);
 });
@@ -189,7 +205,7 @@ test("poll_once retains failed baselines and isolates inventory and Root failure
   assert.deepEqual(second.map(({ root_id }) => root_id), [root2]);
 
   const third = await polls.poll_once();
-  assert.deepEqual(third.map(({ root_id }) => root_id), [root1]);
+  assert.deepEqual(third.map(({ root_id }) => root_id), [root1, root2]);
   assert.equal(third[0]?.from_task_digest, firstRoot1Digest);
   assert.deepEqual(queries.readCalls, [root1, root2, root1, root2, root1, root2]);
   const failures = logs.filter((entry) => entry.event !== "task_observation_poll_completed");
@@ -200,7 +216,7 @@ test("poll_once retains failed baselines and isolates inventory and Root failure
   assert.deepEqual(logs.filter((entry) => entry.event === "task_observation_poll_completed"), [
     { event: "task_observation_poll_completed", correlation_id: "corr:1", roots_polled: 2, events_emitted: 2, failures: 0 },
     { event: "task_observation_poll_completed", correlation_id: "corr:2", roots_polled: 2, events_emitted: 1, failures: 2 },
-    { event: "task_observation_poll_completed", correlation_id: "corr:3", roots_polled: 2, events_emitted: 1, failures: 0 },
+    { event: "task_observation_poll_completed", correlation_id: "corr:3", roots_polled: 2, events_emitted: 2, failures: 0 },
   ]);
   assert.equal(JSON.stringify(logs).includes("bearer-secret"), false);
   assert.equal(JSON.stringify(logs).includes("provider-stack"), false);

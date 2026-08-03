@@ -40,8 +40,12 @@ function assertProjection(value: unknown): UnknownRecord {
     throw new Error("record_provider_field_forbidden");
   }
   parseTaskIssueId(record.issue_id);
-  parseTaskIssueId(record.cycle_id);
-  parseBoundedString(record.record_kind, "invalid_record_kind", 128);
+  const recordKind = parseBoundedString(record.record_kind, "invalid_record_kind", 128);
+  if (recordKind === "root_family_invalidation") {
+    if ("cycle_id" in record) throw new Error("record_provider_field_forbidden");
+  } else {
+    parseTaskIssueId(record.cycle_id);
+  }
   return record;
 }
 

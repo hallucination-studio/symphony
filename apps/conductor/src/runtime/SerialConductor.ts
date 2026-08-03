@@ -23,6 +23,11 @@ import type { CycleAdvanceResult } from "../contracts/cycle.js";
 import type { RootTurnOutcome } from "../contracts/runtime.js";
 import type { PreparedCycleAction } from "../cycle/internal/CycleMachine.js";
 import { parseBoundedString } from "../contracts/validation.js";
+import {
+  parseTaskWorkflowIdentities,
+  type TaskWorkflowIdentities,
+} from "../task-management/api/TaskManageCapability.js";
+import { routeFreshTask, type FreshRouteId } from "./FreshTaskRouter.js";
 import type { RegisteredRootRuntime, RootRuntimeRegistry } from "./RootRuntimeRegistry.js";
 
 type AdmissionParkReason =
@@ -39,6 +44,11 @@ type RuntimeFailureReason =
   | "runtime_preparation_failed"
   | "runtime_shutdown_failed"
   | "turn_boundary_failed";
+
+export interface FamilyGuardInterface {
+  isQuarantined(observation: TaskObservationEvent): Promise<boolean>;
+  execute(observation: TaskObservationEvent): Promise<"family_invalidated" | "no_action">;
+}
 
 interface RootCleanupStageLog {
   readonly stage_id: StageIssueId;
@@ -73,6 +83,13 @@ export type SerialConductorLog =
     readonly root_id: RootIssueId;
     readonly correlation_id: CorrelationId;
     readonly replaced: boolean;
+  }
+  | {
+    readonly event: "fresh_route_selected";
+    readonly root_id: RootIssueId;
+    readonly correlation_id: CorrelationId;
+    readonly selected_route: FreshRouteId;
+    readonly consumer: "root_boundary" | "cycle_machine" | "family_guard" | "cleanup" | "park";
   }
   | {
     readonly event: "root_admission_parked";
@@ -172,6 +189,11 @@ export type SerialRunResult =
     readonly outcome: CycleAdvanceResult["outcome"];
   }
   | {
+    readonly kind: "family_guard_completed";
+    readonly root_id: RootIssueId;
+    readonly outcome: "family_invalidated" | "no_action";
+  }
+  | {
     readonly kind: "paused";
     readonly root_id: RootIssueId;
     readonly reason_code: BoundaryErrorCode;
@@ -191,6 +213,8 @@ export interface SerialConductorOptions {
     readonly in_review: string;
     readonly done: string;
   };
+  readonly workflow: unknown;
+  readonly family_guard?: FamilyGuardInterface;
   readonly log: (entry: SerialConductorLog) => void;
 }
 
@@ -254,6 +278,7 @@ export class SerialConductor {
   readonly #cycleContinuations = new Map<RootIssueId, RegisteredRootRuntime>();
   readonly #pending = new Map<RootIssueId, TaskObservationEvent>();
   readonly #stopped = new Set<RootIssueId>();
+  readonly #workflow: TaskWorkflowIdentities;
   #busy = false;
 
   constructor(
@@ -268,6 +293,7 @@ export class SerialConductor {
       in_review: parseTaskStateId(options.root_states.in_review),
       done: parseTaskStateId(options.root_states.done),
     });
+    this.#workflow = parseTaskWorkflowIdentities(options.workflow);
     if (new Set(Object.values(this.#rootStates)).size !== Object.keys(this.#rootStates).length) {
       throw new Error("duplicate_root_state_identity");
     }
@@ -298,21 +324,54 @@ export class SerialConductor {
   }
 
   async #runNext(): Promise<SerialRunResult> {
-    const observations = [...this.#pending.values()]
-      .sort((left, right) => left.root_id.localeCompare(right.root_id));
-    for (const observation of observations) {
-      if (this.#pending.get(observation.root_id) !== observation) continue;
-      const issue = rootIssue(observation);
-      if (issue.status !== this.#rootStates.done) continue;
-      this.#pending.delete(observation.root_id);
-      return this.#cleanupDoneRoot(observation, issue);
+    const observations = [];
+    for (const observation of this.#pending.values()) {
+      const permanentQuarantine = await this.options.family_guard?.isQuarantined(observation) ?? false;
+      observations.push({ observation, routing: routeFreshTask({
+        task: observation.task,
+        task_changes: observation.task_changes,
+        task_change_origins: observation.task_change_origins,
+        agent_actor_id: this.#actorId,
+        root_states: this.#rootStates,
+        workflow: this.#workflow,
+        permanent_quarantine: permanentQuarantine,
+      }) });
+    }
+    observations.sort((left, right) => left.routing.selected.priority - right.routing.selected.priority
+      || left.observation.root_id.localeCompare(right.observation.root_id));
+
+    if ((observations[0]?.routing.selected.priority ?? Number.POSITIVE_INFINITY) > 80) {
+      const continuation = await this.#runCycleContinuation();
+      if (continuation !== null) return continuation;
     }
 
-    const continuation = await this.#runCycleContinuation();
-    if (continuation !== null) return continuation;
-
-    for (const observation of observations) {
+    for (const { observation, routing } of observations) {
       if (this.#pending.get(observation.root_id) !== observation) continue;
+      const selected = routing.selected;
+      this.options.log(Object.freeze({
+        event: "fresh_route_selected",
+        root_id: observation.root_id,
+        correlation_id: observation.correlation_id,
+        selected_route: selected.route_id,
+        consumer: selected.consumer,
+      }));
+      if (selected.consumer === "cleanup") {
+        this.#pending.delete(observation.root_id);
+        return this.#cleanupDoneRoot(observation, rootIssue(observation));
+      }
+      if (selected.consumer === "family_guard") {
+        this.#pending.delete(observation.root_id);
+        if (this.options.family_guard === undefined) {
+          this.#stopped.add(observation.root_id);
+          return Object.freeze({
+            kind: "failed",
+            root_id: observation.root_id,
+            reason_code: "runtime_preparation_failed",
+          });
+        }
+        const outcome = await this.options.family_guard.execute(observation);
+        return Object.freeze({ kind: "family_guard_completed", root_id: observation.root_id, outcome });
+      }
       const parkReason = admissionReason(
         observation,
         this.#actorId,
@@ -320,13 +379,17 @@ export class SerialConductor {
         this.#rootStates,
         this.#stopped.has(observation.root_id),
       );
-      if (parkReason !== null) {
+      if (
+        selected.consumer === "park"
+        || parkReason === "runtime_stopped"
+        || (selected.consumer === "root_boundary" && parkReason !== null)
+      ) {
         this.#pending.delete(observation.root_id);
         this.options.log(Object.freeze({
           event: "root_admission_parked",
           root_id: observation.root_id,
           correlation_id: observation.correlation_id,
-          reason_code: parkReason,
+          reason_code: parkReason ?? "status_not_executable",
         }));
         continue;
       }
@@ -336,7 +399,7 @@ export class SerialConductor {
       let attempt;
       try {
         runtime = await this.registry.getOrCreate(observation.root_id);
-        attempt = await runtime.prepare(observation);
+        attempt = await runtime.prepare(observation, selected);
       } catch {
         this.#stopped.add(observation.root_id);
         this.options.log(Object.freeze({
@@ -416,6 +479,8 @@ export class SerialConductor {
         outcome: outcome.outcome,
       });
     }
+    const continuation = await this.#runCycleContinuation();
+    if (continuation !== null) return continuation;
     return Object.freeze({ kind: "idle" });
   }
 

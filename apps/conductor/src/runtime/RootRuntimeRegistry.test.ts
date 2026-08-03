@@ -45,6 +45,7 @@ function taskEvent() {
     to_task_digest: taskSnapshotDigest(task),
     task,
     task_changes: [],
+    task_change_origins: [],
   });
 }
 

@@ -1302,6 +1302,79 @@ test("lost empty execution fails before Plan creation", async () => {
   assert.equal(planCreates, 0);
 });
 
+test("active admission loss persists Stage-first cancellation and projects Cycle Canceled", async () => {
+  const request = planOnlyRequest("in_progress");
+  const events: string[] = [];
+  const writer = {
+    ...planCompletionRecordWriter,
+    persistStageFailure: async (
+      _request: unknown, _basis: unknown, _built: unknown, _stageId: unknown,
+      _reasonCode: string, reasonMarkdown: string, _execution: unknown, terminalOutcome?: "failed" | "canceled",
+    ) => {
+      assert.equal(terminalOutcome, "canceled");
+      assert.match(reasonMarkdown, /lost admission/u);
+      events.push("stage_record");
+    },
+    persistCycleFailure: async (
+      _request: unknown, _basis: unknown, reasonCode: string, _reasonMarkdown: string,
+      _failedStageId: unknown, _execution: unknown, terminalOutcome?: "failed" | "canceled",
+    ) => {
+      assert.equal(reasonCode, "active_root_admission_lost");
+      assert.equal(terminalOutcome, "canceled");
+      events.push("cycle_record");
+    },
+  };
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.issue_id === parseTaskIssueId(request.plan_issue!.issue_id)) {
+      assert.equal(call.input.desired.state_id, workflow.stage_states.canceled);
+      events.push("stage_canceled");
+      return appliedIssueResult(call, {
+        ...request.plan_issue!,
+        issue_id: parseTaskIssueId(request.plan_issue!.issue_id),
+        revision: parseTaskRevision("revision:plan:canceled:admission"),
+        status: workflow.stage_states.canceled,
+        description: request.plan_issue!.description_markdown,
+        parent_id: parseTaskIssueId(cycleId),
+        labels: [workflow.labels.plan],
+        delegate_id: null,
+        priority: null,
+      }, workflow.stage_states.in_progress);
+    }
+    assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
+    assert.equal(call.input.desired.state_id, workflow.cycle_states.canceled);
+    events.push("cycle_canceled");
+    return appliedIssueResult(call, {
+      issue_id: parseTaskIssueId(cycleId),
+      revision: parseTaskRevision("revision:cycle:canceled:admission"),
+      status: workflow.cycle_states.canceled,
+      title: "Approved Cycle",
+      description: specification.cycle_description_markdown,
+      parent_id: parseTaskIssueId(rootId),
+      labels: [workflow.labels.cycle],
+      delegate_id: null,
+      priority: null,
+    }, workflow.cycle_states.in_progress);
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: writer,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+
+  const outcome = await machine.advance(request, { ownership: "live", closure: "admission_lost" });
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.deepEqual(events, ["stage_record", "stage_canceled", "cycle_record", "cycle_canceled"]);
+});
+
 test("the exact Plan returned by creation is sealed before Plan execution", async () => {
   const events: string[] = [];
   const manager = unexpectedManager();
