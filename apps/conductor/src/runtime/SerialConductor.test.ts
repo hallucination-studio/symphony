@@ -698,6 +698,80 @@ test("turn boundary failures are sanitized and never advance the accepted baseli
   assert.equal(prepared.kind, "bootstrap");
 });
 
+test("turn boundary failures log only the deepest bounded internal cause code", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  const f = harness(async () => {
+    throw new Error("root_turn_boundary_failed", {
+      cause: new Error("root_reconcill_boundary_failed", {
+        cause: new Error("codex_thread_turn_failed"),
+      }),
+    });
+  });
+  f.conductor.admit([event(task(rootId), "corr:turn:cause")]);
+
+  await f.conductor.runNext();
+  assert.deepEqual(f.logs.find(({ event: name }) => name === "root_turn_failed"), {
+    event: "root_turn_failed",
+    root_id: rootId,
+    runtime_generation: parseRuntimeGeneration(1),
+    correlation_id: "corr:turn:cause",
+    reason_code: "turn_boundary_failed",
+    cause_code: "codex_thread_turn_failed",
+  });
+});
+
+test("runtime preparation logs only the deepest bounded internal cause code", async () => {
+  const rootId = parseRootIssueId("LIN-1");
+  const logs: SerialConductorLog[] = [];
+  const registry = new RootRuntimeRegistry({
+    create: async () => {
+      throw new Error("root_transport_creation_failed", {
+        cause: new Error("codex_local_only_preflight_failed:config"),
+      });
+    },
+  });
+  const conductor = new SerialConductor(registry, {
+    agent_actor_id: agentActor,
+    root_kind_label_id: rootLabelId,
+    root_states: rootStates,
+    workflow,
+    log: (entry) => logs.push(entry),
+  });
+  conductor.admit([event(task(rootId), "corr:runtime:failed")]);
+
+  assert.deepEqual(await conductor.runNext(), {
+    kind: "failed",
+    root_id: rootId,
+    reason_code: "runtime_preparation_failed",
+  });
+  assert.deepEqual(logs.find(({ event: name }) => name === "root_observation_failed"), {
+    event: "root_observation_failed",
+    root_id: rootId,
+    correlation_id: "corr:runtime:failed",
+    reason_code: "runtime_preparation_failed",
+    cause_code: "codex_local_only_preflight_failed:config",
+  });
+
+  const untrustedLogs: SerialConductorLog[] = [];
+  const untrusted = new SerialConductor(new RootRuntimeRegistry({
+    create: async () => {
+      throw new Error("root transport exposed secret-provider-payload");
+    },
+  }), {
+    agent_actor_id: agentActor,
+    root_kind_label_id: rootLabelId,
+    root_states: rootStates,
+    workflow,
+    log: (entry) => untrustedLogs.push(entry),
+  });
+  untrusted.admit([event(task(rootId), "corr:runtime:untrusted")]);
+  await untrusted.runNext();
+  assert.equal(JSON.stringify(untrustedLogs).includes("secret-provider-payload"), false);
+  assert.equal("cause_code" in (untrustedLogs.find(
+    ({ event: name }) => name === "root_observation_failed",
+  ) ?? {}), false);
+});
+
 test("fresh Done fences an active Cycle continuation before another action", async () => {
   const rootId = parseRootIssueId("LIN-1");
   let actions = 0;

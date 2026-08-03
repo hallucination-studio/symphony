@@ -45,6 +45,20 @@ type RuntimeFailureReason =
   | "runtime_shutdown_failed"
   | "turn_boundary_failed";
 
+const INTERNAL_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}(?::[a-z][a-z0-9_]{0,31})?$/u;
+
+function deepestInternalCauseCode(error: unknown): string | undefined {
+  let current = error;
+  let code: string | undefined;
+  const seen = new Set<Error>();
+  for (let depth = 0; depth < 8 && current instanceof Error && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (INTERNAL_ERROR_CODE.test(current.message)) code = current.message;
+    current = current.cause;
+  }
+  return code;
+}
+
 export interface FamilyGuardInterface {
   isQuarantined(observation: TaskObservationEvent): Promise<boolean>;
   execute(observation: TaskObservationEvent): Promise<"family_invalidated" | "no_action">;
@@ -113,6 +127,7 @@ export type SerialConductorLog =
     readonly root_id: RootIssueId;
     readonly correlation_id: CorrelationId;
     readonly reason_code: "runtime_preparation_failed";
+    readonly cause_code?: string;
   }
   | {
     readonly event: "root_turn_started";
@@ -134,6 +149,7 @@ export type SerialConductorLog =
     readonly runtime_generation: RuntimeGeneration;
     readonly correlation_id: CorrelationId;
     readonly reason_code: "turn_boundary_failed";
+    readonly cause_code?: string;
   }
   | {
     readonly event: "cycle_action_started";
@@ -400,13 +416,15 @@ export class SerialConductor {
       try {
         runtime = await this.registry.getOrCreate(observation.root_id);
         attempt = await runtime.prepare(observation, selected);
-      } catch {
+      } catch (error) {
         this.#stopped.add(observation.root_id);
+        const causeCode = deepestInternalCauseCode(error);
         this.options.log(Object.freeze({
           event: "root_observation_failed",
           root_id: observation.root_id,
           correlation_id: observation.correlation_id,
           reason_code: "runtime_preparation_failed",
+          ...(causeCode === undefined ? {} : { cause_code: causeCode }),
         }));
         return Object.freeze({
           kind: "failed",
@@ -448,14 +466,16 @@ export class SerialConductor {
       let outcome: RootTurnOutcome;
       try {
         outcome = await runtime.run(attempt);
-      } catch {
+      } catch (error) {
         this.#stopped.add(observation.root_id);
+        const causeCode = deepestInternalCauseCode(error);
         this.options.log(Object.freeze({
           event: "root_turn_failed",
           root_id: observation.root_id,
           runtime_generation: runtime.target.runtime_generation,
           correlation_id: observation.correlation_id,
           reason_code: "turn_boundary_failed",
+          ...(causeCode === undefined ? {} : { cause_code: causeCode }),
         }));
         return Object.freeze({
           kind: "failed",
