@@ -339,6 +339,7 @@ function expectedFilesystemProfile(
 function rootFilesystemProfile(): Readonly<Record<string, unknown>> {
   return Object.freeze({
     glob_scan_max_depth: null,
+    ":minimal": "read",
     ":root": "deny",
     ":slash_tmp": "deny",
     ":tmpdir": "deny",

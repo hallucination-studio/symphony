@@ -7,6 +7,7 @@ export const CODEX_REQUEST_METHODS = [
   "remoteControl/status/read",
   "permissionProfile/list",
   "mcpServerStatus/list",
+  "command/exec",
   "thread/start",
   "turn/start",
   "turn/interrupt",

@@ -131,13 +131,27 @@ async function projectContext(client, projectSlugId) {
   return { project, team };
 }
 
-async function workflowCatalog(client, teamId) {
-  const [states, labels] = await Promise.all([
-    client.workflowStates({
+async function workflowStatesCatalog(client, teamId) {
+  const states = [];
+  let after;
+  for (let page = 0; page < 100; page += 1) {
+    const connection = await client.workflowStates({
       first: 100,
+      after,
       includeArchived: true,
       filter: { team: { id: { eq: teamId } } },
-    }),
+    });
+    states.push(...connection.nodes);
+    if (!connection.pageInfo.hasNextPage) return states;
+    after = connection.pageInfo.endCursor ?? null;
+    if (after === null) throw new Error("workflow_state_catalog_incomplete");
+  }
+  throw new Error("workflow_state_catalog_incomplete");
+}
+
+async function workflowCatalog(client, teamId) {
+  const [states, labels] = await Promise.all([
+    workflowStatesCatalog(client, teamId),
     client.issueLabels({
       first: KIND_LABEL_NAMES.length + 1,
       filter: {
@@ -148,9 +162,8 @@ async function workflowCatalog(client, teamId) {
       },
     }),
   ]);
-  assert.equal(states.pageInfo.hasNextPage, false, "workflow_state_catalog_incomplete");
   assert.equal(labels.pageInfo.hasNextPage, false, "workflow_label_catalog_incomplete");
-  return { states: states.nodes, labels: labels.nodes };
+  return { states, labels: labels.nodes };
 }
 
 async function symphonyActor(client) {

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import {
@@ -17,15 +16,17 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test, { after, before } from "node:test";
-import { promisify } from "node:util";
 
-import type {
-  CodexProcessLaunch,
-  CodexSpawner,
-  SpawnedCodexProcess,
+import {
+  CodexProcess,
+  type CodexProcessLaunch,
+  type CodexSpawner,
+  type SpawnedCodexProcess,
 } from "../../codex-app-server/internal/CodexProcess.js";
 import { JsonlFrameDecoder } from "../../codex-app-server/internal/JsonlPeer.js";
+import { scanSensitiveWorkspacePaths } from "../../codex-app-server/internal/SensitiveWorkspacePaths.js";
 import {
+  parseCorrelationId,
   parseCycleIssueId,
   parseRevision,
   parseRootIssueId,
@@ -40,16 +41,40 @@ import {
 } from "../api/StagePerformerInterface.js";
 import { VerifyPerformer } from "./VerifyPerformer.js";
 
-const execFileAsync = promisify(execFile);
-
-function isCodexSandboxSetupUnavailable(error: unknown): boolean {
-  const failure = error as {
-    readonly code?: unknown;
+async function runNativeCommand(
+  codex: CodexProcess,
+  permissionProfile: string,
+  command: readonly string[],
+  cwd: string,
+  correlationId: string,
+): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> {
+  const result = await codex.request(
+    "command/exec",
+    {
+      command,
+      cwd,
+      permissionProfile,
+      timeoutMs: 20_000,
+    },
+    parseCorrelationId(correlationId),
+    25_000,
+  );
+  const response = result as {
+    readonly exitCode?: unknown;
+    readonly stdout?: unknown;
     readonly stderr?: unknown;
   };
-  return failure.code === 71
-    && typeof failure.stderr === "string"
-    && /^sandbox-exec: sandbox_apply: Operation not permitted\n?$/u.test(failure.stderr);
+  if (
+    typeof response.exitCode !== "number"
+    || !Number.isSafeInteger(response.exitCode)
+    || typeof response.stdout !== "string"
+    || typeof response.stderr !== "string"
+  ) throw new Error("invalid_codex_command_exec_response");
+  return {
+    exitCode: response.exitCode,
+    stdout: response.stdout,
+    stderr: response.stderr,
+  };
 }
 
 interface FakeAppServer extends SpawnedCodexProcess {
@@ -482,7 +507,8 @@ test("Verify binds one exact revision to a read-only local turn and typed eviden
   }
 });
 
-test("installed Codex enforces the exact Verify read-only revision profile", {
+test("installed Codex app-server enforces the exact Verify read-only revision profile", {
+  skip: process.platform === "win32",
   timeout: 30_000,
 }, async (context) => {
   const probeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-verify-profile-probe-"));
@@ -514,26 +540,33 @@ test("installed Codex enforces the exact Verify read-only revision profile", {
     writeFile(path.join(probeHome, "auth.json"), "performer credential\n", "utf8"),
     writeFile(path.join(outside, "private.txt"), "outside\n", "utf8"),
   ]);
-  const appServer = fakeAppServer((message, server) => {
-    if (message.method === "thread/start") {
-      server.send({ id: message.id, result: { thread: { id: "thread-verify-probe" } } });
-    }
-  });
-  const performer = await VerifyPerformer.create({
-    ...performerInput(),
-    performer_home: probeHome,
-    revision_worktree: probeWorktree,
-  }, performerOptions(appServer.spawner));
-  const runtime = appServer.launches[0]?.localOnly;
-  assert.ok(runtime);
-  const scratchDirectory = runtime.scratchDirectory;
-  assert.ok(scratchDirectory);
-  let sandboxUnavailable = false;
   const [canonicalWorktree, canonicalHome, canonicalOutside] = await Promise.all([
     realpath(probeWorktree),
     realpath(probeHome),
     realpath(outside),
   ]);
+  const scratchDirectory = await realpath(await mkdtemp(path.join(probeRoot, "scratch-")));
+  const deniedWorkspacePaths = await scanSensitiveWorkspacePaths(canonicalWorktree);
+  const codex = await CodexProcess.start({
+    executable: "codex",
+    codexHome: canonicalHome,
+    rootId: target.root_id,
+    runtimeGeneration: target.runtime_generation,
+    startupTimeoutMs: 10_000,
+    requestTimeoutMs: 10_000,
+    shutdownTimeoutMs: 2_000,
+    apiKey: "test",
+    baseUrl: "https://api.openai.com/v1",
+    model: "codex-test",
+    capabilityMode: {
+      kind: "local_only",
+      workspaceRoot: canonicalWorktree,
+      scratchDirectory,
+      deniedWorkspacePaths,
+    },
+  });
+  const runtime = codex.localOnly;
+  assert.ok(runtime);
   try {
     const probeScript = String.raw`
       const fs = require("node:fs/promises");
@@ -561,16 +594,10 @@ test("installed Codex enforces the exact Verify read-only revision profile", {
         process.stdout.write(JSON.stringify(results));
       })().catch(() => process.exit(2));
     `;
-    let executed: { readonly stdout: string; readonly stderr: string } | undefined;
-    try {
-      executed = await execFileAsync("codex", [
-        "sandbox",
-        ...runtime.configArguments,
-        "--permission-profile",
-        runtime.readPermissionProfile,
-        "--cd",
-        canonicalWorktree,
-        "--",
+    const executed = await runNativeCommand(
+      codex,
+      runtime.readPermissionProfile,
+      [
         process.execPath,
         "--openssl-config=/dev/null",
         "-e",
@@ -579,59 +606,42 @@ test("installed Codex enforces the exact Verify read-only revision profile", {
         scratchDirectory,
         canonicalHome,
         canonicalOutside,
-      ], {
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024,
-        timeout: 20_000,
-        env: {
-          PATH: process.env.PATH,
-          LANG: process.env.LANG ?? "C.UTF-8",
-          CODEX_HOME: runtime.codexHome,
-          OPENSSL_CONF: "/dev/null",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-          GIT_CONFIG_SYSTEM: "/dev/null",
-          GIT_TERMINAL_PROMPT: "0",
-          GCM_INTERACTIVE: "never",
-        },
-      });
-    } catch (error) {
-      if (!isCodexSandboxSetupUnavailable(error)) throw error;
-      sandboxUnavailable = true;
-    }
-    if (!sandboxUnavailable) {
-      assert.ok(executed);
-      const evidence = JSON.parse(executed.stdout) as Record<
-        string,
-        { readonly ok: boolean; readonly value?: unknown }
-      >;
-      assert.equal(evidence.workspace_read?.ok, true);
-      assert.equal(evidence.workspace_read?.value, "exact revision\n");
-      assert.equal(evidence.workspace_create?.ok, false);
-      assert.equal(evidence.workspace_update?.ok, false);
-      assert.equal(evidence.scratch_create?.ok, true);
-      assert.equal(evidence.git_read?.ok, false);
-      assert.equal(evidence.git_write?.ok, false);
-      assert.equal(evidence.env_read?.ok, false);
-      assert.equal(evidence.private_key_read?.ok, false);
-      assert.equal(evidence.credentials_read?.ok, false);
-      assert.equal(evidence.sensitive_alias_read?.ok, false);
-      assert.equal(evidence.home_read?.ok, false);
-      assert.equal(evidence.outside_read?.ok, false);
-      assert.equal(evidence.outside_write?.ok, false);
-      assert.equal(await readFile(path.join(canonicalWorktree, "source.txt"), "utf8"), "exact revision\n");
-      assert.equal(
-        await readFile(path.join(canonicalWorktree, ".git", "config"), "utf8"),
-        "remote credential config\n",
-      );
-      assert.equal(await readFile(path.join(scratchDirectory, "evidence.md"), "utf8"), "evidence\n");
-      await assert.rejects(readFile(path.join(canonicalWorktree, "created.txt"), "utf8"), { code: "ENOENT" });
-      await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
-    }
+      ],
+      canonicalWorktree,
+      "probe:verify-permissions",
+    );
+    assert.equal(executed.exitCode, 0);
+    assert.equal(executed.stderr, "");
+    const evidence = JSON.parse(executed.stdout) as Record<
+      string,
+      { readonly ok: boolean; readonly value?: unknown }
+    >;
+    assert.equal(evidence.workspace_read?.ok, true);
+    assert.equal(evidence.workspace_read?.value, "exact revision\n");
+    assert.equal(evidence.workspace_create?.ok, false);
+    assert.equal(evidence.workspace_update?.ok, false);
+    assert.equal(evidence.scratch_create?.ok, true);
+    assert.equal(evidence.git_read?.ok, false);
+    assert.equal(evidence.git_write?.ok, false);
+    assert.equal(evidence.env_read?.ok, false);
+    assert.equal(evidence.private_key_read?.ok, false);
+    assert.equal(evidence.credentials_read?.ok, false);
+    assert.equal(evidence.sensitive_alias_read?.ok, false);
+    assert.equal(evidence.home_read?.ok, false);
+    assert.equal(evidence.outside_read?.ok, false);
+    assert.equal(evidence.outside_write?.ok, false);
+    assert.equal(await readFile(path.join(canonicalWorktree, "source.txt"), "utf8"), "exact revision\n");
+    assert.equal(
+      await readFile(path.join(canonicalWorktree, ".git", "config"), "utf8"),
+      "remote credential config\n",
+    );
+    assert.equal(await readFile(path.join(scratchDirectory, "evidence.md"), "utf8"), "evidence\n");
+    await assert.rejects(readFile(path.join(canonicalWorktree, "created.txt"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
   } finally {
-    await performer.close();
+    await codex.shutdown();
+    await rm(scratchDirectory, { recursive: true, force: true });
   }
-  await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
-  if (sandboxUnavailable) context.skip("codex_sandbox_unavailable: sandbox_apply_operation_not_permitted");
 });
 
 test("Verify rejects every target rebind before a turn and cleans its one-shot context", async () => {
