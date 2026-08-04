@@ -258,17 +258,21 @@ async function startBuiltConductor({ configPath, launcherSocketPath: socketPath 
   const close = waitForClose(connection);
   let settled = false;
   let stopping = false;
+  let stopped = false;
   let runtimeFailure;
   let resolveFailure;
+  let resolveExit;
   let resolveReady;
   let rejectReady;
   const failure = new Promise((resolve) => { resolveFailure = resolve; });
+  const exit = new Promise((resolve) => { resolveExit = resolve; });
   const ready = new Promise((resolve, reject) => {
     resolveReady = resolve;
     rejectReady = reject;
   });
   const fail = (error) => {
     runtimeFailure ??= error;
+    resolveExit(Object.freeze({ status: "failed", error: runtimeFailure }));
     if (!settled) {
       settled = true;
       rejectReady(error);
@@ -284,6 +288,9 @@ async function startBuiltConductor({ configPath, launcherSocketPath: socketPath 
     if (value.event === "conductor_ready" && !settled) {
       settled = true;
       resolveReady();
+    } else if (value.event === "conductor_stopped") {
+      stopped = true;
+      resolveExit(Object.freeze({ status: "stopped" }));
     } else {
       const eventFailure = conductorFailureFromEvent(value);
       if (eventFailure !== undefined) fail(eventFailure);
@@ -296,9 +303,10 @@ async function startBuiltConductor({ configPath, launcherSocketPath: socketPath 
   connection.once("error", () => fail(runnerError("conductor_start_failed")));
   connection.once("close", () => {
     if (!settled) fail(runnerError("conductor_start_failed"));
-    else if (!stopping && runtimeFailure === undefined) {
+    else if (!stopping && !stopped && runtimeFailure === undefined) {
       runtimeFailure = runnerError("conductor_exited");
       resolveFailure(runtimeFailure);
+      resolveExit(Object.freeze({ status: "failed", error: runtimeFailure }));
     }
   });
 
@@ -316,6 +324,7 @@ async function startBuiltConductor({ configPath, launcherSocketPath: socketPath 
 
   return Object.freeze({
     waitForFailure: async () => { throw await failure; },
+    waitForExit: async () => await exit,
     stop: async () => {
       stopping = true;
       const forced = await closeLauncher(connection, close, STOP_TIMEOUT_MS);
@@ -382,6 +391,17 @@ function productManager(launcherSocketPath, productHandles, startProduct) {
             throw runnerError("conductor_runtime_failed");
           }
           throw runnerError("conductor_exited");
+        },
+        waitForExit: async () => {
+          if (typeof handle.waitForExit !== "function") {
+            throw runnerError("conductor_exit_observation_unavailable");
+          }
+          try {
+            return await handle.waitForExit();
+          } catch (error) {
+            if (isRunnerError(error)) throw error;
+            throw runnerError("conductor_runtime_failed");
+          }
         },
       });
     },

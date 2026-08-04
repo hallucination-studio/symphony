@@ -241,6 +241,52 @@ test("deployment launcher injects the production credential outside runner reque
   assert.equal((await readFile(fakeConductorPath, "utf8")).includes(secretValues.product), false);
 });
 
+test("runner observes normal built-process exit and keeps shutdown idempotent", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const socketPath = path.join(directory, "launcher.sock");
+  const envPath = path.join(directory, ".env");
+  const configPath = path.join(directory, "conductor.json");
+  await writeFile(envPath, envSource({
+    ...requiredEnvironment,
+    SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET: socketPath,
+  }), { mode: 0o600 });
+  await writeFile(configPath, "{}", { mode: 0o600 });
+
+  const server = createServer((connection) => {
+    let buffered = "";
+    connection.setEncoding("utf8");
+    connection.on("data", (chunk) => {
+      buffered += chunk;
+      let newline = buffered.indexOf("\n");
+      while (newline >= 0) {
+        const request = JSON.parse(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        if (request.type === "start") {
+          connection.write(`${JSON.stringify({ event: "conductor_ready" })}\n`);
+          setImmediate(() => {
+            connection.write(`${JSON.stringify({ event: "conductor_stopped" })}\n`);
+            connection.end();
+          });
+        }
+        newline = buffered.indexOf("\n");
+      }
+    });
+  });
+  server.listen(socketPath);
+  await once(server, "listening");
+  t.after(() => server.close());
+
+  const result = await runBlackBoxScenario({
+    envPath,
+    scenario: async ({ product }) => {
+      const running = await product.start(configPath);
+      const exit = await running.waitForExit();
+      assert.deepEqual(exit, { status: "stopped" });
+    },
+  });
+  assert.equal(result, undefined);
+});
+
 test("runner sanitizes untrusted fixture and product failures", async (t) => {
   const directory = await temporaryDirectory(t);
   const envPath = path.join(directory, ".env");
