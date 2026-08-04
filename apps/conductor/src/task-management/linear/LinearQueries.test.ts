@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
+import { renderTaskIssueRecordProjectionMarkdown } from "../../contracts/cycle-record-markdown.js";
 import { parseRootIssueId, parseRuntimeGeneration, parseTaskIssueId } from "../../contracts/identity.js";
+import { canonicalTaskRevision } from "../../contracts/task-management.js";
 import { parseTaskMcpCall } from "../mcp/TaskMcpSchemas.js";
 import {
   LinearQueries,
@@ -263,6 +266,29 @@ test("startup inventory paginates every Root without delegate filtering in stabl
   ]);
 });
 
+test("inventory accepts provider Markdown descriptions with line breaks", async () => {
+  const client = new FakeLinearQueryClient();
+  client.teamIssues = [issue("root-1", null, "Todo", ["symphony:kind/root"], {
+    description: "# Requirement\n\nPreserve the provider Markdown document.",
+  })];
+
+  const roots = await new LinearQueries(client, options()).inventoryRoots();
+  assert.deepEqual(roots.map(({ root_id }) => root_id), ["root-1"]);
+});
+
+test("inventory ignores unmanaged historical HTML documents when selecting Roots", async () => {
+  const client = new FakeLinearQueryClient();
+  client.teamIssues = [
+    issue("unmanaged", null, "Todo", [], {
+      description: "<details>\n<summary>Historical template</summary>\n\nLegacy body\n</details>",
+    }),
+    issue("root-1", null, "Todo", ["symphony:kind/root"]),
+  ];
+
+  const roots = await new LinearQueries(client, options()).inventoryRoots();
+  assert.deepEqual(roots.map(({ root_id }) => root_id), ["root-1"]);
+});
+
 test("complete Root reads preserve delegation changes for admission consumers", async () => {
   const client = new FakeLinearQueryClient();
   client.issues.set("root-1", issue("root-1", null, "Todo", ["symphony:kind/root"], {
@@ -301,6 +327,162 @@ test("complete Root snapshot includes every descendant and internal relation wit
   assert.deepEqual(snapshot.issues.map(({ issue_id }) => issue_id), ["cycle-1", "root-1", "verify-1", "work-1"]);
   assert.deepEqual(snapshot.relations.map(({ relation_id }) => relation_id), ["relation:1"]);
   assert.equal("active_cycle" in snapshot, false);
+});
+
+test("complete Root snapshots preserve normalized history, creation evidence, and sanitized record observations", async () => {
+  const client = new FakeLinearQueryClient();
+  const root = issue("root-1", null, "In Progress", ["symphony:kind/root"]);
+  const cycle = issue("cycle-1", "root-1", "In Progress", ["symphony:kind/cycle"]);
+  const work = issue("work-1", "cycle-1", "Done", ["symphony:kind/work"]);
+  const verify = issue("verify-1", "cycle-1", "Todo", ["symphony:kind/verify"]);
+  client.issues.set("root-1", root);
+  client.children.set("root-1", [cycle]);
+  client.children.set("cycle-1", [work, verify]);
+  client.children.set("work-1", []);
+  client.children.set("verify-1", []);
+
+  const relation = {
+    id: "relation:1",
+    revision: "revision:relation:1",
+    type: "blocks",
+    source_issue_id: "work-1",
+    target_issue_id: "verify-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    archived: false,
+  };
+  client.relations.set("work-1", [relation]);
+  client.relations.set("verify-1", [relation]);
+  client.histories.set("work-1", [{
+    id: "history:work:1",
+    issue_id: "work-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:01.000Z",
+    actor_id: ACTOR_ID,
+    changed_fields: ["status"],
+    from_state_id: "state:todo",
+    to_state_id: "state:done",
+    from_parent_id: "cycle-1",
+    to_parent_id: "cycle-1",
+    added_label_ids: [],
+    removed_label_ids: [],
+    archived: null,
+    trashed: null,
+    relation_changes: [],
+  }]);
+
+  const projection = renderTaskIssueRecordProjectionMarkdown({
+    issue_id: "work-1",
+    cycle_id: "cycle-1",
+    basis_issue_revision: `symphony:v1:${"a".repeat(64)}`,
+    basis_status: "In Progress",
+    basis_document_digest: "b".repeat(64),
+    record_kind: "stage_invalidation",
+    stage_id: "work-1",
+    observed_status: "Done",
+    observed_instruction_digest: "c".repeat(64),
+    observed_completion_record_digest: null,
+    observed_history_digest: "d".repeat(64),
+    reason_code: "terminal_without_record",
+    reason_markdown: "The terminal projection lacks a valid record.",
+    invalidation_kind: "invalid_terminal",
+    terminal_status: "Done",
+  });
+  const recordBodyDigest = createHash("sha256").update(projection, "utf8").digest("hex");
+  client.comments.set("work-1", [{
+    id: "record:work:invalidation:1",
+    issue_id: "work-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    edited_at: null,
+    archived_at: null,
+    actor_id: ACTOR_ID,
+    body_markdown: projection,
+    body_digest: recordBodyDigest,
+  }]);
+  client.comments.set("verify-1", [{
+    id: "record:verify:invalidation:edited",
+    issue_id: "verify-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:01.000Z",
+    edited_at: "2026-07-30T00:00:01.000Z",
+    archived_at: null,
+    actor_id: ACTOR_ID,
+    body_markdown: renderTaskIssueRecordProjectionMarkdown({
+      issue_id: "verify-1",
+      cycle_id: "cycle-1",
+      basis_issue_revision: `symphony:v1:${"e".repeat(64)}`,
+      basis_status: "Todo",
+      basis_document_digest: "f".repeat(64),
+      record_kind: "stage_invalidation",
+      stage_id: "verify-1",
+      observed_status: "Canceled",
+      observed_instruction_digest: "1".repeat(64),
+      observed_completion_record_digest: null,
+      observed_history_digest: "2".repeat(64),
+      reason_code: "terminal_without_record",
+      reason_markdown: "The terminal projection lacks a valid record.",
+      invalidation_kind: "invalid_terminal",
+      terminal_status: "Canceled",
+    }),
+    body_digest: "3".repeat(64),
+  }]);
+  client.comments.set("root-1", [{
+    id: "comment:ordinary",
+    issue_id: "root-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-30T00:00:00.000Z",
+    edited_at: null,
+    archived_at: null,
+    actor_id: "actor:human",
+    body_markdown: "private ordinary body",
+    body_digest: "4".repeat(64),
+  }]);
+
+  const snapshot = await new LinearQueries(client, options()).readRootSnapshot(parseRootIssueId("root-1"));
+  const history = snapshot.issue_history.find(({ history_id }) => history_id === "history:work:1");
+  assert.deepEqual(history && {
+    issue_id: history.issue_id,
+    from_status: history.from_status,
+    to_status: history.to_status,
+    from_parent_issue_id: history.from_parent_issue_id,
+    to_parent_issue_id: history.to_parent_issue_id,
+  }, {
+    issue_id: "work-1",
+    from_status: "Todo",
+    to_status: "Done",
+    from_parent_issue_id: "cycle-1",
+    to_parent_issue_id: "cycle-1",
+  });
+
+  const issueEvidence = snapshot.resource_creation_evidence.find(({ resource_id }) => resource_id === "work-1");
+  assert.ok(issueEvidence);
+  assert.equal(issueEvidence?.resource_kind, "issue");
+  assert.equal(issueEvidence?.canonical_evidence_digest, canonicalTaskRevision({
+    evidence_id: "linear:issue:work-1",
+    resource_kind: "issue",
+    resource_id: "work-1",
+    creation_actor_id: ACTOR_ID,
+    provider_created_at: "2026-07-30T00:00:00.000Z",
+    evidence_source: "current_resource",
+  }));
+  assert.ok(snapshot.resource_creation_evidence.some(({ resource_id }) => resource_id === "relation:1"));
+
+  assert.equal(snapshot.issue_record_observations.length, 2);
+  assert.equal(snapshot.issue_record_observations.some((record) => record.record_id === "record:work:invalidation:1"), true);
+  const edited = snapshot.issue_record_observations.find(({ record_id }) => record_id === "record:verify:invalidation:edited");
+  assert.ok(edited !== undefined && "observation_kind" in edited);
+  if (edited === undefined || !("observation_kind" in edited)) return;
+  assert.deepEqual({
+    observation_kind: edited.observation_kind,
+    expected_record_kind: edited.expected_record_kind,
+    observed_body_digest: edited.observed_body_digest,
+  }, {
+    observation_kind: "updated",
+    expected_record_kind: "stage_invalidation",
+    observed_body_digest: "3".repeat(64),
+  });
+  assert.equal(JSON.stringify(snapshot).includes("private ordinary body"), false);
 });
 
 test("complete Root snapshots require service-actor creation evidence for every Stage", async () => {

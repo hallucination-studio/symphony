@@ -1,5 +1,6 @@
 import {
   parseCorrelationId,
+  parseCycleIssueId,
   parseObservationDigest,
   parseRepositoryId,
   parseRevision,
@@ -9,6 +10,7 @@ import {
   parseTaskIssueId,
   parseTaskDigest,
   type CorrelationId,
+  type CycleIssueId,
   type ObservationDigest,
   type RepositoryId,
   type Revision,
@@ -83,6 +85,25 @@ export interface RootBootstrap {
   readonly observed_at: string;
   readonly task: TaskSnapshot;
   readonly git: GitSnapshot;
+}
+
+export type RootBoundaryRouteId = "WF-ROUTE-001" | "WF-ROUTE-002" | "WF-ROUTE-005" | "WF-ROUTE-007" | "WF-ROUTE-008";
+
+export type RootBoundaryRouting =
+  | { readonly disposition: "root_boundary"; readonly selected_route: "WF-ROUTE-001"; readonly active_cycle_id: null }
+  | { readonly disposition: "root_boundary"; readonly selected_route: "WF-ROUTE-002" | "WF-ROUTE-005" | "WF-ROUTE-007"; readonly active_cycle_id: CycleIssueId }
+  | { readonly disposition: "root_boundary"; readonly selected_route: "WF-ROUTE-008"; readonly active_cycle_id: null; readonly predecessor_cycle_id: CycleIssueId };
+
+export interface RootSemanticSnapshot {
+  readonly schema_version: SchemaVersion;
+  readonly root_id: RootIssueId;
+  readonly runtime_generation: RuntimeGeneration;
+  readonly correlation_id: CorrelationId;
+  readonly observed_at: string;
+  readonly task: TaskSnapshot;
+  readonly git: GitSnapshot;
+  readonly routing: RootBoundaryRouting;
+  readonly notification: TaskObservationEvent | null;
 }
 
 type ScalarTaskFieldChange =
@@ -183,6 +204,63 @@ export function parseRootBootstrap(value: unknown, expected: RuntimeTarget): Roo
     observed_at: parseTimestamp(record.observed_at, "invalid_observed_at"),
     task,
     git: parseGitSnapshot(record.git),
+  });
+}
+
+function parseRootBoundaryRouting(value: unknown): RootBoundaryRouting {
+  const record = asRecord(value);
+  if (record.disposition !== "root_boundary") throw new Error("invalid_root_routing_disposition");
+  const selectedRoute = parseEnum(record.selected_route, [
+    "WF-ROUTE-001", "WF-ROUTE-002", "WF-ROUTE-005", "WF-ROUTE-007", "WF-ROUTE-008",
+  ] as const);
+  if (selectedRoute === "WF-ROUTE-001") {
+    assertExactKeys(record, ["disposition", "selected_route", "active_cycle_id"]);
+    if (record.active_cycle_id !== null) throw new Error("invalid_root_active_cycle");
+    return Object.freeze({ disposition: "root_boundary", selected_route: selectedRoute, active_cycle_id: null });
+  }
+  if (selectedRoute === "WF-ROUTE-008") {
+    assertExactKeys(record, ["disposition", "selected_route", "active_cycle_id", "predecessor_cycle_id"]);
+    if (record.active_cycle_id !== null) throw new Error("invalid_root_active_cycle");
+    return Object.freeze({
+      disposition: "root_boundary",
+      selected_route: selectedRoute,
+      active_cycle_id: null,
+      predecessor_cycle_id: parseCycleIssueId(record.predecessor_cycle_id),
+    });
+  }
+  assertExactKeys(record, ["disposition", "selected_route", "active_cycle_id"]);
+  return Object.freeze({
+    disposition: "root_boundary",
+    selected_route: selectedRoute,
+    active_cycle_id: parseCycleIssueId(record.active_cycle_id),
+  });
+}
+
+export function parseRootSemanticSnapshot(value: unknown, expected: RuntimeTarget): RootSemanticSnapshot {
+  const record = asRecord(value);
+  assertExactKeys(record, [
+    "schema_version", "root_id", "runtime_generation", "correlation_id", "observed_at",
+    "task", "git", "routing", "notification",
+  ]);
+  const rootId = parseRootIssueId(record.root_id);
+  const runtimeGeneration = parseRuntimeGeneration(record.runtime_generation);
+  assertRuntimeTarget({ root_id: rootId, runtime_generation: runtimeGeneration }, expected);
+  const task = parseTaskSnapshot(record.task);
+  if (task.root_id !== rootId) throw new Error("semantic_snapshot_root_mismatch");
+  const notification = parseNullable(record.notification, parseTaskObservationEvent);
+  if (notification !== null && notification.root_id !== rootId) {
+    throw new Error("semantic_snapshot_notification_root_mismatch");
+  }
+  return Object.freeze({
+    schema_version: parseSchemaVersion(record.schema_version),
+    root_id: rootId,
+    runtime_generation: runtimeGeneration,
+    correlation_id: parseCorrelationId(record.correlation_id),
+    observed_at: parseTimestamp(record.observed_at, "invalid_observed_at"),
+    task,
+    git: parseGitSnapshot(record.git),
+    routing: parseRootBoundaryRouting(record.routing),
+    notification,
   });
 }
 

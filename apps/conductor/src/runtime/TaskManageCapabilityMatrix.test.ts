@@ -31,14 +31,12 @@ import {
   RootTaskManageBindingError,
   bindRootTaskManageCommand,
 } from "./RootTaskManageCommand.js";
-import { createAcceptedRevisionAuthority } from "./RootAcceptedRevision.js";
 
 const rootId = parseRootIssueId("ROOT-A");
 const generation = parseRuntimeGeneration(7);
 const correlationId = parseCorrelationId("corr:root:7");
 const execution: TaskManageBoundaryExecution = { assertActive: () => undefined };
 const callerAuthority = createTaskManageCallerAuthority();
-const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
 
 const workflow = parseTaskWorkflowIdentities({
   labels: {
@@ -261,7 +259,6 @@ test("Root denies approved Cycle, Stage graph, and active Stage mutations before
     record_reader: { readIssueRecordComments: async () => [] },
     service_actor_id: "actor:symphony",
     approved_cycle_reader: { readApprovedCycle: async () => null },
-    accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   }).forCorrelation(correlationId);
 
   const attempts = [

@@ -236,6 +236,9 @@ function snapshot(options: SnapshotOptions = {}): CycleExecutionSnapshot {
       ? null
       : executionStage(sealedGraph.verify_issue, options.verifyStatus ?? "todo"),
     sealed_relations: sealedGraph.relations,
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: {
       repository_id: "repo:symphony",
       base_branch: "main",
@@ -276,6 +279,9 @@ test("Cycle reducer maps every non-active Cycle lifecycle state explicitly", () 
     sealed_work_issues: [],
     verify_issue: null,
     sealed_relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: valid.git,
   }, {
     root_id: rootId,

@@ -4,9 +4,16 @@ import { parseObservationDigest, type ObservationDigest } from "../contracts/ide
 import type {
   ConcreteGitChange,
   GitSnapshot,
+  RootBoundaryRouting,
 } from "../contracts/observation.js";
 import type { TaskSnapshot } from "../contracts/task-management.js";
 import { canonicalTaskSnapshot } from "./TaskFacts.js";
+
+export const DEFAULT_ROOT_BOUNDARY_ROUTING = Object.freeze({
+  disposition: "root_boundary",
+  selected_route: "WF-ROUTE-001",
+  active_cycle_id: null,
+} as const satisfies RootBoundaryRouting);
 
 function canonicalGitSnapshot(snapshot: GitSnapshot) {
   return {
@@ -28,11 +35,32 @@ function canonicalGitSnapshot(snapshot: GitSnapshot) {
   };
 }
 
-export function rootObservationDigest(task: TaskSnapshot, git: GitSnapshot): ObservationDigest {
+function canonicalRootBoundaryRouting(routing: RootBoundaryRouting) {
+  if (routing.selected_route === "WF-ROUTE-008") {
+    return {
+      disposition: "root_boundary",
+      selected_route: routing.selected_route,
+      active_cycle_id: null,
+      predecessor_cycle_id: routing.predecessor_cycle_id,
+    };
+  }
+  return {
+    disposition: "root_boundary",
+    selected_route: routing.selected_route,
+    active_cycle_id: routing.active_cycle_id,
+  };
+}
+
+export function rootObservationDigest(
+  task: TaskSnapshot,
+  git: GitSnapshot,
+  routing: RootBoundaryRouting = DEFAULT_ROOT_BOUNDARY_ROUTING,
+): ObservationDigest {
   const canonical = JSON.stringify({
     schema_version: 1,
     task: canonicalTaskSnapshot(task),
     git: canonicalGitSnapshot(git),
+    routing: canonicalRootBoundaryRouting(routing),
   });
   const digest = createHash("sha256")
     .update("symphony:root-observation:v1\0")

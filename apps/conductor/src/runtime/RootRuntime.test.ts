@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   parseCorrelationId,
+  parseCycleIssueId,
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
@@ -21,7 +22,11 @@ import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { taskSnapshotDigest } from "../observation/TaskFacts.js";
 import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
-import { RootRuntime, type RootRuntimeBinding } from "./RootRuntime.js";
+import {
+  RootRuntime,
+  type DeliveryFinalizerResult,
+  type RootRuntimeBinding,
+} from "./RootRuntime.js";
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(1);
@@ -116,7 +121,7 @@ function binding(run: RootReconcillInterface["run"]): RootRuntimeBinding {
     workspace,
     cycle: rootAvailableCycle(),
     git: {
-      read: async () => parseGitSnapshot({
+      readRoot: async () => parseGitSnapshot({
         repository_id: workspace.repository_id,
         base_branch: workspace.base_branch,
         head_branch: workspace.head_branch,
@@ -127,6 +132,15 @@ function binding(run: RootReconcillInterface["run"]): RootRuntimeBinding {
       }),
     },
     turn,
+  });
+}
+
+function deliveryRoute(routeId: "WF-ROUTE-010" | "WF-ROUTE-012" = "WF-ROUTE-010") {
+  return Object.freeze({
+    route_id: routeId,
+    priority: routeId === "WF-ROUTE-010" ? 70 : 30,
+    consumer: "delivery_finalizer" as const,
+    cycle_id: parseCycleIssueId("CYCLE-1"),
   });
 }
 
@@ -172,6 +186,115 @@ test("runtime accepts observations only after quiescent or stopped Root outcomes
     if (adjacent.kind !== "diff") continue;
     assert.equal(adjacent.root_input.from_observation_digest, prepared.observation_digest);
   }
+});
+
+test("root-boundary routes receive a complete semantic snapshot with accepted continuity", async () => {
+  const initial = task("revision:root:1", "Initial");
+  const latest = task("revision:root:2", "Latest");
+  const runtime = new RootRuntime(binding(async (input) => outcome(input.correlation_id, "quiescent")));
+
+  const bootstrap = await runtime.prepare(event(initial, "corr:root-boundary:1"));
+  assert.equal(bootstrap.kind, "bootstrap");
+  if (bootstrap.kind !== "bootstrap") return;
+  await runtime.run(bootstrap);
+  runtime.accept(bootstrap);
+
+  const snapshot = await runtime.prepare(
+    event(latest, "corr:root-boundary:2", initial),
+    "root_boundary",
+  );
+  assert.equal(snapshot.kind, "semantic_snapshot");
+  if (snapshot.kind !== "semantic_snapshot") return;
+  assert.deepEqual(snapshot.root_input.task, latest);
+  assert.deepEqual(snapshot.root_input.routing, {
+    disposition: "root_boundary",
+    selected_route: "WF-ROUTE-001",
+    active_cycle_id: null,
+  });
+});
+
+test("external terminal routing forwards the exact Cycle identity to the Cycle host", async () => {
+  let selectedCycleId: string | undefined;
+  const created = binding(async (input) => outcome(input.correlation_id, "quiescent"));
+  const runtime = new RootRuntime({
+    ...created,
+    cycle: {
+      ...rootAvailableCycle(),
+      prepare: async (_task, _correlationId, _previous, _closure, cycleId) => {
+        selectedCycleId = cycleId;
+        return Object.freeze({ kind: "root_available" });
+      },
+    },
+  });
+
+  const preparation = await runtime.prepare(event(task("revision:root:1", "Terminal"), "corr:external-terminal"), {
+    route_id: "WF-ROUTE-018",
+    priority: 15,
+    consumer: "cycle_machine",
+    cycle_id: parseCycleIssueId("CYCLE-1"),
+  });
+
+  assert.equal(preparation.kind, "paused");
+  assert.equal(selectedCycleId, "CYCLE-1");
+});
+
+test("delivery routes prepare and run an independent finalizer without a Root turn", async () => {
+  let turns = 0;
+  const preparedInputs: string[] = [];
+  const finalizerResults: DeliveryFinalizerResult[] = [];
+  const created = binding(async (input) => {
+    turns += 1;
+    return outcome(input.correlation_id, "quiescent");
+  });
+  const runtime = new RootRuntime({
+    ...created,
+    delivery_finalizer: {
+      prepare: async ({ task: observedTask, route, correlation_id, runtime_generation }) => {
+        preparedInputs.push(`${observedTask.root_id}:${route.route_id}:${correlation_id}`);
+        return Object.freeze({
+          kind: "delivery_finalizer" as const,
+          root_id: rootId,
+          runtime_generation,
+          correlation_id,
+          selected_route: route.route_id as "WF-ROUTE-010" | "WF-ROUTE-012",
+          cycle_id: route.cycle_id!,
+        });
+      },
+      run: async (prepared) => {
+        const result = Object.freeze({
+          kind: "delivery_finalizer_result" as const,
+          root_id: prepared.root_id,
+          runtime_generation: prepared.runtime_generation,
+          correlation_id: prepared.correlation_id,
+          selected_route: prepared.selected_route,
+          cycle_id: prepared.cycle_id,
+          outcome: "delivery_completed" as const,
+        });
+        finalizerResults.push(result);
+        return result;
+      },
+    },
+  });
+
+  const prepared = await runtime.prepare(
+    event(task("revision:root:1", "Accepted"), "corr:delivery"),
+    deliveryRoute(),
+  );
+
+  assert.equal(prepared.kind, "delivery_finalizer");
+  if (prepared.kind !== "delivery_finalizer") return;
+  assert.deepEqual(preparedInputs, ["LIN-1:WF-ROUTE-010:corr:delivery"]);
+  assert.deepEqual(await runtime.runDeliveryFinalizer(prepared), {
+    kind: "delivery_finalizer_result",
+    root_id: rootId,
+    runtime_generation: generation,
+    correlation_id: "corr:delivery",
+    selected_route: "WF-ROUTE-010",
+    cycle_id: "CYCLE-1",
+    outcome: "delivery_completed",
+  });
+  assert.equal(turns, 0);
+  assert.equal(finalizerResults.length, 1);
 });
 
 test("runtime rejects acceptance after timed out or canceled outcomes", async () => {

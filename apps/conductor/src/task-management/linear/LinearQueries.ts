@@ -1,4 +1,9 @@
 import {
+  parseTaskIssueRecordProjectionMarkdown,
+  projectTaskIssueRecord,
+} from "../../contracts/cycle-record-markdown.js";
+import { parseTaskIssueRecord } from "../../contracts/cycle-records.js";
+import {
   parseRootIssueId,
   parseTaskIssueId,
   parseTaskLabelId,
@@ -11,10 +16,16 @@ import {
 import type { TaskChangeOriginEvidence } from "../../contracts/observation.js";
 import {
   canonicalTaskRevision,
+  parseTaskIssueHistoryEntry,
   parseTaskIssueSnapshotChange,
+  parseTaskResourceCreationEvidence,
   parseTaskRelationSnapshot,
   parseTaskSnapshot,
   parseTaskWorkflowStateMap,
+  TASK_WORKFLOW_STATUSES,
+  type TaskIssueHistoryEntry,
+  type TaskIssueRecordObservation,
+  type TaskResourceCreationEvidence,
   type TaskKind,
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
@@ -22,7 +33,13 @@ import {
   type TaskWorkflowStateMap,
   type TaskWorkflowStatus,
 } from "../../contracts/task-management.js";
-import { asRecord, assertExactKeys, parseArray, parseBoundedString, parseEnum } from "../../contracts/validation.js";
+import {
+  asRecord,
+  assertExactKeys,
+  parseArray,
+  parseBoundedString,
+  parseEnum,
+} from "../../contracts/validation.js";
 import type {
   GetIssueCall,
   GetIssueResult,
@@ -44,12 +61,16 @@ const INTERNAL_PAGE_SIZE = 50;
 const MAX_PAGES = 100;
 const MAX_NODES = 5_000;
 const KIND_PREFIX = "symphony:kind/";
-const ROOT_STATUSES = ["Todo", "In Progress", "In Review", "Done"] as const;
+const ROOT_STATUSES = ["Todo", "In Progress", "In Review", "Done", "Failed"] as const;
 const CYCLE_STATUSES = [
   "Draft", "In Progress", "Awaiting Acceptance", "Succeeded", "Rejected", "Failed", "Canceled",
 ] as const;
 const STAGE_KINDS = ["plan", "work", "verify"] as const;
 const STAGE_STATUSES = ["Todo", "In Progress", "Done", "Failed", "Canceled"] as const;
+const RECORD_KINDS = [
+  "root_family_invalidation", "cycle_approval", "stage_completion", "stage_invalidation",
+  "cycle_completion", "cycle_invalidation", "delivery_completion", "delivery_invalidation",
+] as const;
 
 export interface LinearQueryClient {
   getIssue(issueId: string): Promise<unknown>;
@@ -168,6 +189,24 @@ function parseNullableText(value: unknown, code: string, max: number): string | 
   return value === null ? null : parseBoundedString(value, code, max);
 }
 
+function parseProviderDescription(value: unknown): string | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 100_000
+    || value.includes("\0")
+  ) return fail("invalid_linear_issue_description");
+  return value;
+}
+
+function parseProviderCommentBody(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 100_000 || value.includes("\0")) {
+    return fail("invalid_linear_comment_body");
+  }
+  return value;
+}
+
 function parsePriority(value: unknown): number | null {
   if (value === null) return null;
   if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 4) {
@@ -194,7 +233,7 @@ function parseIssue(value: unknown): LinearIssueRecord {
       issueId: parseTaskIssueId(record.id),
       statusId: parseTaskStateId(record.status),
       title: parseBoundedString(record.title, "invalid_linear_issue_title", 1_024),
-      descriptionMarkdown: parseNullableText(record.description, "invalid_linear_issue_description", 100_000) ?? "# Empty",
+      descriptionMarkdown: parseProviderDescription(record.description) ?? "# Empty",
       parentIssueId: record.parent_id === null ? null : parseTaskIssueId(record.parent_id),
       labelIds: Object.freeze(labels.map(parseTaskLabelId)),
       delegateId: record.delegate_id === null
@@ -339,7 +378,7 @@ function parseComment(value: unknown): CommentRecord {
       provider_edited_at: nullableTimestamp(record.edited_at),
       provider_archived_at: nullableTimestamp(record.archived_at),
       actor_id: record.actor_id === null ? null : parseBoundedString(record.actor_id, "invalid_linear_actor_id", 128),
-      body_markdown: parseBoundedString(record.body_markdown, "invalid_linear_comment_body", 100_000),
+      body_markdown: parseProviderCommentBody(record.body_markdown),
       body_digest: digest,
     });
   });
@@ -426,6 +465,122 @@ function parseProviderEnum<const T extends readonly string[]>(value: unknown, al
   return providerPayload(() => parseEnum(value, allowed));
 }
 
+function historyStatus(
+  stateNames: ReadonlyMap<string, string>,
+  stateId: string | null,
+): typeof TASK_WORKFLOW_STATUSES[number] | null {
+  if (stateId === null) return null;
+  const name = stateNames.get(stateId);
+  if (name === undefined) fail("linear_unknown_history_state");
+  return parseProviderEnum(name, TASK_WORKFLOW_STATUSES);
+}
+
+function normalizedHistory(
+  entry: LinearIssueHistoryEvidence,
+  stateNames: ReadonlyMap<string, string>,
+): TaskIssueHistoryEntry {
+  return parseTaskIssueHistoryEntry({
+    history_id: entry.history_id,
+    issue_id: parseTaskIssueId(entry.issue_id),
+    provider_created_at: entry.provider_created_at,
+    provider_updated_at: entry.provider_updated_at,
+    actor_id: entry.actor_id,
+    change_origin: entry.change_origin,
+    changed_fields: entry.changed_fields,
+    from_status: historyStatus(stateNames, entry.from_state_id),
+    to_status: historyStatus(stateNames, entry.to_state_id),
+    from_parent_issue_id: entry.from_parent_id === null ? null : parseTaskIssueId(entry.from_parent_id),
+    to_parent_issue_id: entry.to_parent_id === null ? null : parseTaskIssueId(entry.to_parent_id),
+    added_label_ids: entry.added_label_ids.map(parseTaskLabelId),
+    removed_label_ids: entry.removed_label_ids.map(parseTaskLabelId),
+    archived: entry.archived,
+    trashed: entry.trashed,
+    relation_changes: entry.relation_changes,
+  });
+}
+
+function issueCreationEvidence(evidence: LinearIssueCreationEvidence): TaskResourceCreationEvidence {
+  const fields = {
+    evidence_id: `linear:issue:${String(evidence.issue_id)}`,
+    resource_kind: "issue" as const,
+    resource_id: evidence.issue_id,
+    creation_actor_id: evidence.actor_id ?? fail("linear_missing_issue_creator"),
+    provider_created_at: evidence.provider_created_at,
+    evidence_source: "current_resource" as const,
+  };
+  return parseTaskResourceCreationEvidence({
+    ...fields,
+    canonical_evidence_digest: canonicalTaskRevision(fields),
+  });
+}
+
+function relationCreationEvidence(relation: TaskRelationSnapshot): TaskResourceCreationEvidence {
+  const fields = {
+    evidence_id: relation.creation_evidence_id,
+    resource_kind: "relation" as const,
+    resource_id: relation.relation_id,
+    creation_actor_id: relation.creation_actor_id,
+    provider_created_at: relation.provider_created_at,
+    evidence_source: "current_resource" as const,
+  };
+  return parseTaskResourceCreationEvidence({
+    ...fields,
+    canonical_evidence_digest: canonicalTaskRevision(fields),
+  });
+}
+
+function recordKind(projection: Record<string, unknown>): typeof RECORD_KINDS[number] | null {
+  try {
+    return parseEnum(projection.record_kind, RECORD_KINDS);
+  } catch {
+    return null;
+  }
+}
+
+function recordObservation(comment: CommentRecord): TaskIssueRecordObservation | null {
+  let projection: Record<string, unknown>;
+  try {
+    projection = parseTaskIssueRecordProjectionMarkdown(comment.body_markdown);
+  } catch {
+    return null;
+  }
+  const expectedRecordKind = recordKind(projection);
+  if (expectedRecordKind === null) return null;
+  const providerEvidence = {
+    comment_id: comment.comment_id,
+    issue_id: comment.issue_id,
+    provider_created_at: comment.provider_created_at,
+    provider_updated_at: comment.provider_updated_at,
+    provider_edited_at: comment.provider_edited_at,
+    provider_archived_at: comment.provider_archived_at,
+    actor_id: comment.actor_id,
+    body_digest: comment.body_digest,
+  };
+  try {
+    const projected = projectTaskIssueRecord(comment.body_markdown, providerEvidence);
+    return parseTaskIssueRecord(projected);
+  } catch {
+    const observationKind = comment.provider_archived_at !== null
+      ? "archived" as const
+      : comment.provider_edited_at !== null || comment.provider_updated_at !== comment.provider_created_at
+        ? "updated" as const
+        : "malformed" as const;
+    return Object.freeze({
+      record_id: comment.comment_id,
+      issue_id: parseTaskIssueId(comment.issue_id),
+      expected_record_kind: expectedRecordKind,
+      observation_kind: observationKind,
+      provider_created_at: comment.provider_created_at,
+      provider_updated_at: comment.provider_updated_at,
+      archived_at: comment.provider_archived_at,
+      observed_body_digest: comment.body_digest,
+      parse_error_code: observationKind === "archived"
+        ? "record_archived"
+        : observationKind === "updated" ? "record_updated" : "record_malformed",
+    });
+  }
+}
+
 export class LinearQueries {
   readonly #teamId: string;
   readonly #serviceActorId: string;
@@ -458,35 +613,11 @@ export class LinearQueries {
   }
 
   readIssueCreationEvidence(issueId: TaskIssueId): Promise<LinearIssueCreationEvidence> {
-    return this.#boundary(async () => {
-      const issue = await this.#issue(parseTaskIssueId(issueId));
-      this.#assertTeam([issue]);
-      if (issue.issueId !== issueId) fail("linear_issue_identity_mismatch");
-      return Object.freeze({
-        issue_id: issue.issueId,
-        provider_created_at: issue.createdAt,
-        actor_id: issue.creatorId,
-      });
-    });
+    return this.#boundary(() => this.#readIssueCreationEvidence(parseTaskIssueId(issueId)));
   }
 
   readIssueHistory(issueId: TaskIssueId): Promise<readonly LinearIssueHistoryEvidence[]> {
-    return this.#boundary(async () => {
-      const history = await this.#all(
-        (cursor) => this.client.listIssueHistory(issueId, cursor, INTERNAL_PAGE_SIZE),
-        parseHistory,
-      );
-      this.#assertUnique(history.map(({ history_id }) => history_id), "linear_duplicate_history_identity");
-      return Object.freeze(history.map((entry) => {
-        if (entry.issue_id !== issueId) fail("linear_history_issue_mismatch");
-        return Object.freeze({
-          ...entry,
-          change_origin: entry.actor_id === null
-            ? "unknown" as const
-            : entry.actor_id === this.#serviceActorId ? "symphony" as const : "external" as const,
-        });
-      }));
-    });
+    return this.#boundary(() => this.#readIssueHistory(parseTaskIssueId(issueId)));
   }
 
   readLatestIssueChangeOrigin(issueId: TaskIssueId): Promise<TaskChangeOriginEvidence | null> {
@@ -506,40 +637,11 @@ export class LinearQueries {
   }
 
   readIssueComments(issueId: TaskIssueId): Promise<readonly LinearIssueCommentEvidence[]> {
-    return this.#boundary(async () => {
-      const comments = await this.#all(
-        (cursor) => this.client.listIssueComments(issueId, cursor, INTERNAL_PAGE_SIZE),
-        parseComment,
-      );
-      this.#assertUnique(comments.map(({ comment_id }) => comment_id), "linear_duplicate_comment_identity");
-      return Object.freeze(comments.map((comment) => {
-        if (comment.issue_id !== issueId) fail("linear_comment_issue_mismatch");
-        return Object.freeze({
-          comment_id: comment.comment_id,
-          issue_id: comment.issue_id,
-          provider_created_at: comment.provider_created_at,
-          provider_updated_at: comment.provider_updated_at,
-          provider_edited_at: comment.provider_edited_at,
-          provider_archived_at: comment.provider_archived_at,
-          actor_id: comment.actor_id,
-          body_digest: comment.body_digest,
-        });
-      }));
-    });
+    return this.#boundary(() => this.#readIssueComments(parseTaskIssueId(issueId)));
   }
 
   readIssueRecordComments(issueId: TaskIssueId): Promise<readonly LinearIssueRecordComment[]> {
-    return this.#boundary(async () => {
-      const comments = await this.#all(
-        (cursor) => this.client.listIssueComments(issueId, cursor, INTERNAL_PAGE_SIZE),
-        parseComment,
-      );
-      this.#assertUnique(comments.map(({ comment_id }) => comment_id), "linear_duplicate_comment_identity");
-      return Object.freeze(comments.map((comment) => {
-        if (comment.issue_id !== issueId) fail("linear_comment_issue_mismatch");
-        return Object.freeze({ ...comment });
-      }));
-    });
+    return this.#boundary(() => this.#readIssueRecordComments(parseTaskIssueId(issueId)));
   }
 
   get_issue(call: GetIssueCall): Promise<GetIssueResult> {
@@ -741,17 +843,106 @@ export class LinearQueries {
           fail("linear_external_relation");
         }
       }
+      const issueFacts = await Promise.all(issues.map(async (issue) => {
+        const [history, comments] = await Promise.all([
+          this.#readIssueHistory(issue.issueId),
+          this.#readIssueRecordComments(issue.issueId),
+        ]);
+        return Object.freeze({
+          issue,
+          creation: Object.freeze({
+            issue_id: issue.issueId,
+            provider_created_at: issue.createdAt,
+            actor_id: issue.creatorId,
+          }),
+          history,
+          comments,
+        });
+      }));
+      const normalizedHistories = issueFacts
+        .flatMap(({ history }) => history.map((entry) => normalizedHistory(entry, stateNames)))
+        .sort((left, right) => left.history_id.localeCompare(right.history_id));
+      const creationEvidence = [
+        ...issueFacts.map(({ creation }) => issueCreationEvidence(creation)),
+        ...[...relations.values()].map(relationCreationEvidence),
+      ].sort((left, right) => left.evidence_id.localeCompare(right.evidence_id));
+      const recordObservations = issueFacts
+        .flatMap(({ comments }) => comments.map(recordObservation).filter(
+          (observation): observation is TaskIssueRecordObservation => observation !== null,
+        ))
+        .sort((left, right) => left.record_id.localeCompare(right.record_id));
       return parseTaskSnapshot({
         root_id: parsedRootId,
         workflow_state_map: await this.#workflowStateMap(),
         issues: issues.map((issue) => normalizedIssue(issue, stateNames, labelNames))
           .sort((left, right) => left.issue_id.localeCompare(right.issue_id)),
         relations: [...relations.values()].sort((left, right) => left.relation_id.localeCompare(right.relation_id)),
-        resource_creation_evidence: [],
-        issue_history: [],
-        issue_record_observations: [],
+        resource_creation_evidence: creationEvidence,
+        issue_history: normalizedHistories,
+        issue_record_observations: recordObservations,
       });
     });
+  }
+
+  async #readIssueCreationEvidence(issueId: TaskIssueId): Promise<LinearIssueCreationEvidence> {
+    const issue = await this.#issue(issueId);
+    this.#assertTeam([issue]);
+    if (issue.issueId !== issueId) fail("linear_issue_identity_mismatch");
+    return Object.freeze({
+      issue_id: issue.issueId,
+      provider_created_at: issue.createdAt,
+      actor_id: issue.creatorId,
+    });
+  }
+
+  async #readIssueHistory(issueId: TaskIssueId): Promise<readonly LinearIssueHistoryEvidence[]> {
+    const history = await this.#all(
+      (cursor) => this.client.listIssueHistory(issueId, cursor, INTERNAL_PAGE_SIZE),
+      parseHistory,
+    );
+    this.#assertUnique(history.map(({ history_id }) => history_id), "linear_duplicate_history_identity");
+    return Object.freeze(history.map((entry) => {
+      if (entry.issue_id !== issueId) fail("linear_history_issue_mismatch");
+      return Object.freeze({
+        ...entry,
+        change_origin: entry.actor_id === null
+          ? "unknown" as const
+          : entry.actor_id === this.#serviceActorId ? "symphony" as const : "external" as const,
+      });
+    }));
+  }
+
+  async #readIssueComments(issueId: TaskIssueId): Promise<readonly LinearIssueCommentEvidence[]> {
+    const comments = await this.#all(
+      (cursor) => this.client.listIssueComments(issueId, cursor, INTERNAL_PAGE_SIZE),
+      parseComment,
+    );
+    this.#assertUnique(comments.map(({ comment_id }) => comment_id), "linear_duplicate_comment_identity");
+    return Object.freeze(comments.map((comment) => {
+      if (comment.issue_id !== issueId) fail("linear_comment_issue_mismatch");
+      return Object.freeze({
+        comment_id: comment.comment_id,
+        issue_id: comment.issue_id,
+        provider_created_at: comment.provider_created_at,
+        provider_updated_at: comment.provider_updated_at,
+        provider_edited_at: comment.provider_edited_at,
+        provider_archived_at: comment.provider_archived_at,
+        actor_id: comment.actor_id,
+        body_digest: comment.body_digest,
+      });
+    }));
+  }
+
+  async #readIssueRecordComments(issueId: TaskIssueId): Promise<readonly LinearIssueRecordComment[]> {
+    const comments = await this.#all(
+      (cursor) => this.client.listIssueComments(issueId, cursor, INTERNAL_PAGE_SIZE),
+      parseComment,
+    );
+    this.#assertUnique(comments.map(({ comment_id }) => comment_id), "linear_duplicate_comment_identity");
+    return Object.freeze(comments.map((comment) => {
+      if (comment.issue_id !== issueId) fail("linear_comment_issue_mismatch");
+      return Object.freeze({ ...comment });
+    }));
   }
 
   async #issue(issueId: TaskIssueId): Promise<LinearIssueRecord> {

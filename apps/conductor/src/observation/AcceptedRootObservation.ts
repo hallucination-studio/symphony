@@ -10,25 +10,34 @@ import {
   parseGitSnapshot,
   parseRootBootstrap,
   parseRootFactDiff,
+  parseRootSemanticSnapshot,
   parseTaskObservationEvent,
   type GitSnapshot,
+  type RootBoundaryRouting,
   type RootBootstrap,
   type RootFactDiff,
+  type RootSemanticSnapshot,
 } from "../contracts/observation.js";
 import type { TaskSnapshot } from "../contracts/task-management.js";
 import type { RuntimeTarget } from "../contracts/runtime.js";
-import type { RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
-import { gitSnapshotChanges, rootObservationDigest } from "./RootObservationFacts.js";
+import type {
+  GitRootReadInterface,
+  RootWorkspaceIdentity,
+} from "../git/api/GitWorkspaceInterface.js";
+import {
+  DEFAULT_ROOT_BOUNDARY_ROUTING,
+  gitSnapshotChanges,
+  rootObservationDigest,
+} from "./RootObservationFacts.js";
 import { taskSnapshotChanges, taskSnapshotDigest } from "./TaskFacts.js";
 
-interface GitSnapshotReader {
-  read(identity: RootWorkspaceIdentity): Promise<GitSnapshot>;
-}
+type GitSnapshotReader = GitRootReadInterface;
 
 interface AcceptedFacts {
   readonly digest: ObservationDigest;
   readonly task: TaskSnapshot;
   readonly git: GitSnapshot;
+  readonly routing: RootBoundaryRouting;
 }
 
 export type PreparedRootObservation =
@@ -41,6 +50,11 @@ export type PreparedRootObservation =
     readonly kind: "diff";
     readonly observation_digest: ObservationDigest;
     readonly root_input: RootFactDiff;
+  }
+  | {
+    readonly kind: "semantic_snapshot";
+    readonly observation_digest: ObservationDigest;
+    readonly root_input: RootSemanticSnapshot;
   };
 
 export type RootObservationAttempt =
@@ -76,70 +90,48 @@ export class AcceptedRootObservation {
     return this.#accepted?.task ?? null;
   }
 
-  async prepareFresh(taskInput: unknown, workspace: RootWorkspaceIdentity): Promise<RootObservationAttempt> {
-    let taskEvent;
-    try {
-      taskEvent = parseTaskObservationEvent(taskInput);
-    } catch {
-      return Object.freeze({
-        kind: "paused",
-        error: boundaryError({
-          schema_version: 1,
-          code: "invalid_contract",
-          root_id: this.target.root_id,
-          runtime_generation: this.target.runtime_generation,
-          correlation_id: parseCorrelationId(this.#identityFactory()),
-          reason: "invalid_task_observation",
-        }),
-      });
+  async prepareFresh(
+    taskInput: unknown,
+    workspace: RootWorkspaceIdentity,
+    routing: RootBoundaryRouting = DEFAULT_ROOT_BOUNDARY_ROUTING,
+  ): Promise<RootObservationAttempt> {
+    const effectiveRouting = this.#accepted === null ? DEFAULT_ROOT_BOUNDARY_ROUTING : routing;
+    const result = await this.#readCurrent(taskInput, workspace, effectiveRouting);
+    if ("kind" in result) return result;
+    const { taskEvent, current } = result;
+    if (current.digest === this.#accepted?.digest) {
+      return Object.freeze({ kind: "unchanged", observation_digest: current.digest });
     }
-    if (taskEvent.root_id !== this.target.root_id || workspace.root_id !== this.target.root_id) {
-      return Object.freeze({
-        kind: "paused",
-        error: boundaryError({
+
+    const prepared: PreparedRootObservation = this.#accepted === null
+      ? Object.freeze({
+        kind: "bootstrap",
+        observation_digest: current.digest,
+        root_input: parseRootBootstrap({
           schema_version: 1,
-          code: "invalid_contract",
           root_id: this.target.root_id,
           runtime_generation: this.target.runtime_generation,
           correlation_id: taskEvent.correlation_id,
-          reason: "root_observation_target_mismatch",
-        }),
-      });
-    }
-    let git: GitSnapshot;
-    try {
-      git = parseGitSnapshot(await this.git.read(workspace));
-    } catch {
-      return Object.freeze({
-        kind: "paused",
-        error: boundaryError({
+          observed_at: taskEvent.observed_at,
+          task: current.task,
+          git: current.git,
+        }, this.target),
+      })
+      : Object.freeze({
+        kind: "semantic_snapshot",
+        observation_digest: current.digest,
+        root_input: parseRootSemanticSnapshot({
           schema_version: 1,
-          code: "boundary_unavailable",
           root_id: this.target.root_id,
           runtime_generation: this.target.runtime_generation,
           correlation_id: taskEvent.correlation_id,
-          reason: "git_snapshot_unavailable",
-        }),
+          observed_at: taskEvent.observed_at,
+          task: current.task,
+          git: current.git,
+          routing: current.routing,
+          notification: null,
+        }, this.target),
       });
-    }
-    const current = Object.freeze({
-      digest: rootObservationDigest(taskEvent.task, git),
-      task: taskEvent.task,
-      git,
-    });
-    const prepared = Object.freeze({
-      kind: "bootstrap" as const,
-      observation_digest: current.digest,
-      root_input: parseRootBootstrap({
-        schema_version: 1,
-        root_id: taskEvent.root_id,
-        runtime_generation: this.target.runtime_generation,
-        correlation_id: taskEvent.correlation_id,
-        observed_at: taskEvent.observed_at,
-        task: current.task,
-        git: current.git,
-      }, this.target),
-    });
     candidates.set(prepared, Object.freeze({
       owner: this,
       expected_digest: this.#accepted?.digest ?? null,
@@ -149,6 +141,58 @@ export class AcceptedRootObservation {
   }
 
   async prepare(taskInput: unknown, workspace: RootWorkspaceIdentity): Promise<RootObservationAttempt> {
+    const result = await this.#readCurrent(
+      taskInput,
+      workspace,
+      this.#accepted?.routing ?? DEFAULT_ROOT_BOUNDARY_ROUTING,
+    );
+    if ("kind" in result) return result;
+    const { taskEvent, current } = result;
+    if (current.digest === this.#accepted?.digest) {
+      return Object.freeze({ kind: "unchanged", observation_digest: current.digest });
+    }
+
+    const prepared: PreparedRootObservation = this.#accepted === null
+      ? Object.freeze({
+        kind: "bootstrap",
+        observation_digest: current.digest,
+        root_input: parseRootBootstrap({
+          schema_version: 1,
+          root_id: this.target.root_id,
+          runtime_generation: this.target.runtime_generation,
+          correlation_id: taskEvent.correlation_id,
+          observed_at: taskEvent.observed_at,
+          task: taskEvent.task,
+          git: current.git,
+        }, this.target),
+      })
+      : Object.freeze({
+        kind: "diff",
+        observation_digest: current.digest,
+        root_input: parseRootFactDiff({
+          schema_version: 1,
+          root_id: this.target.root_id,
+          runtime_generation: this.target.runtime_generation,
+          correlation_id: taskEvent.correlation_id,
+          from_observation_digest: this.#accepted.digest,
+          to_observation_digest: current.digest,
+          task_changes: taskSnapshotChanges(this.#accepted.task, taskEvent.task),
+          git_changes: gitSnapshotChanges(this.#accepted.git, current.git),
+        }, this.target),
+      });
+    candidates.set(prepared, Object.freeze({
+      owner: this,
+      expected_digest: this.#accepted?.digest ?? null,
+      current,
+    }));
+    return prepared;
+  }
+
+  async #readCurrent(
+    taskInput: unknown,
+    workspace: RootWorkspaceIdentity,
+    routing: RootBoundaryRouting,
+  ): Promise<{ readonly taskEvent: Awaited<ReturnType<typeof parseTaskObservationEvent>>; readonly current: AcceptedFacts } | RootObservationAttempt> {
     let taskEvent;
     try {
       taskEvent = parseTaskObservationEvent(taskInput);
@@ -167,7 +211,7 @@ export class AcceptedRootObservation {
 
     let rawGit: GitSnapshot;
     try {
-      rawGit = await this.git.read(workspace);
+      rawGit = await this.git.readRoot(workspace);
     } catch {
       return this.#paused("boundary_unavailable", "git_read_unavailable", taskEvent.correlation_id);
     }
@@ -195,49 +239,15 @@ export class AcceptedRootObservation {
       return this.#paused("invalid_contract", "git_pull_request_identity_mismatch", taskEvent.correlation_id);
     }
 
-    const current = Object.freeze({
-      digest: rootObservationDigest(taskEvent.task, git),
-      task: taskEvent.task,
-      git,
+    return Object.freeze({
+      taskEvent,
+      current: Object.freeze({
+        digest: rootObservationDigest(taskEvent.task, git, routing),
+        task: taskEvent.task,
+        git,
+        routing,
+      }),
     });
-    if (current.digest === this.#accepted?.digest) {
-      return Object.freeze({ kind: "unchanged", observation_digest: current.digest });
-    }
-
-    const prepared: PreparedRootObservation = this.#accepted === null
-      ? Object.freeze({
-        kind: "bootstrap",
-        observation_digest: current.digest,
-        root_input: parseRootBootstrap({
-          schema_version: 1,
-          root_id: this.target.root_id,
-          runtime_generation: this.target.runtime_generation,
-          correlation_id: taskEvent.correlation_id,
-          observed_at: taskEvent.observed_at,
-          task: taskEvent.task,
-          git,
-        }, this.target),
-      })
-      : Object.freeze({
-        kind: "diff",
-        observation_digest: current.digest,
-        root_input: parseRootFactDiff({
-          schema_version: 1,
-          root_id: this.target.root_id,
-          runtime_generation: this.target.runtime_generation,
-          correlation_id: taskEvent.correlation_id,
-          from_observation_digest: this.#accepted.digest,
-          to_observation_digest: current.digest,
-          task_changes: taskSnapshotChanges(this.#accepted.task, taskEvent.task),
-          git_changes: gitSnapshotChanges(this.#accepted.git, git),
-        }, this.target),
-      });
-    candidates.set(prepared, Object.freeze({
-      owner: this,
-      expected_digest: this.#accepted?.digest ?? null,
-      current,
-    }));
-    return prepared;
   }
 
   accept(prepared: PreparedRootObservation): void {

@@ -16,6 +16,7 @@ const config = {
     in_progress: "state:root:in-progress",
     in_review: "state:root:in-review",
     done: "state:root:done",
+    failed: "state:cycle:failed",
   },
   workflow: {
     labels: {
@@ -55,13 +56,11 @@ const config = {
     "git:get_status",
     "git:get_diff",
   ],
-  root_routing: [
-    { root_id: "LIN-1", repository_id: "repo:1", repository_path: "/srv/repo", base_branch: "main" },
-  ],
+  root: { root_id: "LIN-1", repository_id: "repo:1", repository_path: "/srv/repo", base_branch: "main" },
 };
 
 test("configuration accepts only approved static integration fields", () => {
-  assert.equal(parseConductorConfig(config).root_routing[0]?.repository_id, "repo:1");
+  assert.equal(parseConductorConfig(config).root.repository_id, "repo:1");
   assert.throws(() => parseConductorConfig({
     ...config,
     permission_policy: {
@@ -74,7 +73,12 @@ test("configuration accepts only approved static integration fields", () => {
   for (const secretKey of ["token", "api_key", "client_secret", "profile"]) {
     assert.throws(() => parseConductorConfig({ ...config, [secretKey]: "do-not-log" }), /invalid_contract_keys/u);
   }
-  assert.throws(() => parseConductorConfig({ ...config, root_routing: [] }), /invalid_root_routing/u);
+  assert.throws(() => parseConductorConfig({ ...config, root_routing: [config.root] }), /invalid_contract_keys/u);
+  assert.throws(() => parseConductorConfig({ ...config, roots: [config.root] }), /invalid_contract_keys/u);
+  assert.throws(() => parseConductorConfig({
+    ...config,
+    root: [config.root, { ...config.root, root_id: "LIN-2" }],
+  }), /invalid_root_binding/u);
 });
 
 test("configuration fails closed when status or capability fields are missing or incomplete", () => {

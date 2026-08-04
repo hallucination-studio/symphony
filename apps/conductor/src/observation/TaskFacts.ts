@@ -64,13 +64,18 @@ export function taskSnapshotDigest(snapshot: TaskSnapshot): TaskDigest {
 
 export type LastValidStageBasisStatus = "Todo" | "In Progress";
 
+export type LastValidCycleBasisStatus = "Draft" | "In Progress" | "Awaiting Acceptance";
+
 /**
  * Grouped provider history cannot establish mutation order. For an externally
  * terminal Stage, accept only one status transition that identifies its legal
  * nonterminal predecessor; every other shape is ambiguous and fails closed.
  */
 export function deriveLastValidStageBasisStatus(
-  snapshot: Pick<TaskSnapshot, "issues" | "issue_history">,
+  snapshot: {
+    readonly issues: readonly (Pick<TaskIssueSnapshot, "issue_id" | "status">)[];
+    readonly issue_history: readonly TaskIssueHistoryEntry[];
+  },
   issueId: TaskIssueSnapshot["issue_id"],
 ): LastValidStageBasisStatus | null {
   const issue = snapshot.issues.find(({ issue_id }) => issue_id === issueId);
@@ -79,12 +84,42 @@ export function deriveLastValidStageBasisStatus(
   if (issue.status !== "Done" && issue.status !== "Failed" && issue.status !== "Canceled") return null;
 
   const candidates = new Set<LastValidStageBasisStatus>();
-  for (const entry of snapshot.issue_history as readonly TaskIssueHistoryEntry[]) {
+  for (const entry of snapshot.issue_history) {
     if (
       entry.issue_id !== issueId
       || !entry.changed_fields.includes("status")
       || entry.to_status !== issue.status
       || (entry.from_status !== "Todo" && entry.from_status !== "In Progress")
+    ) continue;
+    candidates.add(entry.from_status);
+  }
+  return candidates.size === 1 ? [...candidates][0]! : null;
+}
+
+export function deriveLastValidCycleBasisStatus(
+  snapshot: {
+    readonly issues: readonly (Pick<TaskIssueSnapshot, "issue_id" | "status">)[];
+    readonly issue_history: readonly TaskIssueHistoryEntry[];
+  },
+  issueId: TaskIssueSnapshot["issue_id"],
+): LastValidCycleBasisStatus | null {
+  const issue = snapshot.issues.find(({ issue_id }) => issue_id === issueId);
+  if (issue === undefined) return null;
+  if (issue.status === "Draft" || issue.status === "In Progress" || issue.status === "Awaiting Acceptance") {
+    return issue.status;
+  }
+  if (issue.status !== "Succeeded" && issue.status !== "Rejected"
+    && issue.status !== "Failed" && issue.status !== "Canceled") return null;
+
+  const candidates = new Set<LastValidCycleBasisStatus>();
+  for (const entry of snapshot.issue_history) {
+    if (
+      entry.issue_id !== issueId
+      || !entry.changed_fields.includes("status")
+      || entry.to_status !== issue.status
+      || (entry.from_status !== "Draft"
+        && entry.from_status !== "In Progress"
+        && entry.from_status !== "Awaiting Acceptance")
     ) continue;
     candidates.add(entry.from_status);
   }

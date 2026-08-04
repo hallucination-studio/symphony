@@ -2,12 +2,13 @@ import { access, mkdir } from "node:fs/promises";
 import { constants } from "node:fs";
 
 import type { TaskObservationEvent } from "../contracts/observation.js";
-import type { RepositoryId, RootIssueId } from "../contracts/identity.js";
+import type { CycleIssueId, RepositoryId, RootIssueId } from "../contracts/identity.js";
 import { GhCommand, GitHubScm, discoverGitHubRepository } from "../delivery/internal/GitHubScm.js";
 import { GitScmDelivery } from "../delivery/internal/GitScmDelivery.js";
 import { GitWorktree } from "../git/internal/GitWorktree.js";
 import { RootHomeManager } from "../root-reconcill/internal/RootHome.js";
 import { RootRuntimeRegistry } from "../runtime/RootRuntimeRegistry.js";
+import type { RootRuntimeCleanup } from "../runtime/RootRuntimeRegistry.js";
 import { RootFamilyGuard } from "../runtime/RootFamilyGuard.js";
 import { SerialConductor } from "../runtime/SerialConductor.js";
 import type { SerialConductorLog, SerialRunResult } from "../runtime/SerialConductor.js";
@@ -26,7 +27,7 @@ import {
 } from "./TaskManagerComposition.js";
 import {
   ProductionRootRuntimeFactory,
-  type ProductionRoute,
+  type ProductionRootBinding,
   type ProductionRuntimeLog,
   worktreeRoot,
 } from "./ProductionRuntime.js";
@@ -59,6 +60,7 @@ export interface ProductionPollResult {
   readonly observations: number;
   readonly actions: number;
   readonly failures: number;
+  readonly stopped: boolean;
 }
 
 export async function runProductionPoll(
@@ -71,10 +73,16 @@ export async function runProductionPoll(
   while (actions < MAX_ACTIONS_PER_POLL) {
     const result = await target.scheduler.runNext();
     if (result.kind === "idle") {
-      return Object.freeze({ observations: observations.length, actions, failures });
+      return Object.freeze({ observations: observations.length, actions, failures, stopped: false });
     }
     actions += 1;
-    if (result.kind === "failed") failures += 1;
+    if (result.kind === "failed") {
+      failures += 1;
+      throw new Error(result.reason_code);
+    }
+    if (result.kind === "root_cleanup_completed") {
+      return Object.freeze({ observations: observations.length, actions, failures, stopped: true });
+    }
   }
   throw new Error("production_scheduler_action_limit");
 }
@@ -133,33 +141,26 @@ export async function createProductionConductor(
     service_actor_id: startup.config.agent_actor_id,
   });
   await queries.readServiceActor();
-  const firstRoot = startup.config.root_routing[0]?.root_id;
-  if (firstRoot === undefined) throw new Error("invalid_root_routing");
+  const root = startup.config.root;
   let catalog;
   try {
-    catalog = await readTaskWorkflowCatalog(queries, firstRoot);
+    catalog = await readTaskWorkflowCatalog(queries, root.root_id);
     assertTaskWorkflowConfiguration(startup.config, catalog);
   } catch {
     throw new Error("invalid_task_workflow_configuration");
   }
 
-  const resources = new Map<RepositoryId, RepositoryResources>();
-  const routes = new Map<RootIssueId, ProductionRoute>();
-  for (const route of startup.config.root_routing) {
-    let resource = resources.get(route.repository_id);
-    if (resource !== undefined && (
-      resource.repository_path !== route.repository_path
-      || resource.base_branch !== route.base_branch
-    )) throw new Error("repository_route_identity_ambiguous");
-    resource ??= await repositoryResources(
-      startup,
-      route.repository_id,
-      route.repository_path,
-      route.base_branch,
-    );
-    resources.set(route.repository_id, resource);
-    routes.set(route.root_id, Object.freeze({ ...route, git: resource.git, delivery: resource.delivery }));
-  }
+  const resource = await repositoryResources(
+    startup,
+    root.repository_id,
+    root.repository_path,
+    root.base_branch,
+  );
+  const route: ProductionRootBinding = Object.freeze({
+    ...root,
+    git: resource.git,
+    delivery: resource.delivery,
+  });
 
   const callerAuthority = createTaskManageCallerAuthority();
   const commands = new LinearCommands(sdk, queries, {
@@ -171,15 +172,25 @@ export async function createProductionConductor(
     startup.config.program_data_path,
     startup.config.performer_home,
   );
-  const registry = new RootRuntimeRegistry(new ProductionRootRuntimeFactory({
+  const cleanup: RootRuntimeCleanup = Object.freeze({
+    delete: async (
+      rootId: RootIssueId,
+      cycleIds: readonly CycleIssueId[],
+      isLive: (candidate: RootIssueId) => boolean,
+    ) => {
+      await resource.git.deleteCycles(rootId, cycleIds, isLive);
+      await homes.delete(rootId, isLive);
+    },
+  });
+  const registry = new RootRuntimeRegistry(root.root_id, new ProductionRootRuntimeFactory({
     startup,
     queries,
     task_manager: taskManager,
     caller_issuer: callerAuthority.issuer,
     homes,
-    routes,
+    route,
     log,
-  }), homes);
+  }), cleanup);
   const familyGuard = new RootFamilyGuard({
     service_actor_id: startup.config.agent_actor_id,
     caller_issuer: callerAuthority.issuer,
@@ -189,6 +200,7 @@ export async function createProductionConductor(
     root_states: startup.config.root_states,
   });
   const scheduler = new SerialConductor(registry, {
+    root_id: root.root_id,
     agent_actor_id: startup.config.agent_actor_id,
     root_kind_label_id: startup.config.workflow.labels.root,
     root_states: startup.config.root_states,
@@ -196,7 +208,10 @@ export async function createProductionConductor(
     family_guard: familyGuard,
     log: (entry) => log(entry),
   });
-  const observer = new LinearObserver(queries, { log: (entry) => log(entry) });
+  const observer = new LinearObserver(queries, {
+    root_id: root.root_id,
+    log: (entry) => log(entry),
+  });
   return Object.freeze({
     observer,
     scheduler,

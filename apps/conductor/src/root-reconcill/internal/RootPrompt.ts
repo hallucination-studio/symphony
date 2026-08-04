@@ -80,8 +80,12 @@ export function rootReconcillOutputSchema(
     root_id: { enum: [target.root_id] },
     runtime_generation: { enum: [target.runtime_generation] },
     correlation_id: { enum: [correlationId] },
-    outcome: { enum: ["quiescent", "stopped"] },
+    outcome: {
+      enum: ["quiescent", "stopped"],
+      description: "Use quiescent when no semantic effect is needed; use stopped only when safe progress is impossible.",
+    },
     sanitized_reason: {
+      description: "Set this to null exactly when outcome is quiescent; set a non-empty ASCII reason exactly when outcome is stopped.",
       anyOf: [
         {
           type: "string",
@@ -103,16 +107,16 @@ export function rootReconcillOutputSchema(
 
 export function rootReconcillPrompt(
   input: RootReconcillInput,
-  inputKind: "bootstrap" | "diff",
+  inputKind: "bootstrap" | "diff" | "semantic_snapshot",
 ): string {
   const prompt = {
     role: "RootReconcill",
     instruction: [
       "Interpret the supplied fresh Root facts and remain the sole workflow semantic decision maker.",
-      "During Define with no non-terminal Cycle, inspect code read-only and write the complete intended outcome, authorized scope, required consequences, explicit exclusions, domain facts, and individually verifiable acceptance criteria into every closed Root section.",
+      "During Define with no non-terminal Cycle, inspect code read-only and write the complete intended outcome, authorized scope, required consequences, explicit exclusions, domain facts, and individually verifiable acceptance criteria into every closed Root section. Use the exact closed Root Markdown shape: at most one level-1 title followed by exactly four level-2 headings in order, with no other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
       "Root ADR decisions must include rationale, constraints and consequences that apply across Cycles.",
-      "Create a Cycle only when the complete Root Markdown is present in current-turn fresh Task Manager facts; update an absent or incomplete Root first and wait for that update's applied fresh Task Manager read-back, but do not rewrite an already complete fresh Root.",
-      "Create one Cycle Draft by copying the complete fresh Root Requirement, Domain Knowledge, Root ADR, Acceptance, and exact Root revision, then specify concrete architecture, feature behavior, code changes, boundaries, criterion-by-criterion acceptance evidence, and failure handling without leaving decisions to Plan.",
+      "Create a Cycle only when the complete Root Markdown is present in current-turn fresh Task Manager facts; update an absent or incomplete Root first and wait for that update's applied fresh Task Manager read-back, but do not rewrite an already complete fresh Root. If Define updates the Root in this turn, finish quiescent after the applied read-back and wait for the next fresh Root observation before creating a Cycle; never create a Cycle from a Root document updated in the same turn.",
+      "Create one Cycle Draft by copying the complete fresh Root Requirement, Domain Knowledge, Root ADR, Acceptance, and exact Root revision, then specify concrete architecture, feature behavior, code changes, boundaries, criterion-by-criterion acceptance evidence, and failure handling without leaving decisions to Plan. The Cycle Draft's Requirement, Domain Knowledge, Root ADR, and Acceptance sections must be verbatim copies of the exact same sections from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase. Use the exact closed Cycle Draft Markdown shape: at most one level-1 title followed by exactly eleven level-2 headings in the declared order, with no other level-1 or level-2 heading, preamble, metadata, JSON, or code fence; the Root Definition Revision section is exactly one inline-code revision.",
       "In any turn that corrects or approves a Draft, call get_issue for that exact Cycle in the same current turn and review the returned Markdown; after a correction, call get_issue again before approval.",
       "While the Cycle is Draft, correct only its description using the expected revision returned by that current-turn fresh read-back.",
       "Approve only the exact Draft reviewed from the current-turn fresh read-back by changing its status to In Progress with that expected revision; approval is complete only when either the applied update fresh resource or the resolving exact get_issue is In Progress and seal_digest is non-null.",
@@ -125,12 +129,17 @@ export function rootReconcillPrompt(
       "Call at most one tool at a time and observe every typed result before choosing another minimum next action.",
       "Treat stale_before_effect as fresh facts and reason again in this same turn without asking the host to retry.",
       "After conflict_observed, fresh-read that exact identity before any further mutation.",
+      "For update_issue, the outer tool envelope carries schema_version, function, root_id, runtime_generation, correlation_id, capability, and input; the nested input object contains exactly issue_id, expected_revision, and desired. Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired; never repeat schema_version, function, root_id, runtime_generation, correlation_id, or capability inside input and never place a desired field beside desired.",
+      "For create_issue, its input contains exactly issue_id, parent_issue_id, expected_parent_revision, and desired; issue_id must be a fresh UUIDv4, never an issue name or placeholder; desired contains exactly title, description, state_id, label_ids, delegate_id, and priority. The six desired fields must all be inside desired, with no desired field beside desired. Valid shape: {\"issue_id\":\"11111111-1111-4111-8111-111111111111\",\"parent_issue_id\":\"ROOT\",\"expected_parent_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\",\"description\":\"MARKDOWN\",\"state_id\":\"DRAFT_STATE\",\"label_ids\":[\"CYCLE_LABEL\"],\"delegate_id\":null,\"priority\":null}}.",
+      "For declared code inspection calls, use the flat schema exactly as shown by each tool; never add function or input wrappers.",
       "Express workflow choices through exact generic tool calls, never through a lifecycle decision field.",
-      "Finish with quiescent when waiting for a changed external observation, or stopped with a sanitized actionable reason when safe progress is impossible.",
+      "Finish with quiescent when waiting for a changed external observation, or stopped with a sanitized actionable reason when safe progress is impossible. The output contract is exact: sanitized_reason is null exactly when outcome is quiescent; use a non-empty ASCII sanitized_reason only when outcome is stopped.",
     ].join(" "),
     markdown_contracts: {
       root_description_sections: ROOT_DEFINITION_SECTION_NAMES,
+      root_description_shape: "Use at most one level-1 title, then exactly these level-2 headings in order: ## Requirement, ## Domain Knowledge, ## Root ADR, ## Acceptance. Give every section visible non-empty content and do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
       cycle_description_sections: CYCLE_DRAFT_SECTION_NAMES,
+      cycle_description_shape: "Use at most one level-1 title, then exactly these level-2 headings in order: ## Root Definition Revision, ## Requirement, ## Domain Knowledge, ## Root ADR, ## Acceptance, ## Architecture, ## Feature Design, ## Code Design, ## Boundaries, ## Acceptance Mapping, ## Failure Strategy. Give every section visible non-empty content, except Root Definition Revision which contains exactly one inline-code revision, and do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
       root_definition_revision_format: "one inline-code Task Manager revision and no other section content",
       root_section_requirements: {
         Requirement: [

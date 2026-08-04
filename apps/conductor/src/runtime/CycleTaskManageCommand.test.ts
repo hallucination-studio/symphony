@@ -336,6 +336,9 @@ function snapshotWithGraph(graph = parseSealedExecutionGraph(graphSource, cycleI
     : [stage(graphSource.work_issues[0]!, currentWorkRevision, "in_progress")],
     verify_issue: graph.verify_issue === null ? null : stage(graphSource.verify_issue, "revision:verify:current", "todo"),
     sealed_relations: graphSource.relations.slice(0, graph.relations.length),
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git,
   }, target);
 }

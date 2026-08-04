@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   parseObservationDigest,
+  parseCycleIssueId,
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
@@ -176,7 +177,7 @@ class FakeGitReader {
   readonly calls: RootWorkspaceIdentity[] = [];
   readonly results: Array<unknown | Error> = [];
 
-  async read(identity: RootWorkspaceIdentity): Promise<GitSnapshot> {
+  async readRoot(identity: RootWorkspaceIdentity): Promise<GitSnapshot> {
     this.calls.push(identity);
     const result = this.results.shift();
     if (result instanceof Error) throw result;
@@ -206,6 +207,11 @@ test("canonical combined digests ignore collection order and cover complete Task
     rootObservationDigest(initialTask, git({ headRevision: "b".repeat(40) })),
     rootObservationDigest(initialTask, git({ workspaceState: "dirty" })),
     rootObservationDigest(initialTask, git({ withPullRequest: true })),
+    rootObservationDigest(initialTask, initialGit, {
+      disposition: "root_boundary",
+      selected_route: "WF-ROUTE-002",
+      active_cycle_id: parseCycleIssueId("LIN-2"),
+    }),
   ];
   for (const changed of changedFacts) assert.notEqual(changed, digest);
   assert.equal(new Set(changedFacts).size, changedFacts.length);
@@ -292,6 +298,71 @@ test("runtime diffs compare the latest complete snapshot with the accepted basel
     { kind: "pull_request_changed", before: null, after: "b".repeat(40) },
   ]);
   assert.equal(JSON.stringify(prepared.root_input).includes("polling-only"), false);
+});
+
+test("prepareFresh keeps later Root semantic turns on a complete snapshot", async () => {
+  const gitReader = new FakeGitReader();
+  const initialTask = task();
+  const latestTask = task({ childStatus: "Done", includeVerify: true });
+  const initialGit = git();
+  const latestGit = git({ workspaceState: "dirty", diffDigest: "sha256:dirty" });
+  gitReader.results.push(initialGit, latestGit);
+  const observations = reconciler(gitReader);
+
+  const bootstrap = await observations.prepareFresh(event(initialTask, "corr:fresh:1"), workspace);
+  assert.equal(bootstrap.kind, "bootstrap");
+  if (bootstrap.kind !== "bootstrap") return;
+  observations.accept(bootstrap);
+
+  const refreshed = await observations.prepareFresh(
+    event(latestTask, "corr:fresh:2", { fromTaskDigest: taskSnapshotDigest(initialTask) }),
+    workspace,
+  );
+  assert.equal(refreshed.kind, "semantic_snapshot");
+  if (refreshed.kind !== "semantic_snapshot") return;
+  assert.deepEqual(refreshed.root_input.task, latestTask);
+  assert.deepEqual(refreshed.root_input.git, latestGit);
+  assert.deepEqual(refreshed.root_input.routing, {
+    disposition: "root_boundary",
+    selected_route: "WF-ROUTE-001",
+    active_cycle_id: null,
+  });
+  assert.equal(refreshed.root_input.notification, null);
+});
+
+test("prepareFresh emits a semantic snapshot when only routing evidence changes", async () => {
+  const gitReader = new FakeGitReader();
+  const initialTask = task();
+  const initialGit = git();
+  gitReader.results.push(initialGit, initialGit, initialGit);
+  const observations = reconciler(gitReader);
+  const initialEvent = event(initialTask, "corr:routing:1");
+
+  const bootstrap = await observations.prepareFresh(initialEvent, workspace);
+  assert.equal(bootstrap.kind, "bootstrap");
+  if (bootstrap.kind !== "bootstrap") return;
+  observations.accept(bootstrap);
+
+  const routed = await observations.prepareFresh(initialEvent, workspace, {
+    disposition: "root_boundary",
+    selected_route: "WF-ROUTE-002",
+    active_cycle_id: parseCycleIssueId("LIN-2"),
+  });
+  assert.equal(routed.kind, "semantic_snapshot");
+  if (routed.kind !== "semantic_snapshot") return;
+  assert.deepEqual(routed.root_input.routing, {
+    disposition: "root_boundary",
+    selected_route: "WF-ROUTE-002",
+    active_cycle_id: "LIN-2",
+  });
+  assert.notEqual(routed.observation_digest, bootstrap.observation_digest);
+  observations.accept(routed);
+
+  const ordinaryCycleTurn = await observations.prepare(initialEvent, workspace);
+  assert.deepEqual(ordinaryCycleTurn, {
+    kind: "unchanged",
+    observation_digest: routed.observation_digest,
+  });
 });
 
 test("failed preparation is sanitized and leaves the last accepted snapshot adjacent", async () => {

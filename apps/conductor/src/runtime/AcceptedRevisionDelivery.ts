@@ -40,6 +40,16 @@ import type {
   AcceptedRevisionAuthorization,
   AcceptedRevisionVerifier,
 } from "./RootAcceptedRevision.js";
+import {
+  createDeliveryConvergenceProof,
+  createDeliveryObservationInput,
+  createDeliveryObservationRound,
+  deliveryFactsDigest,
+  deliveryRoundsMatch,
+  DeliveryRecordSlotConflict,
+  type DeliveryRecordState,
+  type DeliveryTerminalRecordStore,
+} from "./DeliveryTerminalRecord.js";
 
 export type AcceptedRevisionDeliveryFailureCode =
   | "boundary_unavailable"
@@ -50,7 +60,9 @@ export type AcceptedRevisionDeliveryFailureCode =
   | "push_unconfirmed"
   | "remote_revision_conflict"
   | "root_status_conflict"
-  | "root_update_unconfirmed";
+  | "root_update_unconfirmed"
+  | "root_failure_projection_unconfirmed"
+  | "delivery_invalidated";
 
 export type AcceptedRevisionDeliveryResult =
   | {
@@ -74,10 +86,13 @@ export interface AcceptedRevisionDeliveryOptions {
   readonly root_label_id: TaskLabelId;
   readonly root_in_progress_state: TaskStateId;
   readonly root_in_review_state: TaskStateId;
+  readonly root_failed_state: TaskStateId;
   readonly accepted_revision_verifier: AcceptedRevisionVerifier;
   readonly task_caller_issuer: TaskManageCallerIssuer;
   readonly task_manager: TaskManageCommandInterface;
   readonly delivery: DeliveryInterface;
+  readonly record_store: DeliveryTerminalRecordStore;
+  readonly now?: () => string;
 }
 
 interface DeliveryContext {
@@ -126,13 +141,19 @@ export class AcceptedRevisionDeliveryCoordinator {
   readonly #rootLabelId: TaskLabelId;
   readonly #rootInProgressState: TaskStateId;
   readonly #rootInReviewState: TaskStateId;
+  readonly #rootFailedState: TaskStateId;
 
   constructor(private readonly options: AcceptedRevisionDeliveryOptions) {
     this.#provider = parseBoundedString(options.provider, "invalid_delivery_provider", 64);
     this.#rootLabelId = parseTaskLabelId(options.root_label_id);
     this.#rootInProgressState = parseTaskStateId(options.root_in_progress_state);
     this.#rootInReviewState = parseTaskStateId(options.root_in_review_state);
-    if (this.#rootInProgressState === this.#rootInReviewState) {
+    this.#rootFailedState = parseTaskStateId(options.root_failed_state);
+    if (new Set([
+      this.#rootInProgressState,
+      this.#rootInReviewState,
+      this.#rootFailedState,
+    ]).size !== 3) {
       throw new Error("duplicate_root_delivery_state_identity");
     }
   }
@@ -168,20 +189,271 @@ export class AcceptedRevisionDeliveryCoordinator {
     });
 
     try {
+      const initialState = await this.#readRecordState(context);
+      if (initialState.invalidation_slot.state === "invalidation") {
+        try {
+          await this.#projectRootFailed(context);
+        } catch (error) {
+          if (error instanceof DeliveryAbort) {
+            return this.#notDelivered(authorization, error.code);
+          }
+          return this.#notDelivered(authorization, "root_failure_projection_unconfirmed");
+        }
+        return this.#notDelivered(authorization, "delivery_invalidated");
+      }
+      if (initialState.completion_slot.state === "completion") {
+        return this.#resumeCompletedDelivery(context, initialState);
+      }
+      if (initialState.completion_slot.state === "invalid") {
+        return this.#invalidateAndStop(
+          context,
+          initialState,
+          await this.#readDelivery(context),
+          {
+            kind: "completion_slot_conflict",
+            invalid_record_observation_digest: initialState.completion_slot.observation_digest,
+          },
+          "completion_slot_conflict",
+          "The delivery completion record slot is occupied by invalid evidence.",
+        );
+      }
+      if (initialState.basis.root.status === "Done") {
+        const observation = await this.#readDelivery(context);
+        return this.#invalidateAndStop(
+          context,
+          initialState,
+          observation,
+          {
+            kind: "root_done_before_completion",
+            observed_root_revision: initialState.basis.root.revision,
+            observed_delivery_facts_digest: deliveryFactsDigest(observation),
+          },
+          "root_done_before_completion",
+          "The Root reached Done before delivery completion was recorded.",
+        );
+      }
       const pullRequest = await this.#deliverExactRevision(context);
-      const rootRevision = await this.#moveRootToInReview(context);
+      await this.#moveRootToInReview(context);
+      const firstState = await this.#readRecordState(context);
+      const firstObservation = await this.#readDelivery(context);
+      const firstRound = this.#deliveryRound(context, firstState, firstObservation);
+      const secondState = await this.#readRecordState(context);
+      const secondObservation = await this.#readDelivery(context);
+      const secondRound = this.#deliveryRound(context, secondState, secondObservation);
+      if (!deliveryRoundsMatch(firstRound, secondRound)) {
+        return this.#invalidateAndStop(
+          context,
+          secondState,
+          secondObservation,
+          {
+            kind: "convergence_mismatch",
+            first_round: firstRound,
+            second_round: secondRound,
+            observation_order: "linear -> git -> delivery -> linear -> git -> delivery",
+            mismatched_fields: this.#mismatchedRoundFields(firstRound, secondRound),
+            first_basis_digest: firstState.basis.linear_snapshot_digest,
+            second_basis_digest: secondState.basis.linear_snapshot_digest,
+          },
+          "delivery_convergence_mismatch",
+          "The two delivery observations did not converge.",
+        );
+      }
+      const proof = createDeliveryConvergenceProof(firstRound, secondRound);
+      let completion;
+      try {
+        completion = await this.options.record_store.writeCompletion({
+          authorization,
+          correlation_id: correlationId,
+          state: secondState,
+          observation: createDeliveryObservationInput(secondObservation, view.exact_revision),
+          convergence_proof: proof,
+        }, execution);
+      } catch (error) {
+        if (!(error instanceof DeliveryRecordSlotConflict) || error.slot !== "completion") throw error;
+        const freshState = await this.#readRecordState(context);
+        if (freshState.completion_slot.state === "completion") {
+          return this.#resumeCompletedDelivery(context, freshState);
+        }
+        return this.#invalidateAndStop(
+          context,
+          freshState,
+          secondObservation,
+          {
+            kind: "completion_slot_conflict",
+            invalid_record_observation_digest: error.observation_digest,
+          },
+          "completion_slot_conflict",
+          "The delivery completion record slot was occupied during finalization.",
+        );
+      }
       return Object.freeze({
         outcome: "delivered",
         root_id: authorization.root_id,
         cycle_id: view.cycle_id,
         exact_revision: view.exact_revision,
         pull_request: pullRequest,
-        root_revision: rootRevision,
+        root_revision: completion.basis_issue_revision,
       });
     } catch (error) {
       if (!(error instanceof DeliveryAbort)) throw error;
+      if (error.code === "root_status_conflict") {
+        try {
+          const state = await this.#readRecordState(context);
+          if (state.basis.root.status === "Done" && state.invalidation_slot.state === "empty") {
+            const observation = await this.#readDelivery(context);
+            return this.#invalidateAndStop(
+              context,
+              state,
+              observation,
+              {
+                kind: "root_done_before_completion",
+                observed_root_revision: state.basis.root.revision,
+                observed_delivery_facts_digest: deliveryFactsDigest(observation),
+              },
+              "root_done_before_completion",
+              "The Root reached Done before delivery completion was recorded.",
+            );
+          }
+        } catch {
+          // Preserve the original sanitized delivery failure when invalidation cannot be proven.
+        }
+      }
       return this.#notDelivered(authorization, error.code);
     }
+  }
+
+  async #readRecordState(context: DeliveryContext): Promise<DeliveryRecordState> {
+    context.execution.assertActive();
+    try {
+      const state = await this.options.record_store.read(context.authorization, context.execution);
+      context.execution.assertActive();
+      return state;
+    } catch {
+      throw new DeliveryAbort("boundary_unavailable");
+    }
+  }
+
+  #deliveryRound(
+    context: DeliveryContext,
+    state: DeliveryRecordState,
+    observation: DeliveryObservation,
+  ) {
+    try {
+      return createDeliveryObservationRound({
+        state,
+        authorization: context.authorization,
+        observation,
+        now: this.options.now?.() ?? new Date().toISOString(),
+      });
+    } catch {
+      throw new DeliveryAbort("invalid_contract");
+    }
+  }
+
+  #mismatchedRoundFields(
+    first: ReturnType<typeof createDeliveryObservationRound>,
+    second: ReturnType<typeof createDeliveryObservationRound>,
+  ): readonly [string, ...string[]] {
+    const fields = [
+      "linear_snapshot_digest", "root_revision", "git_exact_revision", "remote_ref_revision",
+      "pull_request_identity", "pull_request_revision", "pull_request_head", "pull_request_state",
+    ] as const;
+    const mismatched = fields.filter((field) => first[field] !== second[field]);
+    return (mismatched.length === 0 ? ["stable_decision_basis_digest"] : mismatched) as readonly [string, ...string[]];
+  }
+
+  async #resumeCompletedDelivery(
+    context: DeliveryContext,
+    state: DeliveryRecordState,
+  ): Promise<AcceptedRevisionDeliveryResult> {
+    if (state.completion_slot.state !== "completion") {
+      throw new DeliveryAbort("invalid_contract");
+    }
+    const observation = await this.#readDelivery(context);
+    const pullRequest = this.#exactPullRequest(
+      observation,
+      context.authorization.acceptance_view.exact_revision,
+    );
+    return Object.freeze({
+      outcome: "delivered",
+      root_id: context.authorization.root_id,
+      cycle_id: context.authorization.acceptance_view.cycle_id,
+      exact_revision: context.authorization.acceptance_view.exact_revision,
+      pull_request: pullRequest,
+      root_revision: state.completion_slot.record.basis_issue_revision,
+    });
+  }
+
+  async #invalidateAndStop(
+    context: DeliveryContext,
+    state: DeliveryRecordState,
+    observation: DeliveryObservation,
+    evidence: Parameters<DeliveryTerminalRecordStore["writeInvalidation"]>[0]["invalidation_evidence"],
+    reasonCode: string,
+    reasonMarkdown: string,
+  ): Promise<AcceptedRevisionDeliveryResult> {
+    if (state.invalidation_slot.state === "invalidation") {
+      return this.#notDelivered(context.authorization, "delivery_invalidated");
+    }
+    if (state.invalidation_slot.state !== "empty") {
+      return this.#notDelivered(context.authorization, "invalid_contract");
+    }
+    try {
+      await this.options.record_store.writeInvalidation({
+        authorization: context.authorization,
+        correlation_id: context.correlation_id,
+        state,
+        observation: createDeliveryObservationInput(
+          observation,
+          context.authorization.acceptance_view.exact_revision,
+        ),
+        invalidation_evidence: evidence,
+        reason_code: reasonCode,
+        reason_markdown: reasonMarkdown,
+      }, context.execution);
+    } catch {
+      return this.#notDelivered(context.authorization, "boundary_unavailable");
+    }
+    try {
+      await this.#projectRootFailed(context);
+    } catch (error) {
+      if (error instanceof DeliveryAbort) {
+        return this.#notDelivered(context.authorization, error.code);
+      }
+      return this.#notDelivered(context.authorization, "root_failure_projection_unconfirmed");
+    }
+    return this.#notDelivered(context.authorization, "delivery_invalidated");
+  }
+
+  async #projectRootFailed(context: DeliveryContext): Promise<void> {
+    const before = await this.#readRoot(context);
+    if (before.status_id === this.#rootFailedState || before.status === "Done") return;
+    if (before.status_id !== this.#rootInProgressState && before.status_id !== this.#rootInReviewState) {
+      throw new DeliveryAbort("root_status_conflict");
+    }
+    const rootTaskId = parseTaskIssueId(context.authorization.root_id);
+    const call: UpdateIssueCall = Object.freeze({
+      schema_version: 1,
+      function: "update_issue",
+      root_id: context.authorization.root_id,
+      runtime_generation: context.authorization.runtime_generation,
+      correlation_id: context.correlation_id,
+      capability: TASK_MCP_CAPABILITIES.update_issue,
+      input: Object.freeze({
+        issue_id: rootTaskId,
+        expected_revision: before.revision,
+        desired: Object.freeze({ state_id: this.#rootFailedState }),
+      }),
+    });
+    const receipt = await this.#taskEffect(context, call);
+    const after = await this.#readRoot(context);
+    if (after.status === "Done") return;
+    if (
+      after.status_id !== this.#rootFailedState
+      || after.revision === before.revision
+      || !sameRootExceptStatusAndRevision(before, after)
+    ) throw new DeliveryAbort("root_failure_projection_unconfirmed");
+    this.#assertRootUpdateReceipt(receipt, before, after);
   }
 
   async #deliverExactRevision(context: DeliveryContext): Promise<PullRequestSnapshot> {

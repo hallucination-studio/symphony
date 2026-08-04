@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import {
@@ -46,36 +45,48 @@ import { parseCycleApprovalRecord, type SealedCycleBasis } from "../contracts/cy
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import { readExactTaskIssueRecord } from "../cycle/internal/CycleRecords.js";
 import { PlanCompletionRecordWriter } from "../cycle/internal/PlanCompletionRecord.js";
-import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import { createCycleHeadBranch, createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { DeliveryInterface } from "../delivery/api/DeliveryInterface.js";
-import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
+import type {
+  CycleWorkspaceIdentity,
+  GitRootReadInterface,
+  GitWorkspaceInterface,
+  RootWorkspaceIdentity,
+} from "../git/api/GitWorkspaceInterface.js";
 import { GitCommand } from "../git/internal/GitCommand.js";
 import { GitWorktree } from "../git/internal/GitWorktree.js";
 import { PlanPerformer } from "../performer/internal/PlanPerformer.js";
 import { VerifyPerformer } from "../performer/internal/VerifyPerformer.js";
 import { WorkPerformer } from "../performer/internal/WorkPerformer.js";
-import type {
-  RootReconcillInput,
-  RootReconcillInterface,
-} from "../root-reconcill/api/RootReconcillInterface.js";
 import {
   CodexRootTurnTransportFactory,
   RootReconcillFactory,
   type RootReconcillLog,
 } from "../root-reconcill/internal/RootReconcill.js";
 import { RootHomeManager } from "../root-reconcill/internal/RootHome.js";
+import { parseRootAcceptanceView } from "../runtime/RootToolBoundary.js";
 import {
   AcceptedRevisionDeliveryCoordinator,
   type AcceptedRevisionDeliveryFailureCode,
   type AcceptedRevisionDeliveryResult,
 } from "../runtime/AcceptedRevisionDelivery.js";
-import { createAcceptedRevisionAuthority } from "../runtime/RootAcceptedRevision.js";
+import { DeliveryTerminalRecordWriter } from "../runtime/DeliveryTerminalRecord.js";
+import {
+  createAcceptedRevisionAuthority,
+  type AcceptedRevisionAuthorization,
+  type AcceptedRevisionAuthority,
+} from "../runtime/RootAcceptedRevision.js";
 import { createRootGitReadTools } from "../runtime/RootGitReadTools.js";
-import type { RootRuntimeBinding, RootRuntimeFactory } from "../runtime/RootRuntime.js";
+import type {
+  DeliveryFinalizerHostInterface,
+  PreparedDeliveryFinalizer,
+  RootRuntimeBinding,
+  RootRuntimeFactory,
+} from "../runtime/RootRuntime.js";
+import type { FreshRouteMatch } from "../runtime/FreshTaskRouter.js";
 import {
   bindRootTaskManageCommand,
   type RootApprovedCycleReader,
-  type RootTaskManageCommandBinding,
 } from "../runtime/RootTaskManageCommand.js";
 import {
   RootTools,
@@ -87,7 +98,7 @@ import type {
 } from "../task-management/api/TaskManageCapability.js";
 import type { LinearQueries } from "../task-management/linear/LinearQueries.js";
 import type { ConductorStartup } from "./startup.js";
-import type { RootRoutingConfig } from "./config.js";
+import type { RootBindingConfig } from "./config.js";
 
 const COMMAND_TIMEOUT_MS = 30_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
@@ -97,7 +108,7 @@ const CODEX_TURN_TIMEOUT_MS = 10 * 60_000;
 const CODEX_SHUTDOWN_TIMEOUT_MS = 10_000;
 const ROOT_MAX_TOOL_CALLS = 64;
 
-export interface ProductionRoute extends RootRoutingConfig {
+export interface ProductionRootBinding extends RootBindingConfig {
   readonly git: GitWorktree;
   readonly delivery: DeliveryInterface;
 }
@@ -181,7 +192,7 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
     private readonly target: Readonly<{ root_id: RootIssueId; runtime_generation: RuntimeGeneration }>,
     private readonly workflow: TaskWorkflowIdentities,
     private readonly snapshots: Pick<LinearQueries, "readRootSnapshot" | "readIssueRecordComments">,
-    private readonly git: Pick<GitWorkspaceInterface, "read">,
+    private readonly git: Pick<GitWorkspaceInterface, "prepare" | "read"> & GitRootReadInterface,
     private readonly workspace: RootWorkspaceIdentity,
     private readonly serviceActorId: string,
   ) {}
@@ -255,6 +266,24 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
   }
 
   async read(request: CycleMachineReadRequest): Promise<CycleAdvanceRequest | null> {
+    return this.#read(request, true);
+  }
+
+  async readAcceptedCycle(
+    cycleId: TaskIssueId,
+    correlationId: CorrelationId,
+  ): Promise<CycleAdvanceRequest | null> {
+    return this.#read(Object.freeze({
+      ...this.target,
+      cycle_id: parseCycleIssueId(cycleId),
+      correlation_id: correlationId,
+    }), false);
+  }
+
+  async #read(
+    request: CycleMachineReadRequest,
+    prepareWorkspace: boolean,
+  ): Promise<CycleAdvanceRequest | null> {
     if (
       request.root_id !== this.target.root_id
       || request.runtime_generation !== this.target.runtime_generation
@@ -302,7 +331,9 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       verify_issue: verify[0] === undefined ? null : this.#sealedStage(verify[0]),
       relations,
     }, request.cycle_id);
-    const git = await this.git.read(this.workspace);
+    const git = prepareWorkspace
+      ? await this.#prepareCycleWorkspace(request)
+      : await this.#readCycleWorkspace(request);
     return parseCycleExecutionSnapshot({
       schema_version: 1,
       root_id: request.root_id,
@@ -316,12 +347,40 @@ export class ProductionCycleReader implements FreshCycleExecutionReader, RootApp
       sealed_work_issues: work.map(executionStage),
       verify_issue: verify[0] === undefined ? null : executionStage(verify[0]),
       sealed_relations: relations,
+      resource_creation_evidence: task.resource_creation_evidence,
+      issue_history: task.issue_history,
+      issue_record_observations: task.issue_record_observations,
       git,
     }, {
       ...request,
       cycle_revision: cycle.revision,
       specification,
       sealed_graph: sealedGraph,
+    });
+  }
+
+  async #prepareCycleWorkspace(request: CycleMachineReadRequest): Promise<GitSnapshot> {
+    const root = await this.git.readRoot(this.workspace);
+    if (root.head_revision === null) throw new Error("git_root_revision_missing");
+    const identity = this.#cycleWorkspace(request);
+    const prepared = await this.git.prepare(Object.freeze({
+      ...identity,
+      correlation_id: request.correlation_id,
+      expected_base_revision: root.head_revision,
+    }));
+    if (prepared.outcome !== "applied") throw new Error("cycle_workspace_prepare_failed");
+    return this.git.read(identity);
+  }
+
+  async #readCycleWorkspace(request: CycleMachineReadRequest): Promise<GitSnapshot> {
+    return this.git.read(this.#cycleWorkspace(request));
+  }
+
+  #cycleWorkspace(request: CycleMachineReadRequest): CycleWorkspaceIdentity {
+    return Object.freeze({
+      ...this.workspace,
+      cycle_id: parseCycleIssueId(request.cycle_id),
+      head_branch: createCycleHeadBranch(request.cycle_id),
     });
   }
 
@@ -424,13 +483,13 @@ export class ExactGitDiffReader {
   });
 
   constructor(
-    private readonly git: Pick<GitWorkspaceInterface, "read">,
+    private readonly git: GitRootReadInterface,
     private readonly worktree: string,
     private readonly workspace: RootWorkspaceIdentity,
   ) {}
 
   async read(): Promise<GitDiffReadback> {
-    const snapshot = await this.git.read(this.workspace);
+    const snapshot = await this.git.readRoot(this.workspace);
     if (snapshot.head_revision === null) throw new Error("git_diff_revision_missing");
     const base = `refs/heads/${snapshot.base_branch}`;
     const baseRevision = parseRevision((await this.#command.run(this.worktree, [
@@ -463,64 +522,156 @@ export class ExactGitDiffReader {
   }
 }
 
-class DeliveringRootReconcill implements RootReconcillInterface {
-  constructor(
-    private readonly inner: RootReconcillInterface,
-    private readonly taskBinding: RootTaskManageCommandBinding,
-    private readonly delivery: AcceptedRevisionDeliveryCoordinator,
-    private readonly log: (entry: ProductionRuntimeLog) => void,
-  ) {}
+export interface ProductionDeliveryFinalizerOptions {
+  readonly target: Readonly<{ root_id: RootIssueId; runtime_generation: RuntimeGeneration }>;
+  readonly repository_id: RootWorkspaceIdentity["repository_id"];
+  readonly base_branch: string;
+  readonly workflow: TaskWorkflowIdentities;
+  readonly cycle_reader: Pick<ProductionCycleReader, "readAcceptedCycle">;
+  readonly accepted_revision: AcceptedRevisionAuthority;
+  readonly delivery: Pick<AcceptedRevisionDeliveryCoordinator, "deliver">;
+  readonly log: (entry: ProductionRuntimeLog) => void;
+}
 
-  get rootId(): RootIssueId { return this.inner.rootId; }
-  get runtimeGeneration(): RuntimeGeneration { return this.inner.runtimeGeneration; }
+export class ProductionDeliveryFinalizer implements DeliveryFinalizerHostInterface {
+  readonly #prepared = new WeakSet<PreparedDeliveryFinalizer>();
 
-  async run(input: RootReconcillInput) {
-    let outcome: Awaited<ReturnType<RootReconcillInterface["run"]>> | null = null;
-    let turnFailed = false;
-    let turnFailure: unknown;
-    try {
-      outcome = await this.inner.run(input);
-    } catch (error) {
-      turnFailed = true;
-      turnFailure = error;
-    }
-    const authorization = this.taskBinding.takeAcceptedRevisionAuthorization();
-    if (authorization !== null) {
-      this.log(Object.freeze({
-        event: "accepted_revision_delivery_started",
-        root_id: input.root_id,
-        runtime_generation: input.runtime_generation,
-        correlation_id: input.correlation_id,
-        cycle_id: authorization.acceptance_view.cycle_id,
-        revision: authorization.acceptance_view.exact_revision,
-      }));
-      let result: AcceptedRevisionDeliveryResult;
-      try {
-        result = await this.delivery.deliver(authorization, input.correlation_id, {
-          assertActive: () => undefined,
-        });
-      } catch {
-        throw new Error("accepted_revision_delivery_failed");
-      }
-      this.log(Object.freeze({
-        event: "accepted_revision_delivery_completed",
-        root_id: input.root_id,
-        runtime_generation: input.runtime_generation,
-        correlation_id: input.correlation_id,
-        cycle_id: result.cycle_id,
-        revision: result.exact_revision,
-        outcome: result.outcome,
-        ...(result.outcome === "not_delivered" ? { reason_code: result.reason_code } : {}),
-      }));
-      if (result.outcome !== "delivered") throw new Error("accepted_revision_delivery_failed");
-    }
-    if (turnFailed || outcome === null) {
-      throw new Error("root_turn_boundary_failed", { cause: turnFailure });
-    }
-    return outcome;
+  constructor(private readonly options: ProductionDeliveryFinalizerOptions) {}
+
+  async prepare(input: Readonly<{
+    readonly task: TaskSnapshot;
+    readonly route: FreshRouteMatch;
+    readonly correlation_id: CorrelationId;
+    readonly runtime_generation: RuntimeGeneration;
+  }>): Promise<PreparedDeliveryFinalizer> {
+    const route = this.#route(input.route);
+    const correlationId = parseCorrelationId(input.correlation_id);
+    const cycleTaskId = parseTaskIssueId(route.cycle_id);
+    if (
+      input.task.root_id !== this.options.target.root_id
+      || input.runtime_generation !== this.options.target.runtime_generation
+    ) throw new Error("delivery_finalizer_target_mismatch");
+    const cycle = input.task.issues.find(({ issue_id }) => issue_id === cycleTaskId);
+    if (
+      cycle === undefined
+      || cycle.kind !== "cycle"
+      || cycle.parent_issue_id !== parseTaskIssueId(this.options.target.root_id)
+      || cycle.status_id !== this.options.workflow.cycle_states.succeeded
+      || cycle.status !== "Succeeded"
+    ) throw new Error("delivery_finalizer_cycle_not_accepted");
+    await this.#authorize(route.cycle_id, correlationId);
+    const prepared = Object.freeze({
+      kind: "delivery_finalizer" as const,
+      root_id: this.options.target.root_id,
+      runtime_generation: this.options.target.runtime_generation,
+      correlation_id: correlationId,
+      selected_route: route.route_id,
+      cycle_id: route.cycle_id,
+    });
+    this.#prepared.add(prepared);
+    return prepared;
   }
 
-  close(): Promise<void> { return this.inner.close(); }
+  async run(prepared: PreparedDeliveryFinalizer) {
+    if (!this.#prepared.has(prepared)) throw new Error("invalid_delivery_finalizer_candidate");
+    const authorization = await this.#authorize(prepared.cycle_id, prepared.correlation_id);
+    this.options.log(Object.freeze({
+      event: "accepted_revision_delivery_started",
+      root_id: prepared.root_id,
+      runtime_generation: prepared.runtime_generation,
+      correlation_id: prepared.correlation_id,
+      cycle_id: authorization.acceptance_view.cycle_id,
+      revision: authorization.acceptance_view.exact_revision,
+    }));
+    let result: AcceptedRevisionDeliveryResult;
+    try {
+      result = await this.options.delivery.deliver(authorization, prepared.correlation_id, {
+        assertActive: () => undefined,
+      });
+    } catch {
+      throw new Error("accepted_revision_delivery_failed");
+    } finally {
+      this.#prepared.delete(prepared);
+    }
+    this.options.log(Object.freeze({
+      event: "accepted_revision_delivery_completed",
+      root_id: prepared.root_id,
+      runtime_generation: prepared.runtime_generation,
+      correlation_id: prepared.correlation_id,
+      cycle_id: result.cycle_id,
+      revision: result.exact_revision,
+      outcome: result.outcome,
+      ...(result.outcome === "not_delivered" ? { reason_code: result.reason_code } : {}),
+    }));
+    return Object.freeze({
+      kind: "delivery_finalizer_result" as const,
+      root_id: prepared.root_id,
+      runtime_generation: prepared.runtime_generation,
+      correlation_id: prepared.correlation_id,
+      selected_route: prepared.selected_route,
+      cycle_id: prepared.cycle_id,
+      outcome: result.outcome === "delivered"
+        ? "delivery_completed" as const
+        : result.reason_code === "delivery_invalidated"
+          ? "delivery_invalidated" as const
+          : "effect_unknown" as const,
+      ...(result.outcome === "not_delivered" ? { reason_code: result.reason_code } : {}),
+    });
+  }
+
+  #route(route: FreshRouteMatch): Readonly<{
+    readonly route_id: "WF-ROUTE-010" | "WF-ROUTE-012";
+    readonly cycle_id: CycleIssueId;
+  }> {
+    if (
+      route.consumer !== "delivery_finalizer"
+      || (route.route_id !== "WF-ROUTE-010" && route.route_id !== "WF-ROUTE-012")
+      || route.cycle_id === null
+    ) throw new Error("delivery_finalizer_route_invalid");
+    return Object.freeze({ route_id: route.route_id, cycle_id: parseCycleIssueId(route.cycle_id) });
+  }
+
+  async #authorize(cycleId: CycleIssueId, correlationId: CorrelationId): Promise<AcceptedRevisionAuthorization> {
+    const cycle = await this.options.cycle_reader.readAcceptedCycle(parseTaskIssueId(cycleId), correlationId);
+    if (
+      cycle === null
+      || cycle.root_id !== this.options.target.root_id
+      || cycle.cycle_id !== cycleId
+      || cycle.runtime_generation !== this.options.target.runtime_generation
+      || cycle.correlation_id !== correlationId
+      || cycle.cycle_status !== "succeeded"
+      || cycle.git.repository_id !== this.options.repository_id
+      || cycle.git.base_branch !== this.options.base_branch
+      || cycle.git.head_branch !== createCycleHeadBranch(cycleId)
+      || cycle.git.head_revision === null
+      || cycle.git.workspace_state !== "clean"
+      || cycle.plan_issue === null
+      || cycle.plan_issue.status !== "done"
+      || cycle.sealed_work_issues.some(({ status }) => status !== "done")
+      || cycle.verify_issue === null
+      || cycle.verify_issue.status !== "done"
+    ) throw new Error("accepted_cycle_facts_invalid");
+    const view = parseRootAcceptanceView({
+      schema_version: 1,
+      cycle_id: cycle.cycle_id,
+      cycle_revision: cycle.cycle_revision,
+      cycle_seal_digest: cycle.specification.seal_digest,
+      graph_seal_digest: cycle.sealed_graph_digest,
+      repository_id: cycle.git.repository_id,
+      base_branch: cycle.git.base_branch,
+      head_branch: createRootHeadBranch(this.options.target.root_id),
+      exact_revision: cycle.git.head_revision,
+      workspace_state: cycle.git.workspace_state,
+      diff_digest: cycle.git.diff_digest,
+      verify_issue_id: cycle.verify_issue.issue_id,
+      verify_issue_revision: cycle.verify_issue.revision,
+    });
+    return this.options.accepted_revision.issuer.issue({
+      root_id: this.options.target.root_id,
+      runtime_generation: this.options.target.runtime_generation,
+      acceptance_view: view,
+    });
+  }
 }
 
 interface ProductionRuntimeFactoryOptions {
@@ -529,30 +680,23 @@ interface ProductionRuntimeFactoryOptions {
   readonly task_manager: TaskManageCommandInterface;
   readonly caller_issuer: TaskManageCallerIssuer;
   readonly homes: RootHomeManager;
-  readonly routes: ReadonlyMap<RootIssueId, ProductionRoute>;
+  readonly route: ProductionRootBinding;
   readonly log: (entry: ProductionRuntimeLog) => void;
 }
 
 export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
-  readonly #baseReader = new GitCommand({
-    executable: "git",
-    timeoutMs: COMMAND_TIMEOUT_MS,
-    maxOutputBytes: MAX_COMMAND_OUTPUT_BYTES,
-  });
-
   constructor(private readonly options: ProductionRuntimeFactoryOptions) {}
 
   async create(rootIdValue: RootIssueId): Promise<RootRuntimeBinding> {
     const rootId = parseRootIssueId(rootIdValue);
-    const route = this.options.routes.get(rootId);
-    if (route === undefined) throw new Error("root_route_missing");
+    const route = this.options.route;
+    if (route.root_id !== rootId) throw new Error("root_route_identity_mismatch");
     const workspace = Object.freeze({
       root_id: rootId,
       repository_id: route.repository_id,
       base_branch: route.base_branch,
       head_branch: createRootHeadBranch(rootId),
     });
-    await this.#prepareWorkspace(route, workspace);
     const home = await this.options.homes.open(rootId);
     const previous = await home.continuity.loadOptional();
     if (previous !== null && previous.root_id !== rootId) throw new Error("root_home_owner_mismatch");
@@ -578,9 +722,8 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
       record_reader: this.options.queries,
       service_actor_id: this.options.startup.config.agent_actor_id,
       approved_cycle_reader: reader,
-      accepted_revision_issuer: acceptedRevision.issuer,
     });
-    const diffReader = new ExactGitDiffReader(route.git, route.git.pathFor(rootId), workspace);
+    const diffReader = new ExactGitDiffReader(route.git, route.repository_path, workspace);
     const gitTools = createRootGitReadTools({
       git: route.git,
       workspace,
@@ -596,7 +739,7 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
     const transport = new CodexRootTurnTransportFactory(codexOptions, {
       resolveWorkspaceRoot: async (requestedRootId) => {
         if (requestedRootId !== rootId) throw new Error("root_route_identity_mismatch");
-        return route.git.pathFor(rootId);
+        return route.repository_path;
       },
       log: (entry) => this.options.log(entry),
     });
@@ -615,15 +758,23 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         log: (entry) => this.options.log(entry),
       },
     );
+    const deliveryRecordStore = new DeliveryTerminalRecordWriter({
+      task_manager: this.options.task_manager,
+      task_caller_issuer: this.options.caller_issuer,
+      record_reader: this.options.queries,
+      service_actor_id: this.options.startup.config.agent_actor_id,
+    });
     const delivery = new AcceptedRevisionDeliveryCoordinator({
       provider: "github",
       root_label_id: this.options.startup.config.workflow.labels.root,
       root_in_progress_state: this.options.startup.config.root_states.in_progress,
       root_in_review_state: this.options.startup.config.root_states.in_review,
+      root_failed_state: this.options.startup.config.root_states.failed,
       accepted_revision_verifier: acceptedRevision.verifier,
       task_caller_issuer: this.options.caller_issuer,
       task_manager: this.options.task_manager,
       delivery: route.delivery,
+      record_store: deliveryRecordStore,
     });
     const planMachine = new CyclePlanMachine({
       sealed_basis_reader: reader,
@@ -652,7 +803,7 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         create: (performerTarget) => WorkPerformer.create({
           ...performerTarget,
           performer_home: this.options.startup.config.performer_home,
-          root_worktree: route.git.pathFor(rootId),
+          root_worktree: route.git.pathFor(performerTarget.cycle_id),
         }, {
           ...codexOptions,
           turnTimeoutMs: CODEX_TURN_TIMEOUT_MS,
@@ -662,7 +813,7 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
         create: (performerTarget) => VerifyPerformer.create({
           ...performerTarget,
           performer_home: this.options.startup.config.performer_home,
-          revision_worktree: route.git.pathFor(rootId),
+          revision_worktree: route.git.pathFor(performerTarget.cycle_id),
         }, {
           ...codexOptions,
           turnTimeoutMs: CODEX_TURN_TIMEOUT_MS,
@@ -680,17 +831,23 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
       ...target,
       root_home: home.path,
     });
+    const deliveryFinalizer = new ProductionDeliveryFinalizer({
+      target,
+      repository_id: route.repository_id,
+      base_branch: route.base_branch,
+      workflow: this.options.startup.config.workflow,
+      cycle_reader: reader,
+      accepted_revision: acceptedRevision,
+      delivery,
+      log: this.options.log,
+    });
     return Object.freeze({
       target,
       workspace,
       git: route.git,
       cycle,
-      turn: new DeliveringRootReconcill(
-        root,
-        taskBinding,
-        delivery,
-        this.options.log,
-      ),
+      delivery_finalizer: deliveryFinalizer,
+      turn: root,
     });
   }
 
@@ -706,27 +863,6 @@ export class ProductionRootRuntimeFactory implements RootRuntimeFactory {
     });
   }
 
-  async #prepareWorkspace(
-    route: ProductionRoute,
-    workspace: RootWorkspaceIdentity,
-  ): Promise<void> {
-    try {
-      await route.git.read(workspace);
-      return;
-    } catch {
-      // A missing workspace is created below; identity conflicts remain closed in prepare/read-back.
-    }
-    const baseRevision = parseRevision((await this.#baseReader.run(route.repository_path, [
-      "rev-parse", "--verify", `refs/heads/${route.base_branch}^{commit}`,
-    ])).toString("utf8").trim());
-    const prepared = await route.git.prepare({
-      ...workspace,
-      correlation_id: parseCorrelationId(`prepare:${randomUUID()}`),
-      expected_base_revision: baseRevision,
-    });
-    if (prepared.outcome !== "applied") throw new Error("root_workspace_prepare_failed");
-    await route.git.read(workspace);
-  }
 }
 
 export function worktreeRoot(programDataPath: string, repositoryId: string): string {

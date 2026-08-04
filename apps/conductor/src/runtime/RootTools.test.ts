@@ -43,7 +43,6 @@ import {
   bindRootTaskManageCommand,
   type RootTaskManageCommandBinding,
 } from "./RootTaskManageCommand.js";
-import { createAcceptedRevisionAuthority } from "./RootAcceptedRevision.js";
 import { RootToolCallError, RootToolFatalError } from "./RootToolBoundary.js";
 
 const rootId = parseRootIssueId("LIN-1");
@@ -55,7 +54,6 @@ const derivedCycleId = (kind: string) => deriveCycleUuid(identityVersion, kind, 
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
 const callerAuthority = createTaskManageCallerAuthority();
-const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
 const recordComments = new WeakMap<TaskManageCommandInterface, Array<{
   readonly comment_id: string;
   readonly issue_id: ReturnType<typeof parseTaskIssueId>;
@@ -385,7 +383,6 @@ function bindTaskManager(
     ) },
     service_actor_id: "actor:symphony",
     approved_cycle_reader: { readApprovedCycle: async () => null },
-    accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
 }
 
@@ -707,18 +704,34 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
 
   const createIssue = tools.specs.find(({ name }) => name === "create_issue");
   assert.ok(createIssue);
+  assert.ok(createIssue.description.length <= 1_024);
+  assert.equal(createIssue.description.includes("issue_id must be a fresh UUIDv4; never a name or placeholder"), true);
+  assert.equal(createIssue.description.includes(`state_id must be exactly ${workflow.cycle_states.draft}`), true);
+  assert.equal(createIssue.description.includes(`label_ids must be [${workflow.labels.cycle}]`), true);
+  assert.equal(createIssue.description.includes("never use state or label names, aliases, or placeholders"), true);
+  assert.equal(
+    createIssue.description,
+    "Create one Cycle Draft under the exact Root. Emit this exact nested JSON shape. Valid: {\"issue_id\":\"11111111-1111-4111-8111-111111111111\",\"parent_issue_id\":\"ROOT\",\"expected_parent_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\",\"description\":\"MARKDOWN\",\"state_id\":\"STATE_ID\",\"label_ids\":[\"LABEL_ID\"],\"delegate_id\":null,\"priority\":null}}. Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input. issue_id must be a fresh UUIDv4; never a name or placeholder. For this Root, state_id must be exactly state:draft and label_ids must be [label:cycle]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders.",
+  );
   const inputSchema = (createIssue.inputSchema as {
-    properties: Record<string, { properties?: Record<string, unknown> }>;
+    properties: Record<string, { description?: unknown; properties?: Record<string, unknown> }>;
   }).properties.input;
   assert.ok(inputSchema);
+  assert.equal(
+    (inputSchema as { description?: unknown }).description,
+    "This input contains exactly issue_id, parent_issue_id, expected_parent_revision, and desired; put exactly title, description, state_id, label_ids, delegate_id, and priority inside desired. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, preserving headings and Markdown; never paraphrase. issue_id must be a fresh UUIDv4; never a name or placeholder. For this Root, state_id must be exactly state:draft and label_ids must be [label:cycle]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders. Emit this exact nested JSON shape. Valid: {\"issue_id\":\"11111111-1111-4111-8111-111111111111\",\"parent_issue_id\":\"ROOT\",\"expected_parent_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\",\"description\":\"MARKDOWN\",\"state_id\":\"STATE_ID\",\"label_ids\":[\"LABEL_ID\"],\"delegate_id\":null,\"priority\":null}}. Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input.",
+  );
   const createInput = inputSchema.properties as Record<string, {
+    description?: unknown;
     enum?: unknown;
     type?: unknown;
     pattern?: unknown;
+    maxProperties?: unknown;
     minItems?: unknown;
     maxItems?: unknown;
     items?: { enum?: unknown };
     properties?: Record<string, {
+      description?: unknown;
       enum?: unknown;
       type?: unknown;
       minItems?: unknown;
@@ -726,6 +739,10 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
       items?: { enum?: unknown };
     }>;
   }>;
+  assert.equal(
+    createInput.issue_id?.description,
+    "Use a fresh UUIDv4 for issue_id; never use an issue name or placeholder.",
+  );
   assert.equal(createInput.issue_id?.type, "string");
   assert.match(
     "11111111-1111-4111-8111-111111111111",
@@ -733,7 +750,16 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   );
   assert.deepEqual(createInput.parent_issue_id?.enum, [rootId]);
   const desired = createInput.desired?.properties;
+  assert.equal(
+    createInput.desired?.description,
+    "This desired object contains exactly title, description, state_id, label_ids, delegate_id, and priority; all six fields belong inside desired and none may be placed beside desired in the parent input object. For this Root, state_id must be exactly state:draft and label_ids must be [label:cycle]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders.",
+  );
+  assert.equal(createInput.desired?.maxProperties, 6);
   assert.equal(desired?.description?.type, "string");
+  assert.equal(
+    desired?.description?.description,
+    "For a Cycle Draft target, use at most one level-1 title followed by exactly these level-2 headings in order: Root Definition Revision, Requirement, Domain Knowledge, Root ADR, Acceptance, Architecture, Feature Design, Code Design, Boundaries, Acceptance Mapping, Failure Strategy. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase.",
+  );
   assert.deepEqual(desired?.state_id?.enum, [workflow.cycle_states.draft]);
   assert.equal(desired?.label_ids?.minItems, 1);
   assert.equal(desired?.label_ids?.maxItems, 1);
@@ -750,6 +776,59 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   assert.match(
     "22222222-2222-4222-8222-222222222222",
     new RegExp(String(relationInput?.relation_id?.pattern), "u"),
+  );
+
+  const updateIssue = tools.specs.find(({ name }) => name === "update_issue");
+  assert.ok(updateIssue);
+  const updateDesired = (updateIssue.inputSchema as {
+    properties: Record<string, {
+      properties?: Record<string, {
+        description?: unknown;
+        maxProperties?: unknown;
+        properties?: Record<string, { description?: unknown }>;
+        oneOf?: readonly {
+          additionalProperties?: unknown;
+          properties?: Record<string, unknown>;
+          required?: readonly string[];
+        }[];
+      }>;
+    }>;
+  }).properties.input?.properties?.desired;
+  const updateDescription = updateDesired?.properties?.description;
+  const updateInput = (updateIssue.inputSchema as {
+    properties: Record<string, { description?: unknown }>;
+  }).properties.input;
+  assert.equal(
+    updateInput?.description,
+    "This is the nested input object. It contains exactly issue_id, expected_revision, and desired; put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired. Do not put schema_version, function, root_id, runtime_generation, correlation_id, capability, or any desired field in this object beside desired. Use this exact nested JSON shape (replace placeholders with current facts). Valid: {\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}. Valid tool arguments: {\"schema_version\":1,\"function\":\"update_issue\",\"root_id\":\"ROOT\",\"runtime_generation\":1,\"correlation_id\":\"CORR\",\"capability\":\"task_manage:update_issue\",\"input\":{\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}}. The input object contains exactly issue_id, expected_revision, and desired. The desired object contains exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority. Put no other keys anywhere in the input object.",
+  );
+  assert.equal(
+    updateDesired?.description,
+    "Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside this desired object; do not place any of those fields beside desired in the parent input object. {\"title\":\"TITLE\"} is a valid desired object. The desired object contains exactly one field. Emit one field only.",
+  );
+  assert.equal(updateDesired?.maxProperties, 1);
+  const updateFields = [
+    "title", "description", "state_id", "parent_id", "label_ids", "delegate_id", "priority",
+  ];
+  assert.equal(updateDesired?.oneOf?.length, updateFields.length);
+  for (const [index, field] of updateFields.entries()) {
+    const variant: {
+      readonly additionalProperties?: unknown;
+      readonly properties?: Record<string, unknown>;
+      readonly required?: readonly string[];
+    } | undefined = updateDesired?.oneOf?.[index];
+    assert.ok(variant);
+    assert.equal(variant.additionalProperties, false);
+    assert.deepEqual(variant.required, [field]);
+    assert.deepEqual(Object.keys(variant.properties ?? {}), [field]);
+  }
+  assert.equal(
+    updateIssue.description,
+    "Update exactly one field on one exact issue revision. The input keys are exactly issue_id, expected_revision, and desired. Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired; parent_id is nested inside desired, never beside desired. Use this exact nested JSON shape (replace placeholders with current facts). Valid: {\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}. Valid tool arguments: {\"schema_version\":1,\"function\":\"update_issue\",\"root_id\":\"ROOT\",\"runtime_generation\":1,\"correlation_id\":\"CORR\",\"capability\":\"task_manage:update_issue\",\"input\":{\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}}. The input object contains exactly issue_id, expected_revision, and desired. The desired object contains exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority. Put no other keys anywhere in the input object.",
+  );
+  assert.equal(
+    updateDescription?.description,
+    "For a Root target, use one optional level-1 title followed by exactly these level-2 headings in order: Requirement, Domain Knowledge, Root ADR, Acceptance. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
   );
 });
 
@@ -1473,7 +1552,6 @@ test("Root tools fail composition closed for raw or differently bound Task manag
     record_reader: { readIssueRecordComments: async () => [] },
     service_actor_id: "actor:symphony",
     approved_cycle_reader: { readApprovedCycle: async () => null },
-    accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
   assert.throws(() => new RootTools({
     target: { root_id: rootId, runtime_generation: generation },

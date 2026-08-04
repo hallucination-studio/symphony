@@ -8,6 +8,8 @@ import {
   type TaskWorkflowCatalog,
 } from "./ProductionConductor.js";
 import { parseConductorConfig } from "./config.js";
+import { runForeground } from "../main.js";
+import { parseRootIssueId } from "../contracts/identity.js";
 
 function config() {
   return parseConductorConfig({
@@ -23,6 +25,7 @@ function config() {
       in_progress: "state:root:in-progress",
       in_review: "state:root:in-review",
       done: "state:root:done",
+      failed: "state:cycle:failed",
     },
     workflow: {
       labels: {
@@ -62,12 +65,12 @@ function config() {
       "git:get_status",
       "git:get_diff",
     ],
-    root_routing: [{
+    root: {
       root_id: "ROOT-1",
       repository_id: "repo:1",
       repository_path: "/srv/repo",
       base_branch: "main",
-    }],
+    },
   });
 }
 
@@ -119,15 +122,37 @@ test("startup validates every configured status and kind identity against the fr
   }), /invalid_task_workflow_configuration/u);
 });
 
-test("one production poll drains only the single serial scheduler and continues after one Root fails", async () => {
+test("startup permits cross-scope state reuse while preserving per-scope identities", () => {
+  const base = config();
+  const shared = Object.freeze({
+    ...base,
+    workflow: Object.freeze({
+      ...base.workflow,
+      cycle_states: Object.freeze({
+        ...base.workflow.cycle_states,
+        in_progress: base.root_states.in_progress,
+      }),
+      stage_states: Object.freeze({
+        ...base.workflow.stage_states,
+        todo: base.root_states.todo,
+        in_progress: base.root_states.in_progress,
+        done: base.root_states.done,
+        failed: base.workflow.cycle_states.failed,
+        canceled: base.workflow.cycle_states.canceled,
+      }),
+    }),
+  });
+  assert.doesNotThrow(() => assertTaskWorkflowConfiguration(shared, expectedCatalog));
+});
+
+test("one production poll fails closed on a scheduler failure", async () => {
   const order: string[] = [];
   let active = 0;
   let maximum = 0;
-  const events = Object.freeze([{ root_id: "ROOT-1" }, { root_id: "ROOT-2" }]);
+  const events = Object.freeze([{ root_id: "ROOT-1" }]);
   const results = [
     { kind: "cycle_action_completed", root_id: "ROOT-1", outcome: "advanced" },
     { kind: "failed", root_id: "ROOT-1", reason_code: "cycle_boundary_failed" },
-    { kind: "turn_completed", root_id: "ROOT-2", outcome: "quiescent" },
     { kind: "idle" },
   ] as const;
   const target: ProductionPollTarget = {
@@ -153,15 +178,42 @@ test("one production poll drains only the single serial scheduler and continues 
     },
   };
 
-  const result = await runProductionPoll(target);
-
-  assert.deepEqual(result, { observations: 2, actions: 3, failures: 1 });
+  await assert.rejects(() => runProductionPoll(target), /cycle_boundary_failed/u);
   assert.equal(maximum, 1);
   assert.deepEqual(order, [
     "admit",
     "cycle_action_completed",
     "failed",
-    "turn_completed",
-    "idle",
   ]);
+});
+
+test("a scheduler failure fails the foreground process without waiting or claiming stop", async () => {
+  const order: string[] = [];
+  const rootId = parseRootIssueId("ROOT-1");
+  const target: ProductionPollTarget & { readonly polling_interval_ms: number } = {
+    polling_interval_ms: 1_000,
+    observer: {
+      poll_once: async () => [{ root_id: "ROOT-1" }] as never,
+    },
+    scheduler: {
+      admit: () => { order.push("admit"); },
+      runNext: async () => {
+        order.push("failed");
+        return {
+          kind: "failed",
+          root_id: rootId,
+          reason_code: "root_home_cleanup_failed",
+        } as const;
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => runForeground(target, {
+      stopRequested: () => false,
+      wait: async () => { order.push("wait"); },
+    }),
+    /root_home_cleanup_failed/u,
+  );
+  assert.deepEqual(order, ["admit", "failed"]);
 });

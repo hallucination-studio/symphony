@@ -31,6 +31,14 @@ import {
   type MarkdownText,
   type UnknownRecord,
 } from "./validation.js";
+import {
+  parseTaskIssueHistoryEntry,
+  parseTaskIssueRecordObservation,
+  parseTaskResourceCreationEvidence,
+  type TaskIssueHistoryEntry,
+  type TaskIssueRecordObservation,
+  type TaskResourceCreationEvidence,
+} from "./task-management.js";
 
 export const ROOT_DEFINITION_SECTION_NAMES = Object.freeze([
   "Requirement",
@@ -194,6 +202,9 @@ export interface CycleExecutionSnapshot extends Omit<CycleExecutionTarget, "seal
   readonly verify_issue: StageExecutionSnapshot | null;
   readonly sealed_relations: readonly SealedStageRelation[];
   readonly sealed_graph_digest: ExecutionGraphSealDigest;
+  readonly resource_creation_evidence: readonly TaskResourceCreationEvidence[];
+  readonly issue_history: readonly TaskIssueHistoryEntry[];
+  readonly issue_record_observations: readonly TaskIssueRecordObservation[];
   readonly git: GitSnapshot;
 }
 
@@ -945,6 +956,9 @@ export function parseCycleExecutionSnapshot(
     "sealed_work_issues",
     "verify_issue",
     "sealed_relations",
+    "resource_creation_evidence",
+    "issue_history",
+    "issue_record_observations",
     "git",
   ]);
   const rootId = parseRootIssueId(record.root_id);
@@ -983,6 +997,15 @@ export function parseCycleExecutionSnapshot(
     expected.sealed_graph.verify_issue,
   );
   const relations = parseExecutionRelationList(record.sealed_relations, expected.sealed_graph.relations);
+  const resourceCreationEvidence = parseArray(
+    record.resource_creation_evidence,
+    parseTaskResourceCreationEvidence,
+  );
+  const issueHistory = parseArray(record.issue_history, parseTaskIssueHistoryEntry);
+  const issueRecordObservations = parseArray(
+    record.issue_record_observations,
+    parseTaskIssueRecordObservation,
+  );
 
   return Object.freeze({
     schema_version: parseSchemaVersion(record.schema_version),
@@ -998,6 +1021,9 @@ export function parseCycleExecutionSnapshot(
     verify_issue: verifyIssue,
     sealed_relations: relations,
     sealed_graph_digest: expected.sealed_graph.seal_digest,
+    resource_creation_evidence: resourceCreationEvidence,
+    issue_history: issueHistory,
+    issue_record_observations: issueRecordObservations,
     git: parseGitSnapshot(record.git),
   });
 }

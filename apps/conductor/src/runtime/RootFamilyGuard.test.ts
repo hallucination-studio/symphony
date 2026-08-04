@@ -28,6 +28,7 @@ const rootStates = {
   in_progress: parseTaskStateId("root:in-progress"),
   in_review: parseTaskStateId("root:in-review"),
   done: parseTaskStateId("root:done"),
+  failed: parseTaskStateId("cycle:failed"),
 };
 
 function event(secondStatus = workflow.cycle_states.draft) {

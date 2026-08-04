@@ -49,8 +49,9 @@ import {
   bindRootTaskManageCommand,
   type RootApprovedCycleReader,
 } from "./RootTaskManageCommand.js";
-import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
-import { createAcceptedRevisionAuthority } from "./RootAcceptedRevision.js";
+import {
+  createCycleHeadBranch,
+} from "../delivery/api/DeliveryInterface.js";
 
 const rootId = parseRootIssueId("ROOT-A");
 const identityVersion = "symphony-identity:v1";
@@ -62,7 +63,6 @@ const generation = parseRuntimeGeneration(7);
 const correlationId = parseCorrelationId("corr:root:7");
 const execution: TaskManageBoundaryExecution = { assertActive: () => undefined };
 const callerAuthority = createTaskManageCallerAuthority();
-const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
 const recordComments = new WeakMap<TaskManageCommandInterface, Array<{
   readonly comment_id: string;
   readonly issue_id: ReturnType<typeof parseTaskIssueId>;
@@ -507,10 +507,13 @@ function approvedCycle(options: ApprovedCycleOptions = {}): CycleExecutionSnapsh
       status: options.verify_status ?? "done",
     },
     sealed_relations: graph.relations,
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: {
       repository_id: "repo:symphony",
       base_branch: "main",
-      head_branch: createRootHeadBranch(rootId),
+      head_branch: createCycleHeadBranch(parseCycleIssueId(cycleTaskId)),
       head_revision: options.head_revision === undefined
         ? "0123456789abcdef0123456789abcdef01234567"
         : options.head_revision,
@@ -618,7 +621,6 @@ function bindBase(
     ) },
     service_actor_id: "actor:symphony",
     approved_cycle_reader: approvedCycleReader,
-    accepted_revision_issuer: acceptedRevisionAuthority.issuer,
   });
 }
 
@@ -925,16 +927,6 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
       } | null }).acceptance_view;
       assert.equal(view?.exact_revision, entry.approved.git.head_revision);
     }
-    const deliveryAuthorization = bound.takeAcceptedRevisionAuthorization();
-    const accepted = entry.call.function === "update_issue"
-      && entry.call.input.desired.state_id === workflow.cycle_states.succeeded;
-    assert.equal(deliveryAuthorization === null, !accepted);
-    if (deliveryAuthorization !== null) {
-      acceptedRevisionAuthority.verifier.assert(deliveryAuthorization);
-      assert.equal(deliveryAuthorization.root_id, rootId);
-      assert.equal(deliveryAuthorization.runtime_generation, generation);
-      assert.equal(deliveryAuthorization.acceptance_view.exact_revision, entry.approved?.git.head_revision);
-    }
     const approvalWrite = entry.call.function === "update_issue"
       && entry.call.input.desired.state_id === workflow.cycle_states.in_progress
       ? ["create_issue_comment"]
@@ -1122,11 +1114,6 @@ test("Root resolves unknown Succeeded acceptance into the original exact deliver
     readonly acceptance_view?: unknown;
   };
   assert.equal(consumed.acceptance_view, undefined);
-  const deliveryAuthorization = bound.takeAcceptedRevisionAuthorization();
-  assert.ok(deliveryAuthorization);
-  acceptedRevisionAuthority.verifier.assert(deliveryAuthorization);
-  assert.deepEqual(deliveryAuthorization.acceptance_view, initial.acceptance_view);
-  assert.equal(bound.takeAcceptedRevisionAuthorization(), null);
   assert.deepEqual(effects, [
     "get_issue", "update_issue", "get_issue", "get_issue", "get_issue",
   ]);

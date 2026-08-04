@@ -65,6 +65,7 @@ export interface CycleMachineHostInterface {
     correlationId: CorrelationId,
     previousAcceptedTask: TaskSnapshot | null,
     closure?: CycleMachineExecution["closure"],
+    selectedCycleId?: CycleIssueId,
   ): Promise<CycleMachinePreparation>;
   prepareContinuation(): Promise<CycleMachinePreparation>;
   run(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
@@ -152,6 +153,9 @@ export function bindCycleAdvanceRequest(value: CycleAdvanceRequest): CycleAdvanc
     sealed_work_issues: value.sealed_work_issues.map(executionStage),
     verify_issue: value.verify_issue === null ? null : executionStage(value.verify_issue),
     sealed_relations: value.sealed_relations,
+    resource_creation_evidence: value.resource_creation_evidence,
+    issue_history: value.issue_history,
+    issue_record_observations: value.issue_record_observations,
     git: value.git,
   }, {
     root_id: parseRootIssueId(value.root_id),
@@ -221,6 +225,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     correlationValue: CorrelationId,
     previousAcceptedTaskValue: TaskSnapshot | null,
     closure: CycleMachineExecution["closure"] = undefined,
+    selectedCycleValue: CycleIssueId | undefined = undefined,
   ): Promise<CycleMachinePreparation> {
     this.#assertAvailable();
     const correlationId = parseCorrelationId(correlationValue);
@@ -261,8 +266,39 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     if (nonTerminal.length > 1) {
       return this.#paused("invalid_contract", "multiple_non_terminal_cycles", correlationId);
     }
+    const selectedCycleId = selectedCycleValue === undefined
+      ? undefined
+      : parseTaskIssueId(selectedCycleValue);
     const candidate = nonTerminal[0];
+    if (selectedCycleId !== undefined && candidate !== undefined) {
+      return this.#paused("readback_mismatch", "external_terminal_cycle_readback_changed", correlationId);
+    }
     if (candidate === undefined) {
+      if (selectedCycleId !== undefined) {
+        const selectedCycle = cycles.find(({ issue_id }) => issue_id === selectedCycleId);
+        const selectedStatus = selectedCycle === undefined ? null : cycleStatus(selectedCycle, this.#workflow);
+        if (
+          selectedCycle === undefined
+          || selectedStatus === null
+          || selectedStatus === "draft"
+          || selectedStatus === "in_progress"
+          || selectedStatus === "awaiting_acceptance"
+        ) return this.#paused("readback_mismatch", "external_terminal_cycle_missing", correlationId);
+        const cycleId = parseCycleIssueId(selectedCycle.issue_id);
+        if (this.#active !== null && this.#active.cycle_id !== cycleId) {
+          return this.#paused("invalid_contract", "active_cycle_rebound", correlationId);
+        }
+        const ownership = this.#active?.ownership ?? "live";
+        return this.#readAction(
+          cycleId,
+          correlationId,
+          selectedCycle,
+          task,
+          ownership,
+          closure,
+          true,
+        );
+      }
       this.#active = null;
       return ROOT_AVAILABLE;
     }
@@ -358,6 +394,7 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     task: TaskSnapshot | null,
     requestedOwnership: CycleMachineExecution["ownership"],
     closure: CycleMachineExecution["closure"],
+    allowExternalTerminal = false,
   ): Promise<CycleMachinePreparation> {
     let raw: CycleAdvanceRequest | null;
     try {
@@ -390,14 +427,23 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       ownership = "lost";
     }
     if (snapshot.cycle_status !== "in_progress" && snapshot.cycle_status !== "awaiting_acceptance") {
-      if (snapshot.cycle_status === "succeeded" || snapshot.cycle_status === "rejected") {
-        return this.#paused("readback_mismatch", "active_cycle_acceptance_bypassed", correlationId);
+      if (allowExternalTerminal) {
+        if (
+          snapshot.cycle_status !== "succeeded"
+          && snapshot.cycle_status !== "rejected"
+          && snapshot.cycle_status !== "failed"
+          && snapshot.cycle_status !== "canceled"
+        ) return this.#paused("readback_mismatch", "external_terminal_cycle_readback_changed", correlationId);
+      } else {
+        if (snapshot.cycle_status === "succeeded" || snapshot.cycle_status === "rejected") {
+          return this.#paused("readback_mismatch", "active_cycle_acceptance_bypassed", correlationId);
+        }
+        if (observedCycle !== null) {
+          return this.#paused("readback_mismatch", "cycle_admission_readback_changed", correlationId);
+        }
+        this.#active = null;
+        return ROOT_AVAILABLE;
       }
-      if (observedCycle !== null) {
-        return this.#paused("readback_mismatch", "cycle_admission_readback_changed", correlationId);
-      }
-      this.#active = null;
-      return ROOT_AVAILABLE;
     }
     const matchesTask = observedCycle === null
       || task === null

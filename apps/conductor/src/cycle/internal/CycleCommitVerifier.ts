@@ -14,9 +14,9 @@ import { parseMutationResult } from "../../contracts/mutation.js";
 import type { GitSnapshot } from "../../contracts/observation.js";
 import type { TaskIssueSnapshot } from "../../contracts/task-management.js";
 import type {
+  CycleWorkspaceIdentity,
   GitCommitProof,
   GitWorkspaceInterface,
-  RootWorkspaceIdentity,
 } from "../../git/api/GitWorkspaceInterface.js";
 import {
   parseVerifyRequest,
@@ -340,9 +340,10 @@ function assertCommitProof(
   ) throw new Error("commit_proof_mismatch");
 }
 
-function workspaceIdentity(request: CycleAdvanceRequest): RootWorkspaceIdentity {
+function workspaceIdentity(request: CycleAdvanceRequest): CycleWorkspaceIdentity {
   return Object.freeze({
     root_id: request.root_id,
+    cycle_id: request.cycle_id,
     repository_id: request.git.repository_id,
     base_branch: request.git.base_branch,
     head_branch: request.git.head_branch,
@@ -421,7 +422,7 @@ export class CycleCommitVerifier {
         if (
           mutation === null
           || mutation.outcome !== "applied"
-          || mutation.target_id !== request.root_id
+          || mutation.target_id !== request.cycle_id
           || mutation.correlation_id !== request.correlation_id
         ) throw new Error("commit_mutation_failed");
         assertCommitted(before, committed);

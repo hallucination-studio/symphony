@@ -95,7 +95,7 @@ function binding(
     workspace,
     cycle,
     git: {
-      read: async () => parseGitSnapshot({
+      readRoot: async () => parseGitSnapshot({
         repository_id: workspace.repository_id,
         base_branch: workspace.base_branch,
         head_branch: workspace.head_branch,
@@ -130,7 +130,7 @@ function rootAvailableCycle(cycleRootId: RootIssueId): CycleMachineHostInterface
 
 test("registry creates one identity-bound runtime under concurrent lookup", async () => {
   let creations = 0;
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async () => {
       creations += 1;
       await Promise.resolve();
@@ -158,7 +158,7 @@ test("registry creates one identity-bound runtime under concurrent lookup", asyn
 test("retirement fences every caller waiting on the same runtime creation", async () => {
   let releaseCreation: (() => void) | undefined;
   const creationReleased = new Promise<void>((resolve) => { releaseCreation = resolve; });
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async () => {
       await creationReleased;
       return binding(async (input) => ({
@@ -187,7 +187,7 @@ test("retirement fences every caller waiting on the same runtime creation", asyn
 
 test("runtime validates turn correlation before accepting an observation", async () => {
   const outputCorrelation = parseCorrelationId("corr:stale");
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async () => binding(async (input) => ({
       schema_version: 1,
       root_id: input.root_id,
@@ -205,84 +205,28 @@ test("runtime validates turn correlation before accepting an observation", async
   assert.throws(() => runtime.accept(prepared), /root_runtime_turn_not_completed/u);
 });
 
-test("registry rejects wrong-root and aliased turn resources", async () => {
+test("registry rejects a second Root before factory allocation", async () => {
   const wrongRoot = parseRootIssueId("LIN-2");
-  let wrongRootCloses = 0;
-  const wrongRegistry = new RootRuntimeRegistry({
-    create: async () => binding(
-      async (input) => ({
+  let creations = 0;
+  const registry = new RootRuntimeRegistry(rootId, {
+    create: async () => {
+      creations += 1;
+      return binding(async (input) => ({
         schema_version: 1,
         root_id: input.root_id,
         runtime_generation: input.runtime_generation,
         correlation_id: input.correlation_id,
         outcome: "quiescent",
-      }),
-      async () => {
-        wrongRootCloses += 1;
-        throw new Error("private_close_failure");
-      },
-    ),
-  });
-  await assert.rejects(wrongRegistry.getOrCreate(wrongRoot), /root_runtime_identity_mismatch/u);
-  assert.equal(wrongRootCloses, 1);
-
-  let aliasCloses = 0;
-  const sharedTurn = binding(
-    async (input) => ({
-      schema_version: 1,
-      root_id: input.root_id,
-      runtime_generation: input.runtime_generation,
-      correlation_id: input.correlation_id,
-      outcome: "quiescent",
-    }),
-    async () => { aliasCloses += 1; },
-  ).turn;
-  const aliasRegistry = new RootRuntimeRegistry({
-    create: async (requestedRootId) => {
-      const created = binding(sharedTurn.run);
-      return Object.freeze({
-        ...created,
-        target: Object.freeze({ root_id: requestedRootId, runtime_generation: parseRuntimeGeneration(1) }),
-        workspace: Object.freeze({ ...created.workspace, root_id: requestedRootId }),
-        turn: sharedTurn,
-      });
+      }));
     },
   });
-  await aliasRegistry.getOrCreate(rootId);
-  await assert.rejects(aliasRegistry.getOrCreate(wrongRoot), /root_runtime_resource_alias/u);
-  assert.equal(aliasCloses, 0);
-
-  let uniqueTurnCloses = 0;
-  const sharedCycle = rootAvailableCycle(rootId);
-  const cycleAliasRegistry = new RootRuntimeRegistry({
-    create: async (requestedRootId) => {
-      const created = binding(
-        async (input) => ({
-          schema_version: 1,
-          root_id: input.root_id,
-          runtime_generation: input.runtime_generation,
-          correlation_id: input.correlation_id,
-          outcome: "quiescent",
-        }),
-        async () => { uniqueTurnCloses += 1; },
-      );
-      return Object.freeze({
-        ...created,
-        target: Object.freeze({ root_id: requestedRootId, runtime_generation: parseRuntimeGeneration(1) }),
-        workspace: Object.freeze({ ...created.workspace, root_id: requestedRootId }),
-        cycle: sharedCycle,
-        turn: Object.freeze({ ...created.turn, rootId: requestedRootId }),
-      });
-    },
-  });
-  await cycleAliasRegistry.getOrCreate(rootId);
-  await assert.rejects(cycleAliasRegistry.getOrCreate(wrongRoot), /root_runtime_resource_alias/u);
-  assert.equal(uniqueTurnCloses, 1);
+  await assert.rejects(registry.getOrCreate(wrongRoot), /bound_root_identity_mismatch/u);
+  assert.equal(creations, 0);
 });
 
 test("registry closes a unique Reconcill rejected by aggregate validation", async () => {
   let closes = 0;
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async () => {
       const created = binding(
         async (input) => ({
@@ -315,7 +259,7 @@ test("runtime retirement is joinable and deletes the Root Home only after every 
   const cycleClosed = new Promise<void>((resolve) => { releaseCycle = resolve; });
   const turnClosed = new Promise<void>((resolve) => { releaseTurn = resolve; });
   const cycle = rootAvailableCycle(rootId);
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async () => binding(
       async (input) => ({
         schema_version: 1,
@@ -339,8 +283,9 @@ test("runtime retirement is joinable and deletes the Root Home only after every 
       },
     ),
   }, {
-    delete: async (retiredRootId, isLive) => {
+    delete: async (retiredRootId, cycleIds, isLive) => {
       assert.equal(retiredRootId, rootId);
+      assert.deepEqual(cycleIds, []);
       assert.equal(isLive(rootId), false);
       events.push("root_home_deleted");
     },
@@ -377,7 +322,7 @@ test("runtime retirement is joinable and deletes the Root Home only after every 
 test("failed runtime retirement remains live, visible, and blocks Root Home cleanup", async () => {
   let deletes = 0;
   const cycle = rootAvailableCycle(rootId);
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async () => binding(
       async (input) => ({
         schema_version: 1,

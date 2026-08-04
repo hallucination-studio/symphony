@@ -2,19 +2,32 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 import {
+  cycleCompletionTerminalStatus,
   parseCycleCompletionRecord,
   parseCycleInvalidationRecord,
   parseStageCompletionRecord,
   parseStageInvalidationRecord,
+  stageCompletionTerminalStatus,
+  type CycleCompletionRecord,
+  type CycleInvalidationRecord,
   type SealedCycleBasis,
   type StageCompletionRecord,
+  type StageInvalidationRecord,
 } from "../../contracts/cycle-records.js";
 import { parseTaskIssueId, type TaskIssueId } from "../../contracts/identity.js";
 import type { CycleAdvanceRequest } from "../../contracts/cycle.js";
+import type { StageExecutionSnapshot } from "../../contracts/cycle.js";
 import type { GitCommitProofBasis } from "../../git/api/GitWorkspaceInterface.js";
+import {
+  deriveLastValidCycleBasisStatus,
+  deriveLastValidStageBasisStatus,
+  type LastValidCycleBasisStatus,
+  type LastValidStageBasisStatus,
+} from "../../observation/TaskFacts.js";
 import type { VerifyResult, WorkResult } from "../../performer/api/StagePerformerInterface.js";
 import type { TaskManageCallerIssuer } from "../../task-management/api/TaskManageCapability.js";
 import type { TaskWorkflowIdentities } from "../../task-management/api/TaskManageCapability.js";
+import type { TaskIssueRecordObservation } from "../../contracts/task-management.js";
 import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
 import type { LinearIssueRecordComment } from "../../task-management/linear/LinearQueries.js";
 import { bindCycleTaskManageCommand } from "../../runtime/CycleTaskManageCommand.js";
@@ -90,6 +103,218 @@ function checksMarkdown(checks: readonly {
         ? "" : ` - ${check.sanitized_summary_markdown}`}`
     ))),
   ].join("\n");
+}
+
+function terminalStatus(stage: StageExecutionSnapshot): "Done" | "Failed" | "Canceled" {
+  if (stage.status === "done") return "Done";
+  if (stage.status === "failed") return "Failed";
+  if (stage.status === "canceled") return "Canceled";
+  throw new Error("external_terminal_stage_source_invalid");
+}
+
+function taskStatus(stage: StageExecutionSnapshot): "Todo" | "In Progress" | "Done" | "Failed" | "Canceled" {
+  switch (stage.status) {
+    case "todo": return "Todo";
+    case "in_progress": return "In Progress";
+    case "done": return "Done";
+    case "failed": return "Failed";
+    case "canceled": return "Canceled";
+  }
+}
+
+function cycleStatus(snapshot: CycleAdvanceRequest): "Succeeded" | "Rejected" | "Failed" | "Canceled" {
+  switch (snapshot.cycle_status) {
+    case "succeeded": return "Succeeded";
+    case "rejected": return "Rejected";
+    case "failed": return "Failed";
+    case "canceled": return "Canceled";
+    default: throw new Error("external_terminal_cycle_source_invalid");
+  }
+}
+
+function cycleBasisStatus(snapshot: CycleAdvanceRequest): LastValidCycleBasisStatus {
+  const status = cycleStatus(snapshot);
+  const issueId = parseTaskIssueId(snapshot.cycle_id);
+  const basis = deriveLastValidCycleBasisStatus({
+    issues: [{ issue_id: issueId, status }],
+    issue_history: snapshot.issue_history,
+  }, issueId);
+  if (basis === null) throw new Error("external_terminal_cycle_basis_invalid");
+  return basis;
+}
+
+function cyclePhase(status: LastValidCycleBasisStatus): "draft" | "in_progress" | "awaiting_acceptance" {
+  switch (status) {
+    case "Draft": return "draft";
+    case "In Progress": return "in_progress";
+    case "Awaiting Acceptance": return "awaiting_acceptance";
+  }
+}
+
+function cycleHistoryDigest(snapshot: CycleAdvanceRequest): string {
+  return digest(JSON.stringify(snapshot.issue_history
+    .filter(({ issue_id }) => issue_id === parseTaskIssueId(snapshot.cycle_id))
+    .sort((left, right) => left.history_id.localeCompare(right.history_id))));
+}
+
+function cycleGraphDigest(snapshot: CycleAdvanceRequest): string {
+  return digest(JSON.stringify(stageListForDigest(snapshot)));
+}
+
+function cycleIdentityHistoryClosureDigest(snapshot: CycleAdvanceRequest): string {
+  const stageIds = new Set<string>([
+    String(parseTaskIssueId(snapshot.cycle_id)),
+    ...(snapshot.plan_issue === null ? [] : [String(parseTaskIssueId(snapshot.plan_issue.issue_id))]),
+    ...snapshot.sealed_work_issues.map(({ issue_id }) => String(parseTaskIssueId(issue_id))),
+    ...(snapshot.verify_issue === null ? [] : [String(parseTaskIssueId(snapshot.verify_issue.issue_id))]),
+  ]);
+  return digest(JSON.stringify({
+    cycle_id: snapshot.cycle_id,
+    issue_history: snapshot.issue_history
+      .filter(({ issue_id }) => stageIds.has(String(issue_id)))
+      .sort((left, right) => left.history_id.localeCompare(right.history_id)),
+    resource_creation_evidence: snapshot.resource_creation_evidence
+      .filter(({ resource_id }) => stageIds.has(String(resource_id)))
+      .sort((left, right) => left.evidence_id.localeCompare(right.evidence_id)),
+  }));
+}
+
+function recordObservation(
+  snapshot: CycleAdvanceRequest,
+  recordId: string,
+): TaskIssueRecordObservation | undefined {
+  return snapshot.issue_record_observations.find(({ record_id }) => record_id === recordId);
+}
+
+function assertNoInvalidRecordObservation(
+  snapshot: CycleAdvanceRequest,
+  recordId: string,
+  expectedRecordKind: "cycle_completion" | "cycle_invalidation",
+): void {
+  const observation = recordObservation(snapshot, recordId);
+  if (observation === undefined || !("observation_kind" in observation)) return;
+  if (observation.observation_kind === "missing") return;
+  if (observation.expected_record_kind !== expectedRecordKind) {
+    throw new Error("cycle_terminal_record_observation_kind_mismatch");
+  }
+  throw new Error("cycle_terminal_record_observation_invalid");
+}
+
+function hasValidRecordObservation(snapshot: CycleAdvanceRequest, recordId: string): boolean {
+  const observation = recordObservation(snapshot, recordId);
+  return observation !== undefined && !("observation_kind" in observation);
+}
+
+function assertCycleCompletionRecord(
+  record: CycleCompletionRecord,
+  snapshot: CycleAdvanceRequest,
+  basis: SealedCycleBasis,
+  basisStatus: LastValidCycleBasisStatus,
+): boolean {
+  const cycleId = parseTaskIssueId(snapshot.cycle_id);
+  if (
+    record.record_id !== basis.specification.cycle_completion_record_id
+    || record.issue_id !== cycleId
+    || record.cycle_id !== basis.specification.cycle_id
+    || record.basis_status !== basisStatus
+    || record.basis_document_digest !== digest(snapshot.specification.cycle_description_markdown)
+  ) throw new Error("cycle_completion_anchor_mismatch");
+  return cycleCompletionTerminalStatus(record.completion) === cycleStatus(snapshot);
+}
+
+function assertCycleInvalidationRecord(
+  record: CycleInvalidationRecord,
+  snapshot: CycleAdvanceRequest,
+  basis: SealedCycleBasis,
+  basisStatus: LastValidCycleBasisStatus,
+): void {
+  const cycleId = parseTaskIssueId(snapshot.cycle_id);
+  const documentDigest = digest(snapshot.specification.cycle_description_markdown);
+  const observedStatus = cycleStatus(snapshot);
+  if (
+    record.record_id !== basis.specification.cycle_invalidation_record_id
+    || record.issue_id !== cycleId
+    || record.cycle_id !== basis.specification.cycle_id
+    || record.basis_issue_revision !== snapshot.cycle_revision
+    || record.basis_status !== basisStatus
+    || record.last_valid_phase !== cyclePhase(basisStatus)
+    || record.expected_status !== basisStatus
+    || record.observed_status !== observedStatus
+    || record.terminal_status !== observedStatus
+    || record.basis_document_digest !== documentDigest
+    || record.observed_cycle_document_digest !== documentDigest
+    || record.observed_execution_graph_digest !== cycleGraphDigest(snapshot)
+    || record.observed_history_digest !== cycleHistoryDigest(snapshot)
+    || record.invalidation_kind !== "invalid_terminal"
+  ) throw new Error("cycle_invalidation_anchor_mismatch");
+}
+
+function stageHistoryDigest(snapshot: CycleAdvanceRequest, stageId: TaskIssueId): string {
+  return digest(JSON.stringify(snapshot.issue_history
+    .filter(({ issue_id }) => issue_id === stageId)
+    .sort((left, right) => left.history_id.localeCompare(right.history_id))));
+}
+
+function assertExternalTerminalRecord(
+  record: StageInvalidationRecord,
+  input: {
+    readonly record_id: string;
+    readonly stage_id: TaskIssueId;
+    readonly cycle_id: TaskIssueId;
+    readonly stage_revision: CycleAdvanceRequest["cycle_revision"];
+    readonly basis_status: LastValidStageBasisStatus;
+    readonly basis_document_digest: string;
+    readonly terminal_status: "Done" | "Failed" | "Canceled";
+    readonly instruction_digest: string;
+    readonly history_digest: string;
+  },
+): void {
+  if (
+    record.record_id !== input.record_id
+    || record.issue_id !== input.stage_id
+    || record.cycle_id !== input.cycle_id
+    || record.stage_id !== input.stage_id
+    || record.basis_issue_revision !== input.stage_revision
+    || record.basis_status !== input.basis_status
+    || record.basis_document_digest !== input.basis_document_digest
+    || record.observed_status !== input.terminal_status
+    || record.terminal_status !== input.terminal_status
+    || record.observed_instruction_digest !== input.instruction_digest
+    || record.observed_completion_record_digest !== null
+    || record.observed_history_digest !== input.history_digest
+    || record.invalidation_kind !== "invalid_terminal"
+  ) throw new Error("external_terminal_invalidation_anchor_mismatch");
+}
+
+function assertStageCompletionAnchors(
+  record: StageCompletionRecord,
+  stage: StageExecutionSnapshot,
+  basis: SealedCycleBasis,
+  expectedRecordId: string,
+  expectedInstructionDigest: string,
+): void {
+  const stageId = parseTaskIssueId(stage.issue_id);
+  if (
+    record.record_id !== expectedRecordId
+    || record.issue_id !== stageId
+    || record.cycle_id !== basis.specification.cycle_id
+    || record.stage_id !== stageId
+  ) throw new Error("stage_completion_anchor_mismatch");
+  if (
+    (stage.status === "in_progress" && record.basis_issue_revision !== stage.revision)
+    || record.basis_document_digest !== digest(stage.description_markdown)
+    || record.completion.instruction_digest !== expectedInstructionDigest
+  ) throw new Error("stage_completion_basis_mismatch");
+}
+
+function occupiesRecordSlot(
+  observations: readonly TaskIssueRecordObservation[],
+  recordId: string,
+): boolean {
+  return observations.some((observation) => (
+    observation.record_id === recordId
+    && (!("observation_kind" in observation) || observation.observation_kind !== "missing")
+  ));
 }
 
 export class PlanCompletionRecordWriter {
@@ -191,6 +416,285 @@ export class PlanCompletionRecordWriter {
     });
   }
 
+  async persistExternalTerminalInvalidation(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    built: BuiltPlanGraphManifest | null,
+    stageId: TaskIssueId,
+    execution: TaskManageBoundaryExecution,
+  ): Promise<StageInvalidationRecord> {
+    const stage = [
+      ...(snapshot.plan_issue === null ? [] : [snapshot.plan_issue]),
+      ...snapshot.sealed_work_issues,
+      ...(snapshot.verify_issue === null ? [] : [snapshot.verify_issue]),
+    ].find(({ issue_id }) => parseTaskIssueId(issue_id) === stageId);
+    if (stage === undefined) throw new Error("external_terminal_stage_source_invalid");
+    const stageTaskId = parseTaskIssueId(stage.issue_id);
+
+    const node = stage.kind === "plan"
+      ? {
+        completion_record_id: basis.specification.plan_completion_record_id,
+        invalidation_record_id: basis.specification.plan_invalidation_record_id,
+        instruction_digest: digest(stage.description_markdown),
+      }
+      : built === null
+        ? null
+        : built.manifest.ordered_work_nodes.find(({ issue_id }) => issue_id === stageTaskId)
+          ?? (stage.kind === "verify" && built.manifest.verify_node.issue_id === stageTaskId
+            ? built.manifest.verify_node
+            : null);
+    if (node === null || node === undefined) throw new Error("external_terminal_manifest_missing");
+    if (digest(stage.description_markdown) !== node.instruction_digest) {
+      throw new Error("external_terminal_instruction_mismatch");
+    }
+
+    const basisStatus = deriveLastValidStageBasisStatus({
+      issues: [{ issue_id: stageTaskId, status: taskStatus(stage) }],
+      issue_history: snapshot.issue_history,
+    }, stageTaskId);
+    if (basisStatus === null) throw new Error("external_terminal_basis_invalid");
+    const observedStatus = terminalStatus(stage);
+    const historyDigest = stageHistoryDigest(snapshot, stageTaskId);
+    const basisDocumentDigest = digest(stage.description_markdown);
+
+    if (occupiesRecordSlot(snapshot.issue_record_observations, node.invalidation_record_id)) {
+      throw new Error("external_terminal_record_slot_occupied");
+    }
+
+    const comments = await this.options.record_reader.readIssueRecordComments(stageTaskId);
+    execution.assertActive();
+    const existingInvalidation = readExactTaskIssueRecord(
+      comments,
+      stageTaskId,
+      node.invalidation_record_id,
+      this.options.service_actor_id,
+    );
+    if (existingInvalidation !== null) throw new Error("external_terminal_record_slot_occupied");
+
+    const stageCreation = await this.#readServiceIssueCreation(stageTaskId);
+    const call = createTaskIssueRecordCall(snapshot, {
+      record_id: node.invalidation_record_id,
+      issue_id: stageTaskId,
+      expected_issue_revision: stage.revision,
+      projection: {
+        issue_id: stageTaskId,
+        cycle_id: basis.specification.cycle_id,
+        basis_issue_revision: stage.revision,
+        basis_status: basisStatus,
+        basis_document_digest: basisDocumentDigest,
+        record_kind: "stage_invalidation",
+        stage_id: stageTaskId,
+        observed_status: observedStatus,
+        observed_instruction_digest: node.instruction_digest,
+        observed_completion_record_digest: null,
+        observed_history_digest: historyDigest,
+        reason_code: "invalid_terminal",
+        reason_markdown: "The Stage reached a terminal status without a matching Symphony completion record.",
+        invalidation_kind: "invalid_terminal",
+        terminal_status: observedStatus,
+      },
+    });
+    const command = bindCycleTaskManageCommand({
+      snapshot,
+      workflow: this.options.workflow,
+      caller_issuer: this.options.caller_issuer,
+      task_manager: this.options.task_manager,
+      mutation_manifest: [call],
+    });
+    const result = await command.create_issue_comment(call, execution);
+    execution.assertActive();
+    const applied = parseStageInvalidationRecord(
+      appliedTaskIssueRecord(call, result, this.options.service_actor_id),
+    );
+    assertExternalTerminalRecord(applied, {
+      record_id: node.invalidation_record_id,
+      stage_id: stageTaskId,
+      cycle_id: basis.specification.cycle_id,
+      stage_revision: stage.revision,
+      basis_status: basisStatus,
+      basis_document_digest: basisDocumentDigest,
+      terminal_status: observedStatus,
+      instruction_digest: node.instruction_digest,
+      history_digest: historyDigest,
+    });
+    const commentsAfterWrite = await this.options.record_reader.readIssueRecordComments(stageTaskId);
+    execution.assertActive();
+    const fresh = readExactTaskIssueRecord(
+      commentsAfterWrite,
+      stageTaskId,
+      node.invalidation_record_id,
+      this.options.service_actor_id,
+    );
+    if (fresh === null) throw new Error("external_terminal_invalidation_record_missing");
+    const readback = parseStageInvalidationRecord(fresh);
+    assertExternalTerminalRecord(readback, {
+      record_id: node.invalidation_record_id,
+      stage_id: stageTaskId,
+      cycle_id: basis.specification.cycle_id,
+      stage_revision: stage.revision,
+      basis_status: basisStatus,
+      basis_document_digest: basisDocumentDigest,
+      terminal_status: observedStatus,
+      instruction_digest: node.instruction_digest,
+      history_digest: historyDigest,
+    });
+    if (Date.parse(readback.created_at) <= Date.parse(stageCreation.provider_created_at)) {
+      throw new Error("external_terminal_invalidation_order_invalid");
+    }
+    return readback;
+  }
+
+  async readCycleTerminalRecord(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+  ): Promise<CycleCompletionRecord | CycleInvalidationRecord | null> {
+    const cycleId = parseTaskIssueId(snapshot.cycle_id);
+    const basisStatus = cycleBasisStatus(snapshot);
+    const comments = await this.options.record_reader.readIssueRecordComments(cycleId);
+
+    const invalidationRecordId = basis.specification.cycle_invalidation_record_id;
+    assertNoInvalidRecordObservation(snapshot, invalidationRecordId, "cycle_invalidation");
+    const invalidationProjection = readExactTaskIssueRecord(
+      comments,
+      cycleId,
+      invalidationRecordId,
+      this.options.service_actor_id,
+    );
+    if (invalidationProjection !== null) {
+      const invalidation = parseCycleInvalidationRecord(invalidationProjection);
+      assertCycleInvalidationRecord(invalidation, snapshot, basis, basisStatus);
+      return invalidation;
+    }
+    if (hasValidRecordObservation(snapshot, invalidationRecordId)) {
+      throw new Error("cycle_invalidation_record_missing");
+    }
+
+    const completionRecordId = basis.specification.cycle_completion_record_id;
+    assertNoInvalidRecordObservation(snapshot, completionRecordId, "cycle_completion");
+    const completionProjection = readExactTaskIssueRecord(
+      comments,
+      cycleId,
+      completionRecordId,
+      this.options.service_actor_id,
+    );
+    if (completionProjection === null) {
+      if (hasValidRecordObservation(snapshot, completionRecordId)) {
+        throw new Error("cycle_completion_record_missing");
+      }
+      return null;
+    }
+    const completion = parseCycleCompletionRecord(completionProjection);
+    if (!assertCycleCompletionRecord(completion, snapshot, basis, basisStatus)) return null;
+    return completion;
+  }
+
+  async persistExternalTerminalCycleInvalidation(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    closedStageRecordDigests: readonly string[],
+    execution: TaskManageBoundaryExecution,
+  ): Promise<CycleInvalidationRecord> {
+    const cycleId = parseTaskIssueId(snapshot.cycle_id);
+    const basisStatus = cycleBasisStatus(snapshot);
+    const invalidationRecordId = basis.specification.cycle_invalidation_record_id;
+    if (occupiesRecordSlot(snapshot.issue_record_observations, invalidationRecordId)) {
+      throw new Error("cycle_invalidation_record_slot_occupied");
+    }
+    const comments = await this.options.record_reader.readIssueRecordComments(cycleId);
+    execution.assertActive();
+    const existing = readExactTaskIssueRecord(
+      comments,
+      cycleId,
+      invalidationRecordId,
+      this.options.service_actor_id,
+    );
+    if (existing !== null) throw new Error("cycle_invalidation_record_slot_occupied");
+
+    const observedStatus = cycleStatus(snapshot);
+    const documentDigest = digest(snapshot.specification.cycle_description_markdown);
+    const graphDigest = cycleGraphDigest(snapshot);
+    const historyDigest = cycleHistoryDigest(snapshot);
+    const creationEvidenceDigest = snapshot.resource_creation_evidence.find(
+      ({ resource_id }) => resource_id === cycleId,
+    )?.canonical_evidence_digest ?? null;
+    const projection = {
+      issue_id: cycleId,
+      cycle_id: basis.specification.cycle_id,
+      basis_issue_revision: snapshot.cycle_revision,
+      basis_status: basisStatus,
+      basis_document_digest: documentDigest,
+      record_kind: "cycle_invalidation" as const,
+      last_valid_phase: cyclePhase(basisStatus),
+      expected_status: basisStatus,
+      observed_status: observedStatus,
+      observed_cycle_document_digest: documentDigest,
+      observed_execution_graph_digest: graphDigest,
+      offending_resources: [{
+        evidence_kind: "present_digest_mismatch" as const,
+        resource_kind: "cycle" as const,
+        resource_id: cycleId,
+        expected_digest: digest(`status:${basisStatus}`),
+        observed_digest: digest(`status:${observedStatus}`),
+        observed_revision: snapshot.cycle_revision,
+        creation_evidence_digest: creationEvidenceDigest,
+      }],
+      observed_history_digest: historyDigest,
+      observed_record_set_digest: digest(JSON.stringify({
+        completion_record_id: basis.specification.cycle_completion_record_id,
+        invalidation_record_id: basis.specification.cycle_invalidation_record_id,
+        observations: snapshot.issue_record_observations
+          .filter(({ record_id }) => (
+            record_id === basis.specification.cycle_completion_record_id
+            || record_id === basis.specification.cycle_invalidation_record_id
+          )),
+      })),
+      reason_code: "invalid_terminal",
+      reason_markdown: "The Cycle reached a terminal status without a matching Symphony completion record.",
+      invalidation_kind: "invalid_terminal" as const,
+      terminal_status: observedStatus,
+      successor_policy: "allowed" as const,
+      successor_evidence: {
+        closed_stage_record_digests: [...closedStageRecordDigests],
+        known_graph_digest: snapshot.sealed_graph_digest,
+        identity_history_closure_digest: cycleIdentityHistoryClosureDigest(snapshot),
+      },
+    };
+    const call = createTaskIssueRecordCall(snapshot, {
+      record_id: invalidationRecordId,
+      issue_id: cycleId,
+      expected_issue_revision: snapshot.cycle_revision,
+      projection,
+    });
+    const command = bindCycleTaskManageCommand({
+      snapshot,
+      workflow: this.options.workflow,
+      caller_issuer: this.options.caller_issuer,
+      task_manager: this.options.task_manager,
+      mutation_manifest: [call],
+    });
+    const result = await command.create_issue_comment(call, execution);
+    execution.assertActive();
+    const applied = parseCycleInvalidationRecord(
+      appliedTaskIssueRecord(call, result, this.options.service_actor_id),
+    );
+    assertCycleInvalidationRecord(applied, snapshot, basis, basisStatus);
+    const commentsAfterWrite = await this.options.record_reader.readIssueRecordComments(cycleId);
+    execution.assertActive();
+    const fresh = readExactTaskIssueRecord(
+      commentsAfterWrite,
+      cycleId,
+      invalidationRecordId,
+      this.options.service_actor_id,
+    );
+    if (fresh === null) throw new Error("cycle_invalidation_record_missing");
+    const readback = parseCycleInvalidationRecord(fresh);
+    assertCycleInvalidationRecord(readback, snapshot, basis, basisStatus);
+    if (readback.revision !== applied.revision) {
+      throw new Error("cycle_invalidation_record_readback_mismatch");
+    }
+    return readback;
+  }
+
   async readCompleted(
     snapshot: CycleAdvanceRequest,
     basis: SealedCycleBasis,
@@ -217,8 +721,15 @@ export class PlanCompletionRecordWriter {
     ) throw new Error("plan_completion_record_order_invalid");
     if (record.completion.outcome !== "completed") throw new Error("plan_completion_not_completed");
     if (
+      record.record_id !== basis.specification.plan_completion_record_id
+      || record.issue_id !== parseTaskIssueId(plan.issue_id)
+      || record.cycle_id !== basis.specification.cycle_id
+      || record.stage_id !== parseTaskIssueId(plan.issue_id)
+    ) throw new Error("plan_completion_anchor_mismatch");
+    if (
       (plan.status === "in_progress" && record.basis_issue_revision !== plan.revision)
       || record.basis_document_digest !== digest(plan.description_markdown)
+      || record.completion.instruction_digest !== digest(plan.description_markdown)
     ) throw new Error("plan_completion_basis_mismatch");
     const built = buildPlanGraphManifest({
       basis,
@@ -234,6 +745,45 @@ export class PlanCompletionRecordWriter {
     ) throw new Error("plan_completion_manifest_mismatch");
     if (plan.status === "done") assertExactPlanGraph(snapshot, built);
     return built;
+  }
+
+  async readPlanCompletion(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+  ): Promise<StageCompletionRecord | null> {
+    const plan = snapshot.plan_issue;
+    if (
+      plan === null
+      || (plan.status !== "failed" && plan.status !== "canceled")
+      || parseTaskIssueId(plan.issue_id) !== basis.specification.plan_issue_id
+    ) throw new Error("plan_completion_source_invalid");
+    const planId = parseTaskIssueId(plan.issue_id);
+    const comments = await this.options.record_reader.readIssueRecordComments(planId);
+    const projected = readExactTaskIssueRecord(
+      comments,
+      planId,
+      basis.specification.plan_completion_record_id,
+      this.options.service_actor_id,
+    );
+    if (projected === null) return null;
+    const record = parseStageCompletionRecord(projected, "plan", basis);
+    const planCreation = await this.#readServiceIssueCreation(planId);
+    if (
+      Date.parse(planCreation.provider_created_at) <= Date.parse(basis.approval_record.created_at)
+      || Date.parse(record.created_at) <= Date.parse(planCreation.provider_created_at)
+    ) throw new Error("plan_completion_record_order_invalid");
+    if (
+      record.record_id !== basis.specification.plan_completion_record_id
+      || record.issue_id !== planId
+      || record.cycle_id !== basis.specification.cycle_id
+      || record.stage_id !== planId
+    ) throw new Error("plan_completion_anchor_mismatch");
+    if (
+      record.basis_document_digest !== digest(plan.description_markdown)
+      || record.completion.instruction_digest !== digest(plan.description_markdown)
+      || record.completion.outcome !== plan.status
+    ) throw new Error("plan_completion_basis_mismatch");
+    return record;
   }
 
   async readStageCompletion(
@@ -269,11 +819,12 @@ export class PlanCompletionRecordWriter {
       : stage.kind === "work"
         ? parseStageCompletionRecord(projected, "work", basis)
         : parseStageCompletionRecord(projected, "verify", basis);
+    assertStageCompletionAnchors(record, stage, basis, node.completion_record_id, node.instruction_digest);
+    const observedStatus = taskStatus(stage);
     if (
-      record.stage_id !== stageId
-      || record.basis_document_digest !== digest(stage.description_markdown)
-      || record.completion.instruction_digest !== node.instruction_digest
-    ) throw new Error("stage_completion_basis_mismatch");
+      (observedStatus === "Done" || observedStatus === "Failed" || observedStatus === "Canceled")
+      && stageCompletionTerminalStatus(record.completion) !== observedStatus
+    ) return null;
     return record;
   }
 
@@ -389,7 +940,17 @@ export class PlanCompletionRecordWriter {
         basis.specification.plan_completion_record_id,
         this.options.service_actor_id,
       );
-      if (projected !== null) return parseStageCompletionRecord(projected, "plan", basis);
+      if (projected !== null) {
+        const record = parseStageCompletionRecord(projected, "plan", basis);
+        assertStageCompletionAnchors(
+          record,
+          stage,
+          basis,
+          basis.specification.plan_completion_record_id,
+          digest(stage.description_markdown),
+        );
+        return record;
+      }
       return this.persistPlanTerminal(
         snapshot,
         basis,
@@ -412,29 +973,36 @@ export class PlanCompletionRecordWriter {
       stage_description: stage.description_markdown,
       stage_kind: stage.kind,
     } as const;
-    return this.#persistStage(snapshot, basis, execution, stage.kind === "work" ? {
+    if (stage.kind === "work") {
+      return this.#persistStage(snapshot, basis, execution, {
+        ...common,
+        projection: {
+          outcome: terminalOutcome,
+          instruction_digest: node.instruction_digest,
+          workspace_parent_revision: digest(snapshot.git.head_revision ?? "unborn"),
+          workspace_diff_digest: digest(snapshot.git.diff_digest),
+          checks_markdown: "## Checks\n\n- not_run: live Work context was lost",
+          normalized_handoff_markdown: stageReasonMarkdown,
+          reason_code: reasonCode,
+          reason_markdown: stageReasonMarkdown,
+        },
+      });
+    }
+    const verifyConclusion = terminalOutcome === "canceled"
+      ? "canceled" as const
+      : reasonCode === "lost_execution_context" ? "failed" as const : "inconclusive" as const;
+    const verifyReason = verifyConclusion === "failed"
+      ? { reason_markdown: stageReasonMarkdown }
+      : { reason_code: reasonCode, reason_markdown: stageReasonMarkdown };
+    return this.#persistStage(snapshot, basis, execution, {
       ...common,
       projection: {
-        outcome: terminalOutcome,
-        instruction_digest: node.instruction_digest,
-        workspace_parent_revision: digest(snapshot.git.head_revision ?? "unborn"),
-        workspace_diff_digest: digest(snapshot.git.diff_digest),
-        checks_markdown: "## Checks\n\n- not_run: live Work context was lost",
-        normalized_handoff_markdown: stageReasonMarkdown,
-        reason_code: reasonCode,
-        reason_markdown: stageReasonMarkdown,
-      },
-    } : {
-      ...common,
-      projection: {
-        conclusion: reasonCode === "lost_execution_context" ? "failed" : "inconclusive",
+        conclusion: verifyConclusion,
         instruction_digest: node.instruction_digest,
         exact_revision: digest(snapshot.git.head_revision ?? "unborn"),
         checks_markdown: "## Checks\n\n- not_run: live Verify context was lost",
         evidence_markdown: stageReasonMarkdown,
-        ...(reasonCode === "lost_execution_context"
-          ? { reason_markdown: stageReasonMarkdown }
-          : { reason_code: reasonCode, reason_markdown: stageReasonMarkdown }),
+        ...verifyReason,
       },
     });
   }

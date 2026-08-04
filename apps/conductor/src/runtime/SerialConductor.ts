@@ -1,6 +1,7 @@
 import type { BoundaryErrorCode } from "../contracts/common-outcomes.js";
 import {
   parseCycleIssueId,
+  parseRootIssueId,
   parseStageIssueId,
   parseTaskIssueId,
   parseTaskLabelId,
@@ -28,6 +29,10 @@ import {
   type TaskWorkflowIdentities,
 } from "../task-management/api/TaskManageCapability.js";
 import { routeFreshTask, type FreshRouteId } from "./FreshTaskRouter.js";
+import type {
+  DeliveryFinalizerResult,
+  PreparedDeliveryFinalizer,
+} from "./RootRuntime.js";
 import type { RegisteredRootRuntime, RootRuntimeRegistry } from "./RootRuntimeRegistry.js";
 
 type AdmissionParkReason =
@@ -43,7 +48,8 @@ type RuntimeFailureReason =
   | "root_home_cleanup_failed"
   | "runtime_preparation_failed"
   | "runtime_shutdown_failed"
-  | "turn_boundary_failed";
+  | "turn_boundary_failed"
+  | "delivery_finalizer_failed";
 
 const INTERNAL_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}(?::[a-z][a-z0-9_]{0,31})?$/u;
 
@@ -103,7 +109,7 @@ export type SerialConductorLog =
     readonly root_id: RootIssueId;
     readonly correlation_id: CorrelationId;
     readonly selected_route: FreshRouteId;
-    readonly consumer: "root_boundary" | "cycle_machine" | "family_guard" | "cleanup" | "park";
+    readonly consumer: "root_boundary" | "cycle_machine" | "family_guard" | "delivery_finalizer" | "cleanup" | "park";
   }
   | {
     readonly event: "root_admission_parked";
@@ -134,7 +140,7 @@ export type SerialConductorLog =
     readonly root_id: RootIssueId;
     readonly runtime_generation: RuntimeGeneration;
     readonly correlation_id: CorrelationId;
-    readonly input_kind: "bootstrap" | "diff";
+    readonly input_kind: "bootstrap" | "diff" | "semantic_snapshot";
   }
   | {
     readonly event: "root_turn_completed";
@@ -186,6 +192,33 @@ export type SerialConductorLog =
     readonly root_id: RootIssueId;
     readonly runtime_generation: RuntimeGeneration;
     readonly reason_code: "cycle_preparation_failed";
+  }
+  | {
+    readonly event: "delivery_finalizer_started";
+    readonly root_id: RootIssueId;
+    readonly cycle_id: CycleIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly selected_route: Extract<FreshRouteId, "WF-ROUTE-010" | "WF-ROUTE-012">;
+  }
+  | {
+    readonly event: "delivery_finalizer_completed";
+    readonly root_id: RootIssueId;
+    readonly cycle_id: CycleIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly selected_route: Extract<FreshRouteId, "WF-ROUTE-010" | "WF-ROUTE-012">;
+    readonly outcome: DeliveryFinalizerResult["outcome"];
+    readonly reason_code?: string;
+  }
+  | {
+    readonly event: "delivery_finalizer_failed";
+    readonly root_id: RootIssueId;
+    readonly cycle_id: CycleIssueId;
+    readonly runtime_generation: RuntimeGeneration;
+    readonly correlation_id: CorrelationId;
+    readonly selected_route: Extract<FreshRouteId, "WF-ROUTE-010" | "WF-ROUTE-012">;
+    readonly reason_code: "delivery_finalizer_failed";
   };
 
 export type SerialRunResult =
@@ -205,6 +238,11 @@ export type SerialRunResult =
     readonly outcome: CycleAdvanceResult["outcome"];
   }
   | {
+    readonly kind: "delivery_finalizer_completed";
+    readonly root_id: RootIssueId;
+    readonly outcome: DeliveryFinalizerResult["outcome"];
+  }
+  | {
     readonly kind: "family_guard_completed";
     readonly root_id: RootIssueId;
     readonly outcome: "family_invalidated" | "no_action";
@@ -221,6 +259,7 @@ export type SerialRunResult =
   };
 
 export interface SerialConductorOptions {
+  readonly root_id: RootIssueId;
   readonly agent_actor_id: string;
   readonly root_kind_label_id: string;
   readonly root_states: {
@@ -228,6 +267,7 @@ export interface SerialConductorOptions {
     readonly in_progress: string;
     readonly in_review: string;
     readonly done: string;
+    readonly failed: string;
   };
   readonly workflow: unknown;
   readonly family_guard?: FamilyGuardInterface;
@@ -259,6 +299,23 @@ function cleanupCycles(observation: TaskObservationEvent): readonly RootCleanupC
     })));
 }
 
+function terminalCleanupCycleIds(
+  observation: TaskObservationEvent,
+  workflow: TaskWorkflowIdentities,
+): readonly CycleIssueId[] {
+  const rootTaskId = parseTaskIssueId(observation.root_id);
+  const terminalStates = new Set([
+    workflow.cycle_states.succeeded,
+    workflow.cycle_states.rejected,
+    workflow.cycle_states.failed,
+    workflow.cycle_states.canceled,
+  ]);
+  return Object.freeze(observation.task.issues
+    .filter(({ parent_issue_id, status_id }) => parent_issue_id === rootTaskId && terminalStates.has(status_id))
+    .sort((left, right) => left.issue_id.localeCompare(right.issue_id))
+    .map(({ issue_id }) => parseCycleIssueId(issue_id)));
+}
+
 function admissionReason(
   observation: TaskObservationEvent,
   actorId: string,
@@ -268,6 +325,7 @@ function admissionReason(
     in_progress: TaskStateId;
     in_review: TaskStateId;
     done: TaskStateId;
+    failed: TaskStateId;
   }>,
   stopped: boolean,
 ): AdmissionParkReason | null {
@@ -283,6 +341,7 @@ function admissionReason(
 }
 
 export class SerialConductor {
+  readonly #rootId: RootIssueId;
   readonly #actorId: string;
   readonly #rootKindLabelId: TaskLabelId;
   readonly #rootStates: Readonly<{
@@ -290,10 +349,11 @@ export class SerialConductor {
     in_progress: TaskStateId;
     in_review: TaskStateId;
     done: TaskStateId;
+    failed: TaskStateId;
   }>;
-  readonly #cycleContinuations = new Map<RootIssueId, RegisteredRootRuntime>();
-  readonly #pending = new Map<RootIssueId, TaskObservationEvent>();
-  readonly #stopped = new Set<RootIssueId>();
+  #cycleContinuation: RegisteredRootRuntime | null = null;
+  #pending: TaskObservationEvent | null = null;
+  #stopped = false;
   readonly #workflow: TaskWorkflowIdentities;
   #busy = false;
 
@@ -301,6 +361,7 @@ export class SerialConductor {
     private readonly registry: RootRuntimeRegistry,
     private readonly options: SerialConductorOptions,
   ) {
+    this.#rootId = parseRootIssueId(options.root_id);
     this.#actorId = parseBoundedString(options.agent_actor_id, "invalid_agent_actor_id", 256);
     this.#rootKindLabelId = parseTaskLabelId(options.root_kind_label_id);
     this.#rootStates = Object.freeze({
@@ -308,6 +369,7 @@ export class SerialConductor {
       in_progress: parseTaskStateId(options.root_states.in_progress),
       in_review: parseTaskStateId(options.root_states.in_review),
       done: parseTaskStateId(options.root_states.done),
+      failed: parseTaskStateId(options.root_states.failed),
     });
     this.#workflow = parseTaskWorkflowIdentities(options.workflow);
     if (new Set(Object.values(this.#rootStates)).size !== Object.keys(this.#rootStates).length) {
@@ -316,17 +378,19 @@ export class SerialConductor {
   }
 
   admit(inputs: readonly unknown[]): void {
+    if (inputs.length > 1) throw new Error("multiple_bound_root_observations");
     const observations = inputs.map(parseTaskObservationEvent);
-    for (const observation of observations) {
-      const replaced = this.#pending.has(observation.root_id);
-      this.#pending.set(observation.root_id, observation);
-      this.options.log(Object.freeze({
-        event: "root_observation_buffered",
-        root_id: observation.root_id,
-        correlation_id: observation.correlation_id,
-        replaced,
-      }));
-    }
+    const observation = observations[0];
+    if (observation === undefined) return;
+    if (observation.root_id !== this.#rootId) throw new Error("bound_root_identity_mismatch");
+    const replaced = this.#pending !== null;
+    this.#pending = observation;
+    this.options.log(Object.freeze({
+      event: "root_observation_buffered",
+      root_id: observation.root_id,
+      correlation_id: observation.correlation_id,
+      replaced,
+    }));
   }
 
   async runNext(): Promise<SerialRunResult> {
@@ -340,168 +404,168 @@ export class SerialConductor {
   }
 
   async #runNext(): Promise<SerialRunResult> {
-    const observations = [];
-    for (const observation of this.#pending.values()) {
-      const permanentQuarantine = await this.options.family_guard?.isQuarantined(observation) ?? false;
-      observations.push({ observation, routing: routeFreshTask({
-        task: observation.task,
-        task_changes: observation.task_changes,
-        task_change_origins: observation.task_change_origins,
-        agent_actor_id: this.#actorId,
-        root_states: this.#rootStates,
-        workflow: this.#workflow,
-        permanent_quarantine: permanentQuarantine,
-      }) });
+    const observation = this.#pending;
+    if (observation === null) {
+      const continuation = await this.#runCycleContinuation();
+      return continuation ?? Object.freeze({ kind: "idle" });
     }
-    observations.sort((left, right) => left.routing.selected.priority - right.routing.selected.priority
-      || left.observation.root_id.localeCompare(right.observation.root_id));
+    const permanentQuarantine = await this.options.family_guard?.isQuarantined(observation) ?? false;
+    if (this.#pending !== observation) return Object.freeze({ kind: "idle" });
+    const routing = routeFreshTask({
+      task: observation.task,
+      task_changes: observation.task_changes,
+      task_change_origins: observation.task_change_origins,
+      agent_actor_id: this.#actorId,
+      root_states: this.#rootStates,
+      workflow: this.#workflow,
+      permanent_quarantine: permanentQuarantine,
+    });
 
-    if ((observations[0]?.routing.selected.priority ?? Number.POSITIVE_INFINITY) > 80) {
+    if (routing.selected.priority > 80) {
       const continuation = await this.#runCycleContinuation();
       if (continuation !== null) return continuation;
     }
 
-    for (const { observation, routing } of observations) {
-      if (this.#pending.get(observation.root_id) !== observation) continue;
-      const selected = routing.selected;
-      this.options.log(Object.freeze({
-        event: "fresh_route_selected",
-        root_id: observation.root_id,
-        correlation_id: observation.correlation_id,
-        selected_route: selected.route_id,
-        consumer: selected.consumer,
-      }));
-      if (selected.consumer === "cleanup") {
-        this.#pending.delete(observation.root_id);
-        return this.#cleanupDoneRoot(observation, rootIssue(observation));
-      }
-      if (selected.consumer === "family_guard") {
-        this.#pending.delete(observation.root_id);
-        if (this.options.family_guard === undefined) {
-          this.#stopped.add(observation.root_id);
-          return Object.freeze({
-            kind: "failed",
-            root_id: observation.root_id,
-            reason_code: "runtime_preparation_failed",
-          });
-        }
-        const outcome = await this.options.family_guard.execute(observation);
-        return Object.freeze({ kind: "family_guard_completed", root_id: observation.root_id, outcome });
-      }
-      const parkReason = admissionReason(
-        observation,
-        this.#actorId,
-        this.#rootKindLabelId,
-        this.#rootStates,
-        this.#stopped.has(observation.root_id),
-      );
-      if (
-        selected.consumer === "park"
-        || parkReason === "runtime_stopped"
-        || (selected.consumer === "root_boundary" && parkReason !== null)
-      ) {
-        this.#pending.delete(observation.root_id);
-        this.options.log(Object.freeze({
-          event: "root_admission_parked",
-          root_id: observation.root_id,
-          correlation_id: observation.correlation_id,
-          reason_code: parkReason ?? "status_not_executable",
-        }));
-        continue;
-      }
-
-      this.#pending.delete(observation.root_id);
-      let runtime;
-      let attempt;
-      try {
-        runtime = await this.registry.getOrCreate(observation.root_id);
-        attempt = await runtime.prepare(observation, selected);
-      } catch (error) {
-        this.#stopped.add(observation.root_id);
-        const causeCode = deepestInternalCauseCode(error);
-        this.options.log(Object.freeze({
-          event: "root_observation_failed",
-          root_id: observation.root_id,
-          correlation_id: observation.correlation_id,
-          reason_code: "runtime_preparation_failed",
-          ...(causeCode === undefined ? {} : { cause_code: causeCode }),
-        }));
+    if (this.#pending !== observation) return Object.freeze({ kind: "idle" });
+    const selected = routing.selected;
+    this.options.log(Object.freeze({
+      event: "fresh_route_selected",
+      root_id: observation.root_id,
+      correlation_id: observation.correlation_id,
+      selected_route: selected.route_id,
+      consumer: selected.consumer,
+    }));
+    if (selected.consumer === "cleanup") {
+      this.#pending = null;
+      return this.#cleanupDoneRoot(observation, rootIssue(observation));
+    }
+    if (selected.consumer === "family_guard") {
+      this.#pending = null;
+      if (this.options.family_guard === undefined) {
+        this.#stopped = true;
         return Object.freeze({
           kind: "failed",
           root_id: observation.root_id,
           reason_code: "runtime_preparation_failed",
         });
       }
-
-      if (attempt.kind === "paused") {
-        this.options.log(Object.freeze({
-          event: "root_observation_paused",
-          root_id: observation.root_id,
-          correlation_id: observation.correlation_id,
-          reason_code: attempt.error.code,
-        }));
-        return Object.freeze({
-          kind: "paused",
-          root_id: observation.root_id,
-          reason_code: attempt.error.code,
-        });
-      }
-      if (attempt.kind === "unchanged") {
-        this.options.log(Object.freeze({
-          event: "root_observation_unchanged",
-          root_id: observation.root_id,
-          correlation_id: observation.correlation_id,
-        }));
-        continue;
-      }
-      if (attempt.kind === "cycle_action") return this.#runCycleAction(runtime, attempt);
-
+      const outcome = await this.options.family_guard.execute(observation);
+      return Object.freeze({ kind: "family_guard_completed", root_id: observation.root_id, outcome });
+    }
+    const deliveryFinalizerRoute = selected.consumer === "delivery_finalizer";
+    const parkReason = admissionReason(
+      observation,
+      this.#actorId,
+      this.#rootKindLabelId,
+      this.#rootStates,
+      this.#stopped,
+    );
+    if (
+      (!deliveryFinalizerRoute && selected.consumer === "park")
+      || parkReason === "runtime_stopped"
+      || (!deliveryFinalizerRoute && selected.consumer === "root_boundary" && parkReason !== null)
+    ) {
+      this.#pending = null;
       this.options.log(Object.freeze({
-        event: "root_turn_started",
+        event: "root_admission_parked",
         root_id: observation.root_id,
-        runtime_generation: runtime.target.runtime_generation,
         correlation_id: observation.correlation_id,
-        input_kind: attempt.kind,
+        reason_code: parkReason ?? "status_not_executable",
       }));
-      let outcome: RootTurnOutcome;
-      try {
-        outcome = await runtime.run(attempt);
-      } catch (error) {
-        this.#stopped.add(observation.root_id);
-        const causeCode = deepestInternalCauseCode(error);
-        this.options.log(Object.freeze({
-          event: "root_turn_failed",
-          root_id: observation.root_id,
-          runtime_generation: runtime.target.runtime_generation,
-          correlation_id: observation.correlation_id,
-          reason_code: "turn_boundary_failed",
-          ...(causeCode === undefined ? {} : { cause_code: causeCode }),
-        }));
-        return Object.freeze({
-          kind: "failed",
-          root_id: observation.root_id,
-          reason_code: "turn_boundary_failed",
-        });
-      }
+      return Object.freeze({ kind: "idle" });
+    }
 
-      if (outcome.outcome === "quiescent" || outcome.outcome === "stopped") runtime.accept(attempt);
-      if (outcome.outcome !== "quiescent") this.#stopped.add(observation.root_id);
+    this.#pending = null;
+    let runtime;
+    let attempt;
+    try {
+      runtime = await this.registry.getOrCreate(observation.root_id);
+      attempt = await runtime.prepare(observation, selected);
+    } catch (error) {
+      this.#stopped = true;
+      const causeCode = deepestInternalCauseCode(error);
       this.options.log(Object.freeze({
-        event: "root_turn_completed",
+        event: "root_observation_failed",
         root_id: observation.root_id,
-        runtime_generation: runtime.target.runtime_generation,
         correlation_id: observation.correlation_id,
-        outcome: outcome.outcome,
+        reason_code: "runtime_preparation_failed",
+        ...(causeCode === undefined ? {} : { cause_code: causeCode }),
       }));
       return Object.freeze({
-        kind: "turn_completed",
+        kind: "failed",
         root_id: observation.root_id,
-        outcome: outcome.outcome,
+        reason_code: "runtime_preparation_failed",
       });
     }
-    const continuation = await this.#runCycleContinuation();
-    if (continuation !== null) return continuation;
-    return Object.freeze({ kind: "idle" });
+
+    if (attempt.kind === "paused") {
+      this.options.log(Object.freeze({
+        event: "root_observation_paused",
+        root_id: observation.root_id,
+        correlation_id: observation.correlation_id,
+        reason_code: attempt.error.code,
+      }));
+      return Object.freeze({
+        kind: "paused",
+        root_id: observation.root_id,
+        reason_code: attempt.error.code,
+      });
+    }
+    if (attempt.kind === "unchanged") {
+      this.options.log(Object.freeze({
+        event: "root_observation_unchanged",
+        root_id: observation.root_id,
+        correlation_id: observation.correlation_id,
+      }));
+      return Object.freeze({ kind: "idle" });
+    }
+    if (attempt.kind === "delivery_finalizer") {
+      return this.#runDeliveryFinalizer(runtime, attempt);
+    }
+    if (attempt.kind === "cycle_action") return this.#runCycleAction(runtime, attempt);
+
+    this.options.log(Object.freeze({
+      event: "root_turn_started",
+      root_id: observation.root_id,
+      runtime_generation: runtime.target.runtime_generation,
+      correlation_id: observation.correlation_id,
+      input_kind: attempt.kind,
+    }));
+    let outcome: RootTurnOutcome;
+    try {
+      outcome = await runtime.run(attempt);
+    } catch (error) {
+      this.#stopped = true;
+      const causeCode = deepestInternalCauseCode(error);
+      this.options.log(Object.freeze({
+        event: "root_turn_failed",
+        root_id: observation.root_id,
+        runtime_generation: runtime.target.runtime_generation,
+        correlation_id: observation.correlation_id,
+        reason_code: "turn_boundary_failed",
+        ...(causeCode === undefined ? {} : { cause_code: causeCode }),
+      }));
+      return Object.freeze({
+        kind: "failed",
+        root_id: observation.root_id,
+        reason_code: "turn_boundary_failed",
+      });
+    }
+
+    if (outcome.outcome === "quiescent" || outcome.outcome === "stopped") runtime.accept(attempt);
+    if (outcome.outcome !== "quiescent") this.#stopped = true;
+    this.options.log(Object.freeze({
+      event: "root_turn_completed",
+      root_id: observation.root_id,
+      runtime_generation: runtime.target.runtime_generation,
+      correlation_id: observation.correlation_id,
+      outcome: outcome.outcome,
+    }));
+    return Object.freeze({
+      kind: "turn_completed",
+      root_id: observation.root_id,
+      outcome: outcome.outcome,
+    });
   }
 
   async #cleanupDoneRoot(
@@ -509,8 +573,8 @@ export class SerialConductor {
     issue: TaskIssueSnapshot,
   ): Promise<SerialRunResult> {
     const rootId = observation.root_id;
-    this.#cycleContinuations.delete(rootId);
-    this.#stopped.add(rootId);
+    this.#cycleContinuation = null;
+    this.#stopped = true;
     const identity = Object.freeze({
       root_id: rootId,
       root_revision: issue.revision,
@@ -523,7 +587,10 @@ export class SerialConductor {
       ...identity,
       reason_code: "root_done",
     }));
-    const result = await this.registry.retire(rootId);
+    const result = await this.registry.retire(
+      rootId,
+      terminalCleanupCycleIds(observation, this.#workflow),
+    );
     const completedIdentity = result.runtime_generation === identity.runtime_generation
       ? identity
       : Object.freeze({ ...identity, runtime_generation: result.runtime_generation });
@@ -544,41 +611,39 @@ export class SerialConductor {
   }
 
   async #runCycleContinuation(): Promise<SerialRunResult | null> {
-    const roots = [...this.#cycleContinuations]
-      .sort(([left], [right]) => left.localeCompare(right));
-    for (const [rootId, runtime] of roots) {
-      let preparation;
-      try {
-        preparation = await runtime.prepareCycleContinuation();
-      } catch {
-        this.#cycleContinuations.delete(rootId);
-        this.#stopped.add(rootId);
-        this.options.log(Object.freeze({
-          event: "cycle_continuation_failed",
-          root_id: rootId,
-          runtime_generation: runtime.target.runtime_generation,
-          reason_code: "cycle_preparation_failed",
-        }));
-        return Object.freeze({ kind: "failed", root_id: rootId, reason_code: "cycle_preparation_failed" });
-      }
-      if (preparation.kind === "root_available") {
-        this.#cycleContinuations.delete(rootId);
-        continue;
-      }
-      if (preparation.kind === "paused") {
-        this.#cycleContinuations.delete(rootId);
-        this.options.log(Object.freeze({
-          event: "cycle_action_paused",
-          root_id: rootId,
-          runtime_generation: runtime.target.runtime_generation,
-          correlation_id: preparation.error.correlation_id,
-          reason_code: preparation.error.code,
-        }));
-        return Object.freeze({ kind: "paused", root_id: rootId, reason_code: preparation.error.code });
-      }
-      return this.#runCycleAction(runtime, preparation);
+    const runtime = this.#cycleContinuation;
+    if (runtime === null) return null;
+    const rootId = runtime.target.root_id;
+    let preparation;
+    try {
+      preparation = await runtime.prepareCycleContinuation();
+    } catch {
+      this.#cycleContinuation = null;
+      this.#stopped = true;
+      this.options.log(Object.freeze({
+        event: "cycle_continuation_failed",
+        root_id: rootId,
+        runtime_generation: runtime.target.runtime_generation,
+        reason_code: "cycle_preparation_failed",
+      }));
+      return Object.freeze({ kind: "failed", root_id: rootId, reason_code: "cycle_preparation_failed" });
     }
-    return null;
+    if (preparation.kind === "root_available") {
+      this.#cycleContinuation = null;
+      return null;
+    }
+    if (preparation.kind === "paused") {
+      this.#cycleContinuation = null;
+      this.options.log(Object.freeze({
+        event: "cycle_action_paused",
+        root_id: rootId,
+        runtime_generation: runtime.target.runtime_generation,
+        correlation_id: preparation.error.correlation_id,
+        reason_code: preparation.error.code,
+      }));
+      return Object.freeze({ kind: "paused", root_id: rootId, reason_code: preparation.error.code });
+    }
+    return this.#runCycleAction(runtime, preparation);
   }
 
   async #runCycleAction(
@@ -597,8 +662,8 @@ export class SerialConductor {
     try {
       result = await runtime.runCycle(prepared);
     } catch {
-      this.#cycleContinuations.delete(runtime.target.root_id);
-      this.#stopped.add(runtime.target.root_id);
+      this.#cycleContinuation = null;
+      this.#stopped = true;
       this.options.log(Object.freeze({
         event: "cycle_action_failed",
         root_id: runtime.target.root_id,
@@ -615,9 +680,9 @@ export class SerialConductor {
     }
 
     if (result.outcome === "advanced" || result.outcome === "precondition_failed") {
-      this.#cycleContinuations.set(runtime.target.root_id, runtime);
+      this.#cycleContinuation = runtime;
     } else {
-      this.#cycleContinuations.delete(runtime.target.root_id);
+      this.#cycleContinuation = null;
     }
     this.options.log(Object.freeze({
       event: "cycle_action_completed",
@@ -629,6 +694,56 @@ export class SerialConductor {
     }));
     return Object.freeze({
       kind: "cycle_action_completed",
+      root_id: result.root_id,
+      outcome: result.outcome,
+    });
+  }
+
+  async #runDeliveryFinalizer(
+    runtime: RegisteredRootRuntime,
+    prepared: PreparedDeliveryFinalizer,
+  ): Promise<SerialRunResult> {
+    this.#cycleContinuation = null;
+    this.options.log(Object.freeze({
+      event: "delivery_finalizer_started",
+      root_id: prepared.root_id,
+      cycle_id: prepared.cycle_id,
+      runtime_generation: prepared.runtime_generation,
+      correlation_id: prepared.correlation_id,
+      selected_route: prepared.selected_route,
+    }));
+    let result: DeliveryFinalizerResult;
+    try {
+      result = await runtime.runDeliveryFinalizer(prepared);
+    } catch {
+      this.#stopped = true;
+      this.options.log(Object.freeze({
+        event: "delivery_finalizer_failed",
+        root_id: prepared.root_id,
+        cycle_id: prepared.cycle_id,
+        runtime_generation: prepared.runtime_generation,
+        correlation_id: prepared.correlation_id,
+        selected_route: prepared.selected_route,
+        reason_code: "delivery_finalizer_failed",
+      }));
+      return Object.freeze({
+        kind: "failed",
+        root_id: prepared.root_id,
+        reason_code: "delivery_finalizer_failed",
+      });
+    }
+    this.options.log(Object.freeze({
+      event: "delivery_finalizer_completed",
+      root_id: result.root_id,
+      cycle_id: result.cycle_id,
+      runtime_generation: result.runtime_generation,
+      correlation_id: result.correlation_id,
+      selected_route: result.selected_route,
+      outcome: result.outcome,
+      ...(result.reason_code === undefined ? {} : { reason_code: result.reason_code }),
+    }));
+    return Object.freeze({
+      kind: "delivery_finalizer_completed",
       root_id: result.root_id,
       outcome: result.outcome,
     });

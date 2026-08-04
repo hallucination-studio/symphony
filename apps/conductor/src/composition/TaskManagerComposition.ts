@@ -70,6 +70,7 @@ export function assertTaskWorkflowConfiguration(
     [config.root_states.in_progress, "In Progress"],
     [config.root_states.in_review, "In Review"],
     [config.root_states.done, "Done"],
+    [config.root_states.failed, "Failed"],
     [config.workflow.cycle_states.draft, "Draft"],
     [config.workflow.cycle_states.in_progress, "In Progress"],
     [config.workflow.cycle_states.awaiting_acceptance, "Awaiting Acceptance"],
@@ -91,8 +92,7 @@ export function assertTaskWorkflowConfiguration(
     [config.workflow.labels.verify, "symphony:kind/verify"],
   ] as const;
   if (
-    new Set(expectedStates.map(([identity]) => identity)).size !== expectedStates.length
-    || expectedStates.some(([identity, name]) => {
+    expectedStates.some(([identity, name]) => {
       const observed = states.get(identity);
       return observed === undefined || observed.name !== name || observed.archived;
     })

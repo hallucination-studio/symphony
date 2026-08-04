@@ -25,6 +25,7 @@ export interface RootFamilyGuardOptions {
     in_progress: TaskStateId;
     in_review: TaskStateId;
     done: TaskStateId;
+    failed: TaskStateId;
   }>;
 }
 
@@ -72,6 +73,7 @@ export class RootFamilyGuard implements FamilyGuardInterface {
       : root.status_id === this.options.root_states.in_progress ? "In Progress"
       : root.status_id === this.options.root_states.in_review ? "In Review"
       : root.status_id === this.options.root_states.done ? "Done"
+      : root.status_id === this.options.root_states.failed ? "Failed"
       : null;
     if (status === null) throw new Error("family_guard_root_status_invalid");
     const id = recordId(observation.root_id);

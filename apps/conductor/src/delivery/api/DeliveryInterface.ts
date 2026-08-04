@@ -1,10 +1,12 @@
 import {
   parseRepositoryId,
+  parseCycleIssueId,
   parseRootIssueId,
   type CorrelationId,
   type RepositoryId,
   type Revision,
   type RootIssueId,
+  type CycleIssueId,
 } from "../../contracts/identity.js";
 import type { MutationResult } from "../../contracts/mutation.js";
 import type { PullRequestSnapshot } from "../../contracts/observation.js";
@@ -39,6 +41,10 @@ export interface DeliveryInterface {
 
 export function createRootHeadBranch(rootId: RootIssueId): string {
   return `symphony/root-${Buffer.from(rootId, "utf8").toString("hex")}`;
+}
+
+export function createCycleHeadBranch(cycleId: CycleIssueId): string {
+  return `symphony/cycle-${Buffer.from(parseCycleIssueId(cycleId), "utf8").toString("hex")}`;
 }
 
 export function createDeliveryIdentity(input: {

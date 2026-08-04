@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { canonicalTaskRevision, parseTaskIssueSnapshotChange, parseTaskSnapshot } from "../contracts/task-management.js";
 import {
+  deriveLastValidCycleBasisStatus,
   deriveLastValidStageBasisStatus,
   taskIssueChanges,
   taskSnapshotChanges,
@@ -128,4 +129,49 @@ test("external terminal Stage basis is accepted only when grouped history proves
     ],
   });
   assert.equal(deriveLastValidStageBasisStatus(ambiguous, stageIssue.issue_id), null);
+});
+
+test("external terminal Cycle basis is accepted only when grouped history proves one legal phase", () => {
+  const cycle = parseTaskIssueSnapshotChange(canonicalIssue({
+    issue_id: "LIN-CYCLE",
+    status_id: states.failed_state_id,
+    status: "Failed",
+  }));
+  const root = canonicalIssue({ issue_id: "LIN-1", kind: "root", parent_issue_id: null });
+  const history = {
+    history_id: "history:cycle-terminal",
+    issue_id: "LIN-CYCLE",
+    provider_created_at: "2026-08-03T00:00:01.000Z",
+    provider_updated_at: "2026-08-03T00:00:01.000Z",
+    actor_id: "actor:external",
+    change_origin: "external",
+    changed_fields: ["status"],
+    from_status: "In Progress",
+    to_status: "Failed",
+    from_parent_issue_id: "LIN-1",
+    to_parent_issue_id: "LIN-1",
+    added_label_ids: [],
+    removed_label_ids: [],
+    archived: null,
+    trashed: null,
+    relation_changes: [],
+  } as const;
+  const current = snapshot([root, cycle], []);
+  const withHistory = parseTaskSnapshot({ ...current, issue_history: [history] });
+
+  assert.equal(
+    deriveLastValidCycleBasisStatus(withHistory, cycle.issue_id),
+    "In Progress",
+  );
+  assert.equal(
+    deriveLastValidCycleBasisStatus(current, cycle.issue_id),
+    null,
+  );
+  assert.equal(
+    deriveLastValidCycleBasisStatus(parseTaskSnapshot({
+      ...current,
+      issue_history: [history, { ...history, history_id: "history:cycle-draft", from_status: "Draft" }],
+    }), cycle.issue_id),
+    null,
+  );
 });

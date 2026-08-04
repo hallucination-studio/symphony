@@ -511,7 +511,7 @@ export interface TaskSnapshot {
 
 export type TaskSnapshotObservation = TaskSnapshot | InvalidTaskSnapshot;
 
-function parseTaskIssueRecordObservation(value: unknown): TaskIssueRecordObservation {
+export function parseTaskIssueRecordObservation(value: unknown): TaskIssueRecordObservation {
   const record = asRecord(value);
   return "observation_kind" in record
     ? parseInvalidTaskIssueRecord(value)

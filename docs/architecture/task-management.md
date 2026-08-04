@@ -70,7 +70,7 @@ If it is not unique, keep the observation invalid; never fabricate
 | `TM-SNAP-003` | grouped Issue history | actor/origin, changed fields, endpoints, parent/label/archive changes, provider times | raw provider payload | conflict and lifecycle evidence, never per-mutation ordering |
 | `TM-SNAP-004` | record/terminal observation | valid closed record set with precedence<br>or external terminal with no matching record<br>and validated `last_valid_basis_status` (`Todo` or `In Progress`) | fabricated completed document<br>guessed status basis or strict mutation-order inference | transition evidence or pre-effect mechanical route<br>ambiguous basis is an invalid observation |
 | `TM-SNAP-005` | canonical revision | versioned deterministic digest of all normalized fields and provider times | `updatedAt` alias or CAS claim | fresh basis and change detection |
-| `TM-SNAP-006` | workflow state map | exact team and one distinct state ID for every required semantic status | name inference、cached/default state | validate every Issue status pair and status mutation |
+| `TM-SNAP-006` | workflow state map | exact team and active ID per required status<br>IDs are distinct within each map | name inference、cached/default state | validate every Issue status pair and status mutation |
 
 ## Command surface
 
@@ -123,7 +123,7 @@ sequenceDiagram
 | `TM-PROVIDER-004` | mutation actor may be grouped in history | dedicated non-human service actor credential is externally exclusive | deployment capability disabled |
 | `TM-PROVIDER-005` | Issue permanent delete exists<br>comment hard delete has no tombstone | policy、permissions and audit prohibit both before cleanup | proven Issue loss -> `WF-FAIL-013`<br>missing comment -> `WF-FAIL-001` through `WF-FAIL-003` |
 | `TM-PROVIDER-006` | startup API can read actor identity but not prove all credential copies or human permissions | provisioning、secret isolation、rotation and operator audit provide the external gate | fail closed before production mutation |
-| `TM-PROVIDER-007` | Linear workflow states are team-specific IDs and may omit a required semantic state | exact map covers every semantic state<br>each ID is present、active、distinct<br>fresh `list_states` validates before admission/mutation | observation/admission/mutation boundary stays unavailable<br>visible sanitized capability error |
+| `TM-PROVIDER-007` | Linear workflow states are team-specific IDs and may omit a required semantic state | exact map covers every semantic state<br>each ID is present、active<br>IDs are distinct within each semantic map<br>fresh `list_states` validates before admission/mutation | observation/admission/mutation boundary stays unavailable<br>visible sanitized capability error |
 
 | Provider response | Boundary action | Default |
 |---|---|---|

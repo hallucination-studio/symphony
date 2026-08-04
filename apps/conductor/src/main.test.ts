@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 
+import { parseRootIssueId } from "./contracts/identity.js";
 import type { ProductionConductor } from "./composition/ProductionConductor.js";
 import { runForeground } from "./main.js";
 
@@ -57,4 +58,31 @@ test("foreground performs the immediate poll and waits only after the serial sch
   });
 
   assert.deepEqual(order, ["poll", "admit", "idle", "wait:1234"]);
+});
+
+test("foreground exits after the bound Root cleanup completes", async () => {
+  const order: string[] = [];
+  const production: ProductionConductor = {
+    polling_interval_ms: 1_234,
+    observer: {
+      poll_once: async () => {
+        order.push("poll");
+        return [];
+      },
+    },
+    scheduler: {
+      admit: () => order.push("admit"),
+      runNext: async () => {
+        order.push("cleanup");
+        return { kind: "root_cleanup_completed", root_id: parseRootIssueId("LIN-1") };
+      },
+    },
+  };
+
+  await runForeground(production, {
+    stopRequested: () => false,
+    wait: async () => { throw new Error("cleanup_must_stop_before_wait"); },
+  });
+
+  assert.deepEqual(order, ["poll", "admit", "cleanup"]);
 });

@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type {
+  CycleCompletionRecord,
+  DeliveryCompletionRecord,
+  DeliveryInvalidationRecord,
+} from "../contracts/cycle-records.js";
+import {
+  parseDeliveryCompletionRecord,
+  parseDeliveryInvalidationRecord,
+} from "../contracts/cycle-records.js";
 import {
   parseCorrelationId,
   parseRepositoryId,
@@ -16,6 +25,7 @@ import {
   canonicalTaskRevision,
   parseTaskIssueSnapshotChange,
   type TaskIssueSnapshot,
+  type TaskSnapshot,
 } from "../contracts/task-management.js";
 import { parseMarkdownText } from "../contracts/validation.js";
 import type {
@@ -38,6 +48,12 @@ import {
   type UpdateIssueCall,
 } from "../task-management/mcp/TaskMcpSchemas.js";
 import { AcceptedRevisionDeliveryCoordinator } from "./AcceptedRevisionDelivery.js";
+import type {
+  DeliveryCompletionWriteInput,
+  DeliveryRecordState,
+  DeliveryInvalidationWriteInput,
+  DeliveryTerminalRecordStore,
+} from "./DeliveryTerminalRecord.js";
 import {
   createAcceptedRevisionAuthority,
   type AcceptedRevisionAuthorization,
@@ -53,6 +69,7 @@ const rootLabel = parseTaskLabelId("label:root");
 const rootInProgress = parseTaskStateId("state:root-in-progress");
 const rootInReview = parseTaskStateId("state:root-in-review");
 const rootDone = parseTaskStateId("state:root-done");
+const rootFailed = parseTaskStateId("state:cycle-failed");
 const identity = createDeliveryIdentity({
   provider: "github",
   root_id: rootId,
@@ -152,7 +169,7 @@ function rootIssue(
 ): TaskIssueSnapshot {
   const status: TaskIssueSnapshot["status"] = statusId === rootInReview
     ? "In Review"
-    : statusId === rootDone ? "Done" : "In Progress";
+    : statusId === rootDone ? "Done" : statusId === rootFailed ? "Failed" : "In Progress";
   const fields = {
     issue_id: parseTaskIssueId(rootId),
     provider_created_at: "2026-08-03T00:00:00.000Z",
@@ -203,13 +220,13 @@ class FakeTaskManager implements TaskManageCommandInterface {
     this.effects.push("task:update_issue");
     assert.equal(call.input.issue_id, rootId);
     assert.equal(call.input.expected_revision, this.current.revision);
-    assert.deepEqual(call.input.desired, { state_id: rootInReview });
+    assert.ok(call.input.desired.state_id === rootInReview || call.input.desired.state_id === rootFailed);
     const before = this.current;
     if (this.materializeUpdate) {
-      this.current = rootIssue(rootInReview);
+      this.current = rootIssue(call.input.desired.state_id);
     }
     const receiptResource = this.substituteAppliedReceipt
-      ? rootIssue(rootInReview, "Substituted Root")
+      ? rootIssue(call.input.desired.state_id, "Substituted Root")
       : this.current;
     return Promise.resolve(parseTaskMcpResult({
       schema_version: 1,
@@ -227,8 +244,8 @@ class FakeTaskManager implements TaskManageCommandInterface {
           kind: "field_changed",
           issue_id: rootId,
           field: "status",
-          before: before.status,
-          after: this.current.status,
+          before: before.status_id,
+          after: this.current.status_id,
         }] : [],
         sanitized_reason: this.updateOutcome === "applied" ? null : "provider_outcome",
       },
@@ -246,6 +263,213 @@ class FakeTaskManager implements TaskManageCommandInterface {
   list_labels = unexpected("list_labels");
 }
 
+const cycleId = parseTaskIssueId(acceptanceView.cycle_id);
+const acceptedCycle = Object.freeze({
+  record_id: "record:cycle:accepted:d5",
+  revision: `symphony:v1:${"3".repeat(64)}`,
+  issue_id: cycleId,
+  cycle_id: cycleId,
+  actor_id: "actor:symphony",
+  created_at: "2026-08-03T00:00:00.000Z",
+  updated_at: "2026-08-03T00:00:00.000Z",
+  archived_at: null,
+  basis_issue_revision: `symphony:v1:${"4".repeat(64)}`,
+  basis_status: "Awaiting Acceptance" as const,
+  basis_document_digest: "5".repeat(64),
+  record_kind: "cycle_completion" as const,
+  successor_policy: "not_applicable" as const,
+  completion: {
+    outcome: "accepted" as const,
+    specification_seal_digest: acceptanceView.cycle_seal_digest,
+    graph_seal_digest: acceptanceView.graph_seal_digest,
+    acceptance_basis_digest: "6".repeat(64),
+    stage_revisions: [{
+      issue_id: "STAGE-D5",
+      revision: `symphony:v1:${"7".repeat(64)}`,
+      terminal_record_digest: "8".repeat(64),
+    }],
+    stage_completion_digests: [{ issue_id: "STAGE-D5", digest: "9".repeat(64) }],
+    exact_revision: "a".repeat(64),
+    acceptance_convergence_proof: {
+      proof_scope: "acceptance",
+      first_round: {
+        linear_snapshot_digest: "1".repeat(64),
+        linear_observed_at: "2026-08-03T00:00:00.000Z",
+        git_exact_revision: "a".repeat(64),
+        git_observed_at: "2026-08-03T00:00:00.000Z",
+        root_revision: `symphony:v1:${"4".repeat(64)}`,
+      },
+      second_round: {
+        linear_snapshot_digest: "1".repeat(64),
+        linear_observed_at: "2026-08-03T00:00:01.000Z",
+        git_exact_revision: "a".repeat(64),
+        git_observed_at: "2026-08-03T00:00:01.000Z",
+        root_revision: `symphony:v1:${"4".repeat(64)}`,
+      },
+      observation_order: "linear -> git -> linear -> git",
+      stable_decision_basis_digest: "2".repeat(64),
+    },
+    acceptance_markdown: "Accepted.",
+  },
+} as unknown as Extract<CycleCompletionRecord, { readonly successor_policy: "not_applicable" }>);
+
+const approval = Object.freeze({
+  record_id: "record:cycle:approval:d5",
+  revision: `symphony:v1:${"1".repeat(64)}`,
+  issue_id: cycleId,
+  cycle_id: cycleId,
+  actor_id: "actor:symphony",
+  created_at: "2026-08-03T00:00:00.000Z",
+  updated_at: "2026-08-03T00:00:00.000Z",
+  archived_at: null,
+  basis_issue_revision: `symphony:v1:${"2".repeat(64)}`,
+  basis_status: "Draft" as const,
+  basis_document_digest: "3".repeat(64),
+  record_kind: "cycle_approval" as const,
+  identity_derivation_version: "symphony-identity:v1",
+  predecessor_cycle_issue_id: null,
+  predecessor_terminal_record_id: "record:cycle:first",
+  plan_issue_id: "PLAN-D5",
+  plan_completion_record_id: "record:plan:completion:d5",
+  plan_invalidation_record_id: "record:plan:invalidation:d5",
+  cycle_completion_record_id: acceptedCycle.record_id,
+  cycle_invalidation_record_id: "record:cycle:invalidation:d5",
+  delivery_completion_record_id: "record:delivery:completion:d5",
+  delivery_invalidation_record_id: "record:delivery:invalidation:d5",
+  specification_seal_digest: acceptanceView.cycle_seal_digest,
+  workspace_base_revision: "4".repeat(64),
+} as const);
+
+function cycleIssue(): TaskIssueSnapshot {
+  const fields = {
+    issue_id: cycleId,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    kind: "cycle" as const,
+    status_id: parseTaskStateId("state:cycle-succeeded"),
+    status: "Succeeded" as const,
+    title: "D5 Cycle",
+    description_markdown: parseMarkdownText("# Cycle\n\nAccepted."),
+    parent_issue_id: parseTaskIssueId(rootId),
+    label_ids: [parseTaskLabelId("label:cycle")],
+    delegate_id: "agent:symphony",
+    priority: 1,
+    archived: false,
+    trashed: false,
+  };
+  return parseTaskIssueSnapshotChange({ ...fields, revision: canonicalTaskRevision(fields) });
+}
+
+function deliverySnapshot(root: TaskIssueSnapshot, terminal: readonly unknown[] = []): TaskSnapshot {
+  return {
+    root_id: parseRootIssueId(rootId),
+    workflow_state_map: {} as TaskSnapshot["workflow_state_map"],
+    issues: [root, cycleIssue()],
+    relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [approval, acceptedCycle, ...terminal] as TaskSnapshot["issue_record_observations"],
+  };
+}
+
+class FakeDeliveryRecordStore implements DeliveryTerminalRecordStore {
+  invalidationRecord: DeliveryInvalidationRecord | null = null;
+  completionRecord: DeliveryCompletionRecord | null = null;
+  completionSlotInvalid = false;
+  readCount = 0;
+  mismatchAfterFirstRead = false;
+  lastCompletionInput: DeliveryCompletionWriteInput | null = null;
+  lastInvalidationInput: DeliveryInvalidationWriteInput | null = null;
+
+  constructor(readonly task: FakeTaskManager) {}
+
+  async read(): Promise<DeliveryRecordState> {
+    this.readCount += 1;
+    const root = this.task.current;
+    const basis = {
+      root,
+      cycle: cycleIssue(),
+      approval_record: approval as unknown as DeliveryRecordState["basis"]["approval_record"],
+      accepted_record: acceptedCycle,
+      accepted_record_digest: "a".repeat(64),
+      acceptance_basis_digest: acceptedCycle.completion.acceptance_basis_digest,
+      delivery_completion_record_id: approval.delivery_completion_record_id,
+      delivery_invalidation_record_id: approval.delivery_invalidation_record_id,
+      root_document_digest: "b".repeat(64),
+      linear_snapshot_digest: this.mismatchAfterFirstRead && this.readCount >= 3
+        ? "c".repeat(64) : "d".repeat(64),
+    } as DeliveryRecordState["basis"];
+    const completionSlot = this.completionSlotInvalid
+      ? { state: "invalid" as const, observation_digest: "e".repeat(64) }
+      : this.completionRecord === null
+        ? { state: "empty" as const }
+        : { state: "completion" as const, record: this.completionRecord };
+    const invalidationSlot = this.invalidationRecord === null
+      ? { state: "empty" as const }
+      : { state: "invalidation" as const, record: this.invalidationRecord };
+    return {
+      snapshot: deliverySnapshot(root),
+      basis,
+      completion_slot: completionSlot,
+      invalidation_slot: invalidationSlot,
+    };
+  }
+
+  async writeCompletion(input: DeliveryCompletionWriteInput) {
+    this.lastCompletionInput = input;
+    this.completionRecord = {
+      ...acceptedCycle,
+      record_id: input.state.basis.delivery_completion_record_id,
+      issue_id: parseTaskIssueId(rootId),
+      cycle_id: cycleId,
+      basis_issue_revision: input.state.basis.root.revision,
+      basis_status: "In Review",
+      basis_document_digest: input.state.basis.root_document_digest,
+      record_kind: "delivery_completion",
+      root_id: rootId,
+      accepted_cycle_id: cycleId,
+      exact_revision: "a".repeat(64),
+      accepted_record_digest: input.state.basis.accepted_record_digest,
+      acceptance_basis_digest: input.state.basis.acceptance_basis_digest,
+      observed_root_status: "In Review",
+      observed_remote_revision: "a".repeat(64),
+      observed_pull_request_identity: "https://github.example/pull/5",
+      observed_pull_request_head: "a".repeat(64),
+      convergence_proof: input.convergence_proof,
+    } as unknown as DeliveryCompletionRecord;
+    return this.completionRecord as ReturnType<typeof parseDeliveryCompletionRecord>;
+  }
+
+  async writeInvalidation(input: DeliveryInvalidationWriteInput) {
+    this.lastInvalidationInput = input;
+    this.invalidationRecord = {
+      ...acceptedCycle,
+      record_id: input.state.basis.delivery_invalidation_record_id,
+      issue_id: parseTaskIssueId(rootId),
+      cycle_id: cycleId,
+      basis_issue_revision: input.state.basis.root.revision,
+      basis_status: input.state.basis.root.status,
+      basis_document_digest: input.state.basis.root_document_digest,
+      record_kind: "delivery_invalidation",
+      root_id: rootId,
+      accepted_cycle_id: cycleId,
+      exact_revision: "a".repeat(64),
+      accepted_record_digest: input.state.basis.accepted_record_digest,
+      acceptance_basis_digest: input.state.basis.acceptance_basis_digest,
+      observed_root_status: input.state.basis.root.status,
+      observed_remote_revision: input.observation.remote_revision === null ? null : "a".repeat(64),
+      observed_pull_request_identity: input.observation.pull_request?.url ?? null,
+      observed_pull_request_head: input.observation.pull_request === null ? null : "a".repeat(64),
+      invalidation_evidence: input.invalidation_evidence,
+      resolution_policy: "permanently_quarantined",
+      reason_code: input.reason_code,
+      reason_markdown: input.reason_markdown,
+    } as unknown as DeliveryInvalidationRecord;
+    return this.invalidationRecord as ReturnType<typeof parseDeliveryInvalidationRecord>;
+  }
+}
+
 function unexpected(name: string) {
   return async (): Promise<never> => {
     throw new Error(`unexpected_${name}`);
@@ -261,17 +485,20 @@ function fixture() {
   });
   const delivery = new FakeDelivery();
   const task = new FakeTaskManager();
+  const recordStore = new FakeDeliveryRecordStore(task);
   const coordinator = new AcceptedRevisionDeliveryCoordinator({
     provider: "github",
     root_label_id: rootLabel,
     root_in_progress_state: rootInProgress,
     root_in_review_state: rootInReview,
+    root_failed_state: rootFailed,
     accepted_revision_verifier: acceptedRevision.verifier,
     task_caller_issuer: task.callerAuthority.issuer,
     task_manager: task,
     delivery,
+    record_store: recordStore,
   });
-  return { authorization, acceptedRevision, delivery, task, coordinator };
+  return { authorization, acceptedRevision, delivery, task, recordStore, coordinator };
 }
 
 const liveExecution = Object.freeze({ assertActive: () => undefined });
@@ -297,8 +524,15 @@ test("accepted revision delivery uses only acceptance-time evidence and fresh ex
     "delivery:create_pull_request",
     "delivery:read",
     "delivery:read",
+    "delivery:read",
+    "delivery:read",
   ]);
   assert.deepEqual(f.task.effects, ["task:get_issue", "task:update_issue", "task:get_issue"]);
+  assert.equal(f.recordStore.lastCompletionInput?.convergence_proof.proof_scope, "delivery");
+  assert.equal(
+    f.recordStore.lastCompletionInput?.convergence_proof.observation_order,
+    "linear -> git -> delivery -> linear -> git -> delivery",
+  );
 });
 
 test("delivery conflicts never replace a remote revision or pull request", async (context) => {
@@ -424,6 +658,106 @@ test("a conflicting Root status cannot be replaced after exact delivery", async 
   const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
 
   assert.equal(result.outcome, "not_delivered");
-  assert.equal(result.reason_code, "root_status_conflict");
+  assert.equal(result.reason_code, "delivery_invalidated");
   assert.deepEqual(f.task.effects, ["task:get_issue"]);
+  assert.equal(f.recordStore.invalidationRecord?.reason_code, "root_done_before_completion");
+  assert.equal(f.task.current.status, "Done");
+});
+
+test("delivery invalidation is followed by an exact Root Failed projection", async () => {
+  const f = fixture();
+  f.recordStore.mismatchAfterFirstRead = true;
+
+  const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+
+  assert.equal(result.outcome, "not_delivered");
+  assert.equal(result.reason_code, "delivery_invalidated");
+  assert.equal(f.recordStore.invalidationRecord?.record_kind, "delivery_invalidation");
+  assert.equal(f.task.current.status_id, rootFailed);
+  assert.equal(f.task.current.status, "Failed");
+  assert.equal(f.task.effects.filter((effect) => effect === "task:update_issue").length, 2);
+});
+
+test("a persisted delivery invalidation exposes an unconfirmed Root Failed projection", async () => {
+  const f = fixture();
+  f.task.current = rootIssue(rootInReview);
+  f.delivery.remoteRevision = revision;
+  f.delivery.pullRequests = [pullRequest()];
+  f.recordStore.mismatchAfterFirstRead = true;
+  f.task.materializeUpdate = false;
+
+  const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+
+  assert.equal(result.outcome, "not_delivered");
+  assert.equal(result.reason_code, "root_failure_projection_unconfirmed");
+  assert.equal(f.recordStore.invalidationRecord?.record_kind, "delivery_invalidation");
+  assert.equal(f.task.current.status, "In Review");
+});
+
+test("restart projects a persisted delivery invalidation without repeating delivery effects", async () => {
+  const f = fixture();
+  f.task.current = rootIssue(rootInReview);
+  f.delivery.remoteRevision = revision;
+  f.delivery.pullRequests = [pullRequest()];
+  f.recordStore.mismatchAfterFirstRead = true;
+  f.task.materializeUpdate = false;
+
+  const first = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+  assert.equal(first.outcome, "not_delivered");
+  assert.equal(first.reason_code, "root_failure_projection_unconfirmed");
+  const deliveryEffectsBeforeRestart = [...f.delivery.effects];
+
+  f.task.materializeUpdate = true;
+  const restarted = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+
+  assert.equal(restarted.outcome, "not_delivered");
+  assert.equal(restarted.reason_code, "delivery_invalidated");
+  assert.equal(f.task.current.status_id, rootFailed);
+  assert.deepEqual(f.delivery.effects, deliveryEffectsBeforeRestart);
+});
+
+test("delivery convergence mismatch writes one Root-attached invalidation and never retries effects", async () => {
+  const f = fixture();
+  f.recordStore.mismatchAfterFirstRead = true;
+
+  const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+
+  assert.equal(result.outcome, "not_delivered");
+  assert.equal(result.reason_code, "delivery_invalidated");
+  assert.equal(f.recordStore.lastInvalidationInput?.invalidation_evidence.kind, "convergence_mismatch");
+  assert.equal(f.recordStore.completionRecord, null);
+  assert.equal(f.delivery.effects.filter((effect) => effect === "delivery:push").length, 1);
+  assert.equal(f.delivery.effects.filter((effect) => effect === "delivery:create_pull_request").length, 1);
+
+  const effectsBeforeRestart = [...f.delivery.effects];
+  const restarted = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+  assert.equal(restarted.outcome, "not_delivered");
+  assert.equal(restarted.reason_code, "delivery_invalidated");
+  assert.deepEqual(f.delivery.effects, effectsBeforeRestart);
+});
+
+test("an occupied delivery completion slot is invalidated before push or PR creation", async () => {
+  const f = fixture();
+  f.recordStore.completionSlotInvalid = true;
+
+  const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+
+  assert.equal(result.outcome, "not_delivered");
+  assert.equal(result.reason_code, "delivery_invalidated");
+  assert.deepEqual(f.delivery.effects, ["delivery:read"]);
+  assert.equal(f.recordStore.lastInvalidationInput?.invalidation_evidence.kind, "completion_slot_conflict");
+});
+
+test("restart reads a delivery completion record and never repeats push or PR creation", async () => {
+  const f = fixture();
+  const first = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+  assert.equal(first.outcome, "delivered");
+
+  f.delivery.effects.length = 0;
+  f.task.effects.length = 0;
+  const restarted = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
+
+  assert.equal(restarted.outcome, "delivered");
+  assert.deepEqual(f.delivery.effects, ["delivery:read"]);
+  assert.deepEqual(f.task.effects, []);
 });

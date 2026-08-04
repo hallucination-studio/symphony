@@ -49,7 +49,9 @@ function issueRecord(issue: Issue) {
     parent_id: issue.parentId ?? null,
     status: issue.stateId,
     title: issue.title,
-    description: issue.description ?? null,
+    description: issue.description === null || issue.description === undefined || issue.description.length === 0
+      ? null
+      : issue.description,
     labels: Object.freeze(issue.labelIds),
     delegate_id: issue.delegateId ?? null,
     priority: issue.priority === 0 ? null : issue.priority,

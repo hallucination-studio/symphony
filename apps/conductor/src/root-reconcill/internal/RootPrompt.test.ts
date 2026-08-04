@@ -29,6 +29,8 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
       readonly root_definition_revision_format?: unknown;
       readonly root_section_requirements?: unknown;
       readonly cycle_section_requirements?: unknown;
+      readonly root_description_shape?: unknown;
+      readonly cycle_description_shape?: unknown;
     };
     readonly freshness_contract?: unknown;
     readonly define_contract?: unknown;
@@ -93,6 +95,14 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
     ],
     "Failure Strategy": ["Specify fail-closed behavior for stale, partial, conflicting, or unknown facts."],
   });
+  assert.equal(
+    prompt.markdown_contracts?.root_description_shape,
+    "Use at most one level-1 title, then exactly these level-2 headings in order: ## Requirement, ## Domain Knowledge, ## Root ADR, ## Acceptance. Give every section visible non-empty content and do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
+  );
+  assert.equal(
+    prompt.markdown_contracts?.cycle_description_shape,
+    "Use at most one level-1 title, then exactly these level-2 headings in order: ## Root Definition Revision, ## Requirement, ## Domain Knowledge, ## Root ADR, ## Acceptance, ## Architecture, ## Feature Design, ## Code Design, ## Boundaries, ## Acceptance Mapping, ## Failure Strategy. Give every section visible non-empty content, except Root Definition Revision which contains exactly one inline-code revision, and do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
+  );
   assert.deepEqual(prompt.freshness_contract, {
     prior_turn_tool_results_are_current: false,
     current_turn_get_issue_required_before: ["Draft correction", "Draft approval"],
@@ -126,6 +136,7 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
   const instruction = String(prompt.instruction);
   for (const required of [
     "fresh Task Manager read-back",
+    "finish quiescent after the applied read-back",
     "same current turn",
     "transcript",
     "code-inspection output",
@@ -144,6 +155,19 @@ test("Root prompt declares the closed Define, Draft review, and seal workflow", 
     "terminal predecessor",
     "fresh successor Draft",
     "never reuse or fork Performer context",
+    "nested input object contains exactly issue_id, expected_revision, and desired",
+    "fresh UUIDv4",
+    "never an issue name or placeholder",
+    "desired contains exactly title, description, state_id, label_ids, delegate_id, and priority",
+    "The six desired fields must all be inside desired",
+    "with no desired field beside desired",
+    "Valid shape",
+    "verbatim copies of the exact same sections from the current fresh Root read-back",
+    "take the four raw Markdown substrings beginning at the named headings and paste them unchanged",
+    "never repeat schema_version, function, root_id, runtime_generation, correlation_id, or capability inside input",
+    "For declared code inspection calls, use the flat schema exactly as shown by each tool",
+    "never add function or input",
+    "sanitized_reason is null exactly when outcome is quiescent",
   ]) assert.equal(instruction.includes(required), true, required);
   for (const forbidden of ["call Plan", "call Work", "call Verify", "create_commit"]) {
     assert.equal(instruction.includes(forbidden), false, forbidden);

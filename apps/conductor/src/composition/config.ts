@@ -34,9 +34,10 @@ export interface RootStateIdentities {
   readonly in_progress: TaskStateId;
   readonly in_review: TaskStateId;
   readonly done: TaskStateId;
+  readonly failed: TaskStateId;
 }
 
-export interface RootRoutingConfig {
+export interface RootBindingConfig {
   readonly root_id: RootIssueId;
   readonly repository_id: RepositoryId;
   readonly repository_path: string;
@@ -54,7 +55,7 @@ export interface ConductorConfig {
   readonly root_states: RootStateIdentities;
   readonly workflow: TaskWorkflowIdentities;
   readonly root_capabilities: readonly string[];
-  readonly root_routing: readonly RootRoutingConfig[];
+  readonly root: RootBindingConfig;
 }
 
 function absolutePath(value: unknown, code: string): string {
@@ -72,12 +73,13 @@ function pollingInterval(value: unknown): number {
 
 function rootStates(value: unknown): RootStateIdentities {
   const record = asRecord(value, "invalid_root_states");
-  assertExactKeys(record, ["todo", "in_progress", "in_review", "done"]);
+  assertExactKeys(record, ["todo", "in_progress", "in_review", "done", "failed"]);
   const states = Object.freeze({
     todo: parseTaskStateId(record.todo),
     in_progress: parseTaskStateId(record.in_progress),
     in_review: parseTaskStateId(record.in_review),
     done: parseTaskStateId(record.done),
+    failed: parseTaskStateId(record.failed),
   });
   if (new Set(Object.values(states)).size !== Object.keys(states).length) {
     throw new Error("duplicate_root_state_identity");
@@ -99,6 +101,17 @@ function rootCapabilities(value: unknown): readonly string[] {
   return capabilities;
 }
 
+function rootBinding(value: unknown): RootBindingConfig {
+  const route = asRecord(value, "invalid_root_binding");
+  assertExactKeys(route, ["root_id", "repository_id", "repository_path", "base_branch"]);
+  return Object.freeze({
+    root_id: parseRootIssueId(route.root_id),
+    repository_id: parseRepositoryId(route.repository_id),
+    repository_path: absolutePath(route.repository_path, "invalid_repository_path"),
+    base_branch: parseBoundedString(route.base_branch, "invalid_base_branch"),
+  });
+}
+
 export function parseConductorConfig(value: unknown): ConductorConfig {
   const record = asRecord(value, "invalid_conductor_config");
   assertExactKeys(record, [
@@ -112,24 +125,8 @@ export function parseConductorConfig(value: unknown): ConductorConfig {
     "root_states",
     "workflow",
     "root_capabilities",
-    "root_routing",
+    "root",
   ]);
-  if (!Array.isArray(record.root_routing) || record.root_routing.length < 1) {
-    throw new Error("invalid_root_routing");
-  }
-  const routing = record.root_routing.map((entry): RootRoutingConfig => {
-    const route = asRecord(entry, "invalid_root_routing");
-    assertExactKeys(route, ["root_id", "repository_id", "repository_path", "base_branch"]);
-    return Object.freeze({
-      root_id: parseRootIssueId(route.root_id),
-      repository_id: parseRepositoryId(route.repository_id),
-      repository_path: absolutePath(route.repository_path, "invalid_repository_path"),
-      base_branch: parseBoundedString(route.base_branch, "invalid_base_branch"),
-    });
-  });
-  if (new Set(routing.map(({ root_id }) => root_id)).size !== routing.length) {
-    throw new Error("duplicate_root_routing");
-  }
   const endpoint = parseBoundedString(record.delivery_provider_endpoint, "invalid_delivery_endpoint", 2048);
   if (!URL.canParse(endpoint) || new URL(endpoint).protocol !== "https:") {
     throw new Error("invalid_delivery_endpoint");
@@ -145,6 +142,6 @@ export function parseConductorConfig(value: unknown): ConductorConfig {
     root_states: rootStates(record.root_states),
     workflow: parseTaskWorkflowIdentities(record.workflow),
     root_capabilities: rootCapabilities(record.root_capabilities),
-    root_routing: Object.freeze(routing),
+    root: rootBinding(record.root),
   });
 }

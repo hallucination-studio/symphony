@@ -165,6 +165,9 @@ function parseBoundSnapshot(value: CycleExecutionSnapshot): CycleExecutionSnapsh
       sealed_work_issues: value.sealed_work_issues.map(executionStage),
       verify_issue: value.verify_issue === null ? null : executionStage(value.verify_issue),
       sealed_relations: value.sealed_relations,
+      resource_creation_evidence: value.resource_creation_evidence,
+      issue_history: value.issue_history,
+      issue_record_observations: value.issue_record_observations,
       git: value.git,
     }, {
       root_id: parseRootIssueId(value.root_id),

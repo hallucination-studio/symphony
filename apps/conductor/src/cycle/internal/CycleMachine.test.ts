@@ -298,9 +298,10 @@ function snapshot(
   correlationId: string,
   cycleRevision = "revision:cycle:current",
   cycleSpecification = specification,
+  cycleStatus: keyof typeof workflow.cycle_states = "in_progress",
 ): CycleAdvanceRequest {
   const correlation = parseCorrelationId(correlationId);
-  const observedCycleRevision = taskSnapshot("in_progress", cycleRevision).issues
+  const observedCycleRevision = taskSnapshot(cycleStatus, cycleRevision).issues
     .find(({ issue_id }) => String(issue_id) === String(cycleId))!.revision;
   return parseCycleExecutionSnapshot({
     schema_version: 1,
@@ -309,12 +310,15 @@ function snapshot(
     runtime_generation: generation,
     correlation_id: correlation,
     cycle_revision: observedCycleRevision,
-    cycle_status: "in_progress",
+    cycle_status: cycleStatus,
     specification: cycleSpecification,
     plan_issue: null,
     sealed_work_issues: [],
     verify_issue: null,
     sealed_relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: {
       repository_id: "repo:host",
       base_branch: "main",
@@ -359,6 +363,9 @@ function snapshotWithPlan(correlationId: string): CycleAdvanceRequest {
     sealed_work_issues: [],
     verify_issue: null,
     sealed_relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: base.git,
   }, {
     root_id: rootId,
@@ -412,6 +419,9 @@ function awaitingAcceptanceSnapshot(correlationId: string): CycleAdvanceRequest 
       status: "done",
     },
     sealed_relations: completeGraph.relations,
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: base.git,
   }, {
     root_id: rootId,
@@ -851,6 +861,37 @@ test("Cycle host derives terminal and Draft routing only from the fresh snapshot
   assert.equal(approvedReopen.kind, "cycle_action");
   if (approvedReopen.kind !== "cycle_action") return;
   assert.equal((await host.run(approvedReopen)).outcome, "advanced");
+});
+
+test("Cycle host prepares a selected external terminal Cycle without a non-terminal candidate", async () => {
+  const terminalTask = taskSnapshot("failed", "revision:cycle:external-terminal");
+  const host = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    reader: {
+      read: async (request) => snapshot(
+        request.correlation_id,
+        "revision:cycle:external-terminal",
+        specification,
+        "failed",
+      ),
+    },
+    machine: {
+      advance: async (request) => result(request, "no_action", request.cycle_revision),
+    },
+  });
+
+  const prepared = await host.prepare(
+    terminalTask,
+    parseCorrelationId("corr:external-terminal"),
+    null,
+    undefined,
+    cycleId,
+  );
+  assert.equal(prepared.kind, "cycle_action");
+  if (prepared.kind !== "cycle_action") return;
+  assert.equal(prepared.request.cycle_status, "failed");
+  assert.equal((await host.run(prepared)).outcome, "no_action");
 });
 
 test("Cycle host retains live ownership when a continuation first observes its created Plan", async () => {

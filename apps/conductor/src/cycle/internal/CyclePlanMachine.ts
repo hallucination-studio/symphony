@@ -1,10 +1,17 @@
+import { createHash } from "node:crypto";
+
 import {
   parseSealedExecutionGraph,
   type CycleAdvanceRequest,
   type CycleAdvanceResult,
   type StageExecutionSnapshot,
 } from "../../contracts/cycle.js";
-import type { SealedCycleBasis, StageCompletionRecord } from "../../contracts/cycle-records.js";
+import {
+  parseStageCompletionRecord,
+  stageCompletionTerminalStatus,
+  type SealedCycleBasis,
+  type StageCompletionRecord,
+} from "../../contracts/cycle-records.js";
 import {
   parseStageIssueId,
   parseTaskIssueId,
@@ -14,6 +21,10 @@ import {
 import type { TaskIssueSnapshot } from "../../contracts/task-management.js";
 import type { GitWorkspaceInterface } from "../../git/api/GitWorkspaceInterface.js";
 import { parseMarkdownText } from "../../contracts/validation.js";
+import {
+  deriveLastValidCycleBasisStatus,
+  deriveLastValidStageBasisStatus,
+} from "../../observation/TaskFacts.js";
 import {
   parsePlanRequest,
   parsePlanResult,
@@ -92,6 +103,15 @@ interface PlanCompletionRecordPersistence {
     ...args: Parameters<PlanCompletionRecordWriter["persistCompleted"]>
   ): Promise<unknown>;
   persistPlanTerminal(...args: Parameters<PlanCompletionRecordWriter["persistPlanTerminal"]>): Promise<unknown>;
+  readCycleTerminalRecord?(
+    ...args: Parameters<PlanCompletionRecordWriter["readCycleTerminalRecord"]>
+  ): ReturnType<PlanCompletionRecordWriter["readCycleTerminalRecord"]>;
+  persistExternalTerminalInvalidation?(
+    ...args: Parameters<PlanCompletionRecordWriter["persistExternalTerminalInvalidation"]>
+  ): Promise<unknown>;
+  persistExternalTerminalCycleInvalidation?(
+    ...args: Parameters<PlanCompletionRecordWriter["persistExternalTerminalCycleInvalidation"]>
+  ): Promise<unknown>;
   readCompleted(
     request: CycleAdvanceRequest,
     basis: SealedCycleBasis,
@@ -101,6 +121,10 @@ interface PlanCompletionRecordPersistence {
     basis: SealedCycleBasis,
     built: BuiltPlanGraphManifest,
     stageId: TaskIssueId,
+  ): Promise<StageCompletionRecord | null>;
+  readPlanCompletion(
+    request: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
   ): Promise<StageCompletionRecord | null>;
   assertAcceptanceEvidence(
     request: CycleAdvanceRequest,
@@ -213,6 +237,59 @@ function stageList(request: CycleAdvanceRequest): readonly StageExecutionSnapsho
     ...request.sealed_work_issues,
     ...(request.verify_issue === null ? [] : [request.verify_issue]),
   ];
+}
+
+function stageTaskStatus(stage: StageExecutionSnapshot): "Todo" | "In Progress" | "Done" | "Failed" | "Canceled" {
+  switch (stage.status) {
+    case "todo": return "Todo";
+    case "in_progress": return "In Progress";
+    case "done": return "Done";
+    case "failed": return "Failed";
+    case "canceled": return "Canceled";
+  }
+}
+
+function cycleTaskStatus(
+  status: CycleAdvanceRequest["cycle_status"],
+): "Draft" | "In Progress" | "Awaiting Acceptance" | "Succeeded" | "Rejected" | "Failed" | "Canceled" {
+  switch (status) {
+    case "in_progress": return "In Progress";
+    case "awaiting_acceptance": return "Awaiting Acceptance";
+    case "succeeded": return "Succeeded";
+    case "rejected": return "Rejected";
+    case "failed": return "Failed";
+    case "canceled": return "Canceled";
+  }
+}
+
+function hasFreshExternalTerminalHistory(
+  request: CycleAdvanceRequest,
+  stage: StageExecutionSnapshot,
+): boolean {
+  const terminalStatus = stageTaskStatus(stage);
+  return request.issue_history.some((entry) => (
+    entry.issue_id === parseTaskIssueId(stage.issue_id)
+    && entry.change_origin === "external"
+    && entry.changed_fields.includes("status")
+    && entry.to_status === terminalStatus
+  ));
+}
+
+function hasFreshExternalCycleTerminalHistory(request: CycleAdvanceRequest): boolean {
+  const cycleStatus = cycleTaskStatus(request.cycle_status);
+  if (
+    cycleStatus !== "Succeeded"
+    && cycleStatus !== "Rejected"
+    && cycleStatus !== "Failed"
+    && cycleStatus !== "Canceled"
+  ) return false;
+  const cycleId = parseTaskIssueId(request.cycle_id);
+  return request.issue_history.some((entry) => (
+    entry.issue_id === cycleId
+    && entry.change_origin === "external"
+    && entry.changed_fields.includes("status")
+    && entry.to_status === cycleStatus
+  ));
 }
 
 function parseExecution(value: CycleMachineExecution): CycleMachineExecution {
@@ -429,9 +506,13 @@ export class CyclePlanMachine implements CycleMachineInterface {
     execution: CycleMachineExecution,
     epoch: number,
   ): Promise<CycleAdvanceResult> {
+    const externalCycleTerminal = await this.#handleExternalTerminalCycle(request, epoch);
+    if (externalCycleTerminal !== null) return externalCycleTerminal;
     if (execution.closure === "admission_lost") {
       return this.#failCycle(request, "active_root_admission_lost", "canceled", epoch, "canceled");
     }
+    const externalTerminal = await this.#handleExternalTerminalStage(request, epoch);
+    if (externalTerminal !== null) return externalTerminal;
     if (request.cycle_status === "awaiting_acceptance") {
       try {
         const basis = await this.#readSealedBasis(request);
@@ -810,6 +891,179 @@ export class CyclePlanMachine implements CycleMachineInterface {
     } catch {
       this.#assertActive(epoch);
       return this.#failCycle(failureSnapshot, "plan_phase_failed", planTerminalStatus, epoch);
+    }
+  }
+
+  async #handleExternalTerminalStage(
+    request: CycleAdvanceRequest,
+    epoch: number,
+  ): Promise<CycleAdvanceResult | null> {
+    if (request.cycle_status !== "in_progress") return null;
+    const terminals = stageList(request).filter(({ status }) => (
+      status === "done" || status === "failed" || status === "canceled"
+    )).filter((stage) => hasFreshExternalTerminalHistory(request, stage));
+    if (terminals.length === 0) return null;
+
+    let basis: SealedCycleBasis;
+    let built: BuiltPlanGraphManifest | null = null;
+    let terminal: StageExecutionSnapshot | null = null;
+    try {
+      basis = await this.#readSealedBasis(request);
+      const plan = request.plan_issue;
+      if (plan?.status === "failed" || plan?.status === "canceled") {
+        const completion = await this.#planCompletionRecordWriter.readPlanCompletion(request, basis);
+        this.#assertActive(epoch);
+        if (completion === null) terminal = plan;
+      } else {
+        built = await this.#planCompletionRecordWriter.readCompleted(request, basis);
+        this.#assertActive(epoch);
+        if (plan !== null && plan.status === "done" && built === null) terminal = plan;
+      }
+      if (terminal === null) {
+        for (const candidate of terminals) {
+          if (candidate.kind === "plan") continue;
+          if (built === null) {
+            return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+          }
+          const completion = await this.#planCompletionRecordWriter.readStageCompletion(
+            request,
+            basis,
+            built,
+            parseTaskIssueId(candidate.issue_id),
+          );
+          this.#assertActive(epoch);
+          if (
+            completion === null
+            || stageCompletionTerminalStatus(completion.completion) !== stageTaskStatus(candidate)
+          ) {
+            terminal = candidate;
+            break;
+          }
+        }
+      }
+    } catch {
+      this.#assertActive(epoch);
+      return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+    }
+    if (terminal === null) return null;
+
+    const basisStatus = deriveLastValidStageBasisStatus({
+      issues: [{ issue_id: parseTaskIssueId(terminal.issue_id), status: stageTaskStatus(terminal) }],
+      issue_history: request.issue_history,
+    }, parseTaskIssueId(terminal.issue_id));
+    if (basisStatus === null) {
+      return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+    }
+    const persist = this.#planCompletionRecordWriter.persistExternalTerminalInvalidation;
+    if (persist === undefined) {
+      return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+    }
+    try {
+      await persist.call(
+        this.#planCompletionRecordWriter,
+        request,
+        basis,
+        built,
+        parseTaskIssueId(terminal.issue_id),
+        this.#execution(epoch),
+      );
+      this.#assertActive(epoch);
+    } catch {
+      this.#assertActive(epoch);
+      return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+    }
+    return this.#failCycle(request, "cycle_transition_failed", "failed", epoch);
+  }
+
+  async #handleExternalTerminalCycle(
+    request: CycleAdvanceRequest,
+    epoch: number,
+  ): Promise<CycleAdvanceResult | null> {
+    if (
+      request.cycle_status !== "succeeded"
+      && request.cycle_status !== "rejected"
+      && request.cycle_status !== "failed"
+      && request.cycle_status !== "canceled"
+    ) return null;
+    if (!hasFreshExternalCycleTerminalHistory(request)) return null;
+
+    const read = this.#planCompletionRecordWriter.readCycleTerminalRecord;
+    const persist = this.#planCompletionRecordWriter.persistExternalTerminalCycleInvalidation;
+    if (read === undefined || persist === undefined) {
+      return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+    }
+
+    try {
+      const basis = await this.#readSealedBasis(request);
+      const terminalRecord = await read.call(this.#planCompletionRecordWriter, request, basis);
+      this.#assertActive(epoch);
+      if (terminalRecord !== null) return result(request, "no_action");
+
+      const cycleId = parseTaskIssueId(request.cycle_id);
+      const basisStatus = deriveLastValidCycleBasisStatus({
+        issues: [{ issue_id: cycleId, status: cycleTaskStatus(request.cycle_status) }],
+        issue_history: request.issue_history,
+      }, cycleId);
+      if (basisStatus === null) {
+        return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+      }
+
+      const activeStages = stageList(request).filter(({ status }) => status === "in_progress");
+      let built: BuiltPlanGraphManifest | null = null;
+      if (activeStages.some(({ kind }) => kind !== "plan")) {
+        built = await this.#planCompletionRecordWriter.readCompleted(request, basis);
+        if (built === null) throw new Error("cycle_terminal_manifest_missing");
+      }
+
+      const terminalOutcome = request.cycle_status === "canceled" ? "canceled" : "failed";
+      const closedStages: Array<{
+        readonly stage: StageExecutionSnapshot;
+        readonly status: "done" | "failed" | "canceled";
+        readonly record: StageCompletionRecord;
+      }> = [];
+      let projectedRequest = request;
+      for (const stage of activeStages) {
+        const persisted = await this.#planCompletionRecordWriter.persistStageFailure(
+          projectedRequest,
+          basis,
+          built,
+          parseTaskIssueId(stage.issue_id),
+          "external_cycle_terminal",
+          "The Cycle reached a terminal status without a matching Symphony completion record.",
+          this.#execution(epoch),
+          terminalOutcome,
+        );
+        const record = parseStageCompletionRecord(persisted, stage.kind, basis);
+        const terminalStatus = stageCompletionTerminalStatus(record.completion);
+        closedStages.push({
+          stage,
+          status: terminalStatus === "Done"
+            ? "done"
+            : terminalStatus === "Canceled" ? "canceled" : "failed",
+          record,
+        });
+        this.#assertActive(epoch);
+      }
+
+      for (const { stage, status } of closedStages) {
+        projectedRequest = await this.#projectStageStatus(projectedRequest, stage, status, epoch);
+        this.#assertActive(epoch);
+      }
+
+      await persist.call(
+        this.#planCompletionRecordWriter,
+        projectedRequest,
+        basis,
+        closedStages.map(({ record }) => createHash("sha256")
+          .update(JSON.stringify(record), "utf8")
+          .digest("hex")),
+        this.#execution(epoch),
+      );
+      this.#assertActive(epoch);
+      return result(projectedRequest, "no_action");
+    } catch {
+      this.#assertActive(epoch);
+      return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
     }
   }
 

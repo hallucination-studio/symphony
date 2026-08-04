@@ -32,8 +32,11 @@ import {
 import {
   parseCycleApprovalRecord,
   parseCycleSpecification as parseRecordCycleSpecification,
+  parseStageCompletionRecord,
+  stageCompletionTerminalStatus,
   type StageCompletionRecord,
 } from "../../contracts/cycle-records.js";
+import { renderTaskIssueRecordProjectionMarkdown } from "../../contracts/cycle-record-markdown.js";
 import {
   parsePlanResult,
   parseVerifyResult,
@@ -52,6 +55,7 @@ import {
   canonicalTaskRevision,
   parseTaskIssueSnapshotChange,
   parseTaskRelationSnapshot,
+  type TaskIssueHistoryEntry,
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
 } from "../../contracts/task-management.js";
@@ -72,7 +76,10 @@ import {
   type UpdateIssueCall,
   type UpdateIssueResult,
 } from "../../task-management/mcp/TaskMcpSchemas.js";
-import { createDeliveryIdentity } from "../../delivery/api/DeliveryInterface.js";
+import {
+  createCycleHeadBranch,
+  createDeliveryIdentity,
+} from "../../delivery/api/DeliveryInterface.js";
 import type { GitWorkspaceInterface } from "../../git/api/GitWorkspaceInterface.js";
 import { GitWorktree } from "../../git/internal/GitWorktree.js";
 import { bindCycleAdvanceRequest } from "./CycleMachine.js";
@@ -347,6 +354,7 @@ const sealedBasisReader = Object.freeze({
 const planCompletionRecordWriter = Object.freeze({
   persistCompleted: async () => undefined,
   persistPlanTerminal: async () => undefined,
+  readPlanCompletion: async () => null,
   readCompleted: async (snapshot: CycleAdvanceRequest) => snapshot.plan_issue?.status === "done"
     ? (() => {
       const built = buildPlanGraphManifest({
@@ -416,6 +424,9 @@ function emptyRequest(): CycleAdvanceRequest {
     sealed_work_issues: [],
     verify_issue: null,
     sealed_relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: {
       repository_id: "repo:symphony",
       base_branch: "main",
@@ -485,15 +496,21 @@ const planSource = Object.freeze({
 function requestWithGraph(
   graph: SealedExecutionGraph,
   input: {
+    readonly cycle_status?: CycleAdvanceRequest["cycle_status"];
+    readonly cycle_revision?: string;
     readonly plan_status?: "todo" | "in_progress" | "done" | "failed" | "canceled";
     readonly plan_revision?: string;
     readonly work_issues?: readonly TaskIssueSnapshot[];
     readonly work_statuses?: readonly ("todo" | "in_progress" | "done" | "failed" | "canceled")[];
     readonly verify_issue?: TaskIssueSnapshot | null;
     readonly verify_status?: "todo" | "in_progress" | "done" | "failed" | "canceled";
+    readonly issue_history?: readonly unknown[];
+    readonly issue_record_observations?: readonly unknown[];
   } = {},
 ): CycleAdvanceRequest {
-  const cycleRevision = parseTaskRevision(`symphony:v1:${"9".repeat(64)}`);
+  const cycleRevision = parseTaskRevision(
+    input.cycle_revision ?? `symphony:v1:${"9".repeat(64)}`,
+  );
   const planStatus = input.plan_status ?? "todo";
   const planRevision = parseTaskRevision(input.plan_revision ?? "revision:plan:created");
   const stageFromIssue = (
@@ -516,7 +533,7 @@ function requestWithGraph(
     runtime_generation: generation,
     correlation_id: correlationId,
     cycle_revision: cycleRevision,
-    cycle_status: "in_progress",
+    cycle_status: input.cycle_status ?? "in_progress",
     specification,
     plan_issue: graph.plan_issue === null ? null : {
       issue_id: planSource.issue_id,
@@ -536,6 +553,9 @@ function requestWithGraph(
       ? null
       : stageFromIssue(input.verify_issue, "verify", input.verify_status ?? "todo"),
     sealed_relations: graph.relations,
+    resource_creation_evidence: [],
+    issue_history: input.issue_history ?? [],
+    issue_record_observations: input.issue_record_observations ?? [],
     git: {
       repository_id: "repo:symphony",
       base_branch: "main",
@@ -557,8 +577,10 @@ function requestWithGraph(
 }
 
 function planOnlyRequest(
-  status: "todo" | "in_progress" = "todo",
-  revision = status === "todo" ? "revision:plan:created" : "revision:plan:started",
+  status: "todo" | "in_progress" | "done" | "failed" | "canceled" = "todo",
+  revision = status === "todo" ? "revision:plan:created"
+    : status === "in_progress" ? "revision:plan:started"
+      : `revision:plan:${status}:external`,
 ): CycleAdvanceRequest {
   const graph = parseSealedExecutionGraph({
     plan_issue: planSource,
@@ -853,6 +875,278 @@ function singleWorkGraph() {
   return Object.freeze({ work, verify, graph, snapshot });
 }
 
+function stageHistory(
+  issueId: string,
+  fromStatus: "Todo" | "In Progress",
+  toStatus: "Done" | "Failed" | "Canceled",
+): TaskIssueHistoryEntry {
+  return {
+    history_id: `history:${issueId}:${toStatus.toLowerCase()}`,
+    issue_id: parseTaskIssueId(issueId),
+    provider_created_at: ISSUE_TIMESTAMP,
+    provider_updated_at: ISSUE_TIMESTAMP,
+    actor_id: "actor:external",
+    change_origin: "external",
+    changed_fields: ["status"],
+    from_status: fromStatus,
+    to_status: toStatus,
+    from_parent_issue_id: parseTaskIssueId(cycleId),
+    to_parent_issue_id: parseTaskIssueId(cycleId),
+    added_label_ids: [],
+    removed_label_ids: [],
+    archived: null,
+    trashed: null,
+    relation_changes: [],
+  } as const;
+}
+
+function cycleHistory(
+  toStatus: "Succeeded" | "Rejected" | "Failed" | "Canceled",
+  fromStatus: "Draft" | "In Progress" | "Awaiting Acceptance" = "In Progress",
+): TaskIssueHistoryEntry {
+  return {
+    history_id: `history:${cycleId}:${toStatus.toLowerCase()}`,
+    issue_id: parseTaskIssueId(cycleId),
+    provider_created_at: ISSUE_TIMESTAMP,
+    provider_updated_at: ISSUE_TIMESTAMP,
+    actor_id: "actor:external",
+    change_origin: "external",
+    changed_fields: ["status"],
+    from_status: fromStatus,
+    to_status: toStatus,
+    from_parent_issue_id: parseTaskIssueId(rootId),
+    to_parent_issue_id: parseTaskIssueId(rootId),
+    added_label_ids: [],
+    removed_label_ids: [],
+    archived: null,
+    trashed: null,
+    relation_changes: [],
+  } as const;
+}
+
+function matchingWorkCompletionRecord(outcome: "completed" | "failed" | "canceled" = "completed"): StageCompletionRecord {
+  return parseStageCompletionRecord({
+    record_id: "record:work:completion:external",
+    revision: `symphony:v1:${"a".repeat(64)}`,
+    issue_id: "WORK-ONLY",
+    cycle_id: cycleId,
+    actor_id: "actor:symphony",
+    created_at: "2026-08-03T01:00:00.000Z",
+    updated_at: "2026-08-03T01:00:00.000Z",
+    archived_at: null,
+    basis_issue_revision: `symphony:v1:${"b".repeat(64)}`,
+    basis_status: "In Progress",
+    basis_document_digest: "c".repeat(64),
+    record_kind: "stage_completion",
+    stage_id: "WORK-ONLY",
+    completion: {
+      outcome,
+      instruction_digest: "d".repeat(64),
+      workspace_parent_revision: "e".repeat(64),
+      workspace_diff_digest: "f".repeat(64),
+      checks_markdown: "## Checks\n\n- passed: external completion.",
+      normalized_handoff_markdown: "The Work completed before this observation.",
+      ...(outcome === "completed" ? {} : {
+        reason_code: "external_terminal",
+        reason_markdown: "The Work completion has a mismatched terminal outcome.",
+      }),
+    },
+  }, "work");
+}
+
+function occupiedInvalidationObservation(recordId: string, issueId = "WORK-ONLY") {
+  return {
+    record_id: recordId,
+    issue_id: issueId,
+    expected_record_kind: "stage_invalidation",
+    observation_kind: "updated",
+    provider_created_at: ISSUE_TIMESTAMP,
+    provider_updated_at: ISSUE_TIMESTAMP,
+    archived_at: null,
+    observed_body_digest: "1".repeat(64),
+    parse_error_code: "record_updated",
+  } as const;
+}
+
+function externalTerminalFixture(
+  status: "done" | "failed" | "canceled",
+  history: readonly unknown[],
+  options: {
+    readonly completion?: boolean;
+    readonly completion_outcome?: "completed" | "failed" | "canceled";
+    readonly record_observations?: readonly unknown[];
+  } = {},
+) {
+  const graphFixture = singleWorkGraph();
+  const currentWork = taskIssue({
+    ...graphFixture.work,
+    revision: parseTaskRevision(`revision:work:external:${status}`),
+    status_id: workflow.stage_states[status],
+  });
+  const request = requestWithGraph(graphFixture.graph, {
+    plan_status: "done",
+    plan_revision: "revision:plan:done:external",
+    work_issues: [currentWork],
+    work_statuses: [status],
+    verify_issue: graphFixture.verify,
+    issue_history: history,
+    issue_record_observations: options.record_observations ?? [],
+  });
+  const events: string[] = [];
+  let externalInvalidations = 0;
+  let stageFailures = 0;
+  const writer = {
+    ...planCompletionRecordWriter,
+    readStageCompletion: async () => options.completion === true
+      ? matchingWorkCompletionRecord(options.completion_outcome)
+      : null,
+    persistExternalTerminalInvalidation: async () => {
+      externalInvalidations += 1;
+      events.push("external_invalidation");
+    },
+    persistStageFailure: async () => {
+      stageFailures += 1;
+      events.push("stage_failure");
+    },
+  };
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
+    assert.equal(call.input.desired.state_id, workflow.cycle_states.failed);
+    events.push("cycle_failed");
+    return appliedIssueResult(
+      call,
+      failedCycleIssue("revision:cycle:failed:external"),
+      workflow.cycle_states.in_progress,
+    );
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: writer,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+  return {
+    request,
+    machine,
+    events,
+    externalInvalidations: () => externalInvalidations,
+    stageFailures: () => stageFailures,
+  };
+}
+
+function externalCycleTerminalFixture(
+  status: "succeeded" | "rejected" | "failed" | "canceled",
+  options: {
+    readonly terminalRecord?: unknown;
+    readonly readError?: boolean;
+    readonly stageCompletionOutcome?: "completed" | "failed" | "canceled";
+  } = {},
+) {
+  const graphFixture = singleWorkGraph();
+  const activeWork = taskIssue({
+    ...graphFixture.work,
+    revision: parseTaskRevision(`revision:work:external-cycle:${status}`),
+    status_id: workflow.stage_states.in_progress,
+  });
+  let request = requestWithGraph(graphFixture.graph, {
+    cycle_status: status,
+    cycle_revision: `revision:cycle:external:${status}`,
+    plan_status: "done",
+    plan_revision: "revision:plan:done:external-cycle",
+    work_issues: [activeWork],
+    work_statuses: ["in_progress"],
+    verify_issue: graphFixture.verify,
+    issue_history: [cycleHistory(
+      status === "succeeded" ? "Succeeded"
+        : status === "rejected" ? "Rejected"
+          : status === "canceled" ? "Canceled" : "Failed",
+    )],
+  });
+  const events: string[] = [];
+  type CycleTerminalRecord = Awaited<ReturnType<PlanCompletionRecordWriter["readCycleTerminalRecord"]>>;
+  let cycleTerminalRecord: CycleTerminalRecord = options.terminalRecord as CycleTerminalRecord ?? null;
+  let persistedCycleSnapshot: CycleAdvanceRequest | null = null;
+  let cycleStatusUpdates = 0;
+  const writer = {
+    ...planCompletionRecordWriter,
+    readCycleTerminalRecord: async () => {
+      if (options.readError === true) throw new Error("invalid_cycle_completion_observation");
+      return cycleTerminalRecord;
+    },
+    persistStageFailure: async () => {
+      events.push("stage_record");
+      return matchingWorkCompletionRecord(
+        options.stageCompletionOutcome
+          ?? (status === "canceled" ? "canceled" : "failed"),
+      );
+    },
+    persistExternalTerminalCycleInvalidation: async (
+      snapshot: CycleAdvanceRequest,
+      _basis: unknown,
+      closedStageRecordDigests: readonly string[],
+    ) => {
+      assert.equal(closedStageRecordDigests.length, 1);
+      persistedCycleSnapshot = snapshot;
+      events.push("cycle_invalidation");
+      cycleTerminalRecord = { record_kind: "cycle_invalidation" } as CycleTerminalRecord;
+    },
+  };
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    if (call.input.issue_id === parseTaskIssueId(cycleId)) {
+      cycleStatusUpdates += 1;
+      throw new Error("external_cycle_status_must_be_preserved");
+    }
+    assert.equal(call.input.issue_id, parseTaskIssueId(activeWork.issue_id));
+    const desiredStatus = options.stageCompletionOutcome === "completed"
+      ? "done"
+      : status === "canceled" ? "canceled" : "failed";
+    assert.equal(call.input.desired.state_id, workflow.stage_states[desiredStatus]);
+    events.push(`stage_${desiredStatus}`);
+    const closedWork = taskIssue({
+      ...graphFixture.work,
+      revision: parseTaskRevision(`revision:work:external-cycle:${status}:closed`),
+      status_id: workflow.stage_states[desiredStatus],
+    });
+    request = bindCycleAdvanceRequest({
+      ...request,
+      sealed_work_issues: [{
+        ...request.sealed_work_issues[0]!,
+        revision: closedWork.revision,
+        status: desiredStatus,
+      }],
+    });
+    return appliedIssueResult(call, closedWork, workflow.stage_states.in_progress);
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: writer,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => request },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+  return {
+    request: () => request,
+    machine,
+    events,
+    cycleTerminalRecord: () => cycleTerminalRecord,
+    persistedCycleSnapshot: () => persistedCycleSnapshot,
+    cycleStatusUpdates: () => cycleStatusUpdates,
+  };
+}
+
 function controlledVerifyResult(
   request: VerifyRequest,
   conclusion: VerifyResult["conclusion"],
@@ -928,7 +1222,7 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
   const dirtyGit = Object.freeze({
     repository_id: repositoryId,
     base_branch: deliveryIdentity.base_branch,
-    head_branch: deliveryIdentity.head_branch,
+    head_branch: createCycleHeadBranch(cycleId),
     head_revision: parseRevision("a".repeat(40)),
     workspace_state: "dirty" as const,
     diff_digest: parseObservationDigest("sha256:controlled-before"),
@@ -1022,13 +1316,13 @@ function controlledCommitVerify(options: ControlledCommitVerifyOptions = {}) {
       ? {
         schema_version: 1,
         outcome,
-        target_id: options.commit_target_mismatch ? "ROOT-OTHER" : rootId,
+        target_id: options.commit_target_mismatch ? "CYCLE-OTHER" : cycleId,
         correlation_id: correlationId,
       }
       : {
         schema_version: 1,
         outcome: "precondition_failed",
-        target_id: rootId,
+        target_id: cycleId,
         correlation_id: correlationId,
         reason: "controlled_commit_conflict",
       }
@@ -1771,6 +2065,8 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
     "2026-08-02T02:00:00.000Z",
     "2026-08-02T04:00:00.000Z",
     "2026-08-02T06:00:00.000Z",
+    "2026-08-02T07:00:00.000Z",
+    "2026-08-02T08:00:00.000Z",
   ];
   let recordIndex = 0;
   const manager = unexpectedManager();
@@ -1837,6 +2133,46 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
     verify_issue: verifyIssue,
   });
   const planRecord = await writer.persistCompleted(planSnapshot, basis, built, execution);
+
+  const planId = parseTaskIssueId(planSnapshot.plan_issue!.issue_id);
+  const planComment = comments.get(planId)?.[0];
+  assert.notEqual(planComment, undefined);
+  const planInstructionDigest = createHash("sha256")
+    .update(planSnapshot.plan_issue!.description_markdown, "utf8")
+    .digest("hex");
+  const mismatchedPlanBody = renderTaskIssueRecordProjectionMarkdown({
+    issue_id: planId,
+    cycle_id: parseTaskIssueId("CYCLE-WRONG"),
+    basis_issue_revision: planSnapshot.plan_issue!.revision,
+    basis_status: "In Progress",
+    basis_document_digest: planInstructionDigest,
+    record_kind: "stage_completion",
+    stage_id: planId,
+    completion: {
+      outcome: "failed",
+      instruction_digest: planInstructionDigest,
+      reason_markdown: "The Plan completion is anchored to another Cycle.",
+    },
+  });
+  comments.set(planId, [{
+    ...planComment!,
+    body_digest: createHash("sha256").update(mismatchedPlanBody, "utf8").digest("hex"),
+    body_markdown: mismatchedPlanBody,
+  }]);
+  await assert.rejects(
+    () => writer.persistStageFailure(
+      planSnapshot,
+      basis,
+      null,
+      planId,
+      "external_cycle_terminal",
+      "The Cycle reached a terminal status before Plan projected.",
+      execution,
+    ),
+    /stage_completion_anchor_mismatch/u,
+  );
+  comments.set(planId, [planComment!]);
+
   const startedWork = taskIssue({
     ...workIssues[0]!,
     revision: parseTaskRevision(`symphony:v1:${"2".repeat(64)}`),
@@ -1864,6 +2200,26 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
     sanitized_summary_markdown: parseMarkdownText("Work handoff is normalized."),
   };
   const workRecord = await writer.persistWork(workSnapshot, basis, built, workResult, execution);
+  const staleWork = taskIssue({
+    ...startedWork,
+    revision: parseTaskRevision(`symphony:v1:${"4".repeat(64)}`),
+  });
+  const staleWorkSnapshot = requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: "revision:record:plan:done",
+    work_issues: [staleWork, workIssues[1]!],
+    work_statuses: ["in_progress", "todo"],
+    verify_issue: verifyIssue,
+  });
+  await assert.rejects(
+    () => writer.readStageCompletion(
+      staleWorkSnapshot,
+      basis,
+      built,
+      staleWork.issue_id,
+    ),
+    /stage_completion_basis_mismatch/u,
+  );
   const doneWorkIssues = workIssues.map((issue, index) => taskIssue({
     ...issue,
     revision: parseTaskRevision(`revision:record:work:done:${index}`),
@@ -1903,6 +2259,55 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
   assert.equal("conclusion" in verifyRecord.completion ? verifyRecord.completion.conclusion : null, "passed");
   assert.deepEqual(recordIndex, 3);
 
+  const externalWorkNode = built.manifest.ordered_work_nodes[1]!;
+  const externalTerminalInput = {
+    work_issues: workIssues,
+    work_statuses: ["todo", "done"] as const,
+    verify_issue: verifyIssue,
+    issue_history: [stageHistory(String(externalWorkNode.issue_id), "In Progress", "Done")],
+  };
+  const occupiedRequest = requestWithGraph(graph, {
+    ...externalTerminalInput,
+    issue_record_observations: [occupiedInvalidationObservation(
+      externalWorkNode.invalidation_record_id,
+      String(externalWorkNode.issue_id),
+    )],
+  });
+  await assert.rejects(
+    writer.persistExternalTerminalInvalidation(
+      occupiedRequest,
+      basis,
+      built,
+      externalWorkNode.issue_id,
+      execution,
+    ),
+    /external_terminal_record_slot_occupied/u,
+  );
+
+  const missingRequest = requestWithGraph(graph, {
+    ...externalTerminalInput,
+    issue_record_observations: [{
+      record_id: externalWorkNode.invalidation_record_id,
+      issue_id: externalWorkNode.issue_id,
+      expected_record_kind: "stage_invalidation",
+      observation_kind: "missing",
+      provider_created_at: null,
+      provider_updated_at: null,
+      archived_at: null,
+      observed_body_digest: null,
+      parse_error_code: "record_missing",
+    }],
+  });
+  const externalInvalidation = await writer.persistExternalTerminalInvalidation(
+    missingRequest,
+    basis,
+    built,
+    externalWorkNode.issue_id,
+    execution,
+  );
+  assert.equal(externalInvalidation.record_id, externalWorkNode.invalidation_record_id);
+  assert.equal(recordIndex, 4);
+
   const invalidCreationWriter = (actorId: string, createdAt: string) => new PlanCompletionRecordWriter({
     caller_issuer: callerAuthority.issuer,
     workflow,
@@ -1927,6 +2332,21 @@ test("real Plan, Work, and Verify records persist exact fresh evidence in provid
       .readCompleted(workSnapshot, basis),
     /plan_completion_record_order_invalid/u,
   );
+
+  comments.set(verifyIssue.issue_id, []);
+  const canceledVerifyRecord = await writer.persistStageFailure(
+    verifySnapshot,
+    basis,
+    built,
+    verifyIssue.issue_id,
+    "external_cycle_terminal",
+    "The Cycle reached a terminal status before Verify projected.",
+    execution,
+    "canceled",
+  );
+  assert.equal("conclusion" in canceledVerifyRecord.completion
+    ? canceledVerifyRecord.completion.conclusion : null, "canceled");
+  assert.equal(stageCompletionTerminalStatus(canceledVerifyRecord.completion), "Canceled");
 });
 
 for (const scenario of [
@@ -2300,6 +2720,7 @@ test("restart continues an exact persisted Plan manifest without rerunning Plan 
     plan_completion_record_writer: {
       persistCompleted: async () => { throw new Error("unexpected_record_write"); },
       persistPlanTerminal: async () => { throw new Error("unexpected_terminal_record_write"); },
+      readPlanCompletion: async () => null,
       readCompleted: async () => {
         events.push("read_persisted_manifest");
         return built;
@@ -3148,6 +3569,490 @@ test("retirement closes the active Work performer and fences its late result fro
   ]);
 });
 
+test("an external terminal Stage with one valid history basis gets an invalidation before Cycle failure", async () => {
+  const fixture = externalTerminalFixture(
+    "done",
+    [stageHistory("WORK-ONLY", "In Progress", "Done")],
+    { record_observations: [] },
+  );
+
+  const outcome = await fixture.machine.advance(fixture.request, LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(fixture.externalInvalidations(), 1);
+  assert.equal(fixture.stageFailures(), 0);
+  assert.deepEqual(fixture.events, ["external_invalidation", "cycle_failed"]);
+});
+
+test("terminal Stage evidence does not manufacture external invalidation without a unique external transition", async (context) => {
+  const scenarios = [
+    {
+      name: "missing history",
+      history: [],
+      outcome: "terminal_failed" as const,
+      events: ["cycle_failed"],
+    },
+    {
+      name: "ambiguous history",
+      history: [
+        stageHistory("WORK-ONLY", "Todo", "Done"),
+        stageHistory("WORK-ONLY", "In Progress", "Done"),
+      ],
+      outcome: "precondition_failed" as const,
+      events: [],
+    },
+    {
+      name: "unknown history origin",
+      history: [{
+        ...stageHistory("WORK-ONLY", "In Progress", "Done"),
+        change_origin: "unknown" as const,
+      }],
+      outcome: "terminal_failed" as const,
+      events: ["cycle_failed"],
+    },
+  ];
+  for (const scenario of scenarios) {
+    await context.test(scenario.name, async () => {
+      const fixture = externalTerminalFixture("done", scenario.history);
+
+      const outcome = await fixture.machine.advance(fixture.request, LIVE_EXECUTION);
+
+      assert.equal(outcome.outcome, scenario.outcome);
+      assert.equal(fixture.externalInvalidations(), 0);
+      assert.equal(fixture.stageFailures(), 0);
+      assert.deepEqual(fixture.events, scenario.events);
+    });
+  }
+});
+
+test("an existing Stage completion record does not trigger external invalidation", async () => {
+  const fixture = externalTerminalFixture(
+    "done",
+    [],
+    { completion: true },
+  );
+
+  const outcome = await fixture.machine.advance(fixture.request, LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(fixture.externalInvalidations(), 0);
+  assert.equal(fixture.stageFailures(), 0);
+  assert.deepEqual(fixture.events, ["cycle_failed"]);
+});
+
+test("a terminal Stage with a mismatched completion outcome uses external invalidation", async () => {
+  const fixture = externalTerminalFixture(
+    "done",
+    [stageHistory("WORK-ONLY", "In Progress", "Done")],
+    { completion: true, completion_outcome: "failed" },
+  );
+
+  const outcome = await fixture.machine.advance(fixture.request, LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(fixture.externalInvalidations(), 1);
+  assert.equal(fixture.stageFailures(), 0);
+  assert.deepEqual(fixture.events, ["external_invalidation", "cycle_failed"]);
+});
+
+test("a terminal Plan without a matching completion record uses the external invalidation route", async () => {
+  const request = planOnlyRequest("failed");
+  const history = [stageHistory(request.plan_issue!.issue_id, "In Progress", "Failed")];
+  const events: string[] = [];
+  let externalInvalidations = 0;
+  const writer = {
+    ...planCompletionRecordWriter,
+    readPlanCompletion: async () => null,
+    persistExternalTerminalInvalidation: async () => {
+      externalInvalidations += 1;
+      events.push("external_invalidation");
+    },
+  };
+  const manager = unexpectedManager();
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    assert.equal(call.input.issue_id, parseTaskIssueId(cycleId));
+    events.push("cycle_failed");
+    return appliedIssueResult(
+      call,
+      failedCycleIssue("revision:cycle:failed:external-plan"),
+      workflow.cycle_states.in_progress,
+    );
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: writer,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: manager,
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_read"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_plan"); } },
+  });
+
+  const outcome = await machine.advance(bindCycleAdvanceRequest({
+    ...request,
+    issue_history: history,
+  }), LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "terminal_failed");
+  assert.equal(externalInvalidations, 1);
+  assert.deepEqual(events, ["external_invalidation", "cycle_failed"]);
+});
+
+test("an external terminal Cycle closes active Stages, persists Cycle invalidation, and preserves status", async () => {
+  const fixture = externalCycleTerminalFixture("failed");
+
+  const outcome = await fixture.machine.advance(fixture.request(), LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "no_action");
+  assert.deepEqual(fixture.events, ["stage_record", "stage_failed", "cycle_invalidation"]);
+  assert.equal(fixture.cycleStatusUpdates(), 0);
+  assert.equal(fixture.persistedCycleSnapshot()?.sealed_work_issues[0]?.status, "failed");
+  assert.deepEqual(fixture.request().cycle_status, "failed");
+});
+
+test("an external terminal Cycle projects an existing Stage completion before closing the Stage", async () => {
+  const fixture = externalCycleTerminalFixture("failed", { stageCompletionOutcome: "completed" });
+
+  const outcome = await fixture.machine.advance(fixture.request(), LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "no_action");
+  assert.deepEqual(fixture.events, ["stage_record", "stage_done", "cycle_invalidation"]);
+  assert.equal(fixture.cycleStatusUpdates(), 0);
+});
+
+test("an external terminal Cycle takes precedence over lost Root admission", async () => {
+  const fixture = externalCycleTerminalFixture("failed");
+
+  const outcome = await fixture.machine.advance(
+    fixture.request(),
+    { ownership: "live", closure: "admission_lost" },
+  );
+
+  assert.equal(outcome.outcome, "no_action");
+  assert.deepEqual(fixture.events, ["stage_record", "stage_failed", "cycle_invalidation"]);
+  assert.equal(fixture.cycleStatusUpdates(), 0);
+});
+
+test("a matching terminal Cycle record is authoritative and does not close Stages", async () => {
+  const fixture = externalCycleTerminalFixture("rejected", {
+    terminalRecord: { record_kind: "cycle_completion" },
+  });
+
+  const outcome = await fixture.machine.advance(fixture.request(), LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "no_action");
+  assert.deepEqual(fixture.events, []);
+  assert.equal(fixture.cycleStatusUpdates(), 0);
+});
+
+test("an external terminal Cycle route is idempotent after its invalidation is observed", async () => {
+  const fixture = externalCycleTerminalFixture("canceled");
+
+  const first = await fixture.machine.advance(fixture.request(), LIVE_EXECUTION);
+  const second = await fixture.machine.advance(fixture.request(), LIVE_EXECUTION);
+
+  assert.equal(first.outcome, "no_action");
+  assert.equal(second.outcome, "no_action");
+  assert.deepEqual(fixture.events, ["stage_record", "stage_canceled", "cycle_invalidation"]);
+  assert.deepEqual(fixture.cycleTerminalRecord(), { record_kind: "cycle_invalidation" });
+});
+
+test("an invalid terminal Cycle completion observation fails closed before Stage closure", async () => {
+  const fixture = externalCycleTerminalFixture("failed", { readError: true });
+
+  const outcome = await fixture.machine.advance(fixture.request(), LIVE_EXECUTION);
+
+  assert.equal(outcome.outcome, "precondition_failed");
+  assert.deepEqual(fixture.events, []);
+  assert.equal(fixture.cycleStatusUpdates(), 0);
+});
+
+test("the real writer reads a failed Plan completion after terminal status projection", async () => {
+  const planBeforeTerminal = planOnlyRequest("in_progress", `symphony:v1:${recordDigest("8")}`);
+  const planAfterTerminal = planOnlyRequest("failed");
+  const planId = parseTaskIssueId(planAfterTerminal.plan_issue!.issue_id);
+  const basisDocumentDigest = createHash("sha256")
+    .update(planAfterTerminal.plan_issue!.description_markdown, "utf8")
+    .digest("hex");
+  const instructionDigest = basisDocumentDigest;
+  const bodyMarkdown = renderTaskIssueRecordProjectionMarkdown({
+    issue_id: planId,
+    cycle_id: parseTaskIssueId(cycleId),
+    basis_issue_revision: planBeforeTerminal.plan_issue!.revision,
+    basis_status: "In Progress",
+    basis_document_digest: basisDocumentDigest,
+    record_kind: "stage_completion",
+    stage_id: planId,
+    completion: {
+      outcome: "failed",
+      instruction_digest: instructionDigest,
+      reason_markdown: "The Plan failed before graph materialization.",
+    },
+  });
+  const comment: LinearIssueRecordComment = {
+    comment_id: recordSpecification.plan_completion_record_id,
+    issue_id: planId,
+    provider_created_at: "2026-08-02T02:00:00.000Z",
+    provider_updated_at: "2026-08-02T02:00:00.000Z",
+    provider_edited_at: null,
+    provider_archived_at: null,
+    actor_id: "actor:symphony",
+    body_digest: createHash("sha256").update(bodyMarkdown, "utf8").digest("hex"),
+    body_markdown: bodyMarkdown,
+  };
+  const writer = new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: unexpectedManager(),
+    record_reader: {
+      readIssueRecordComments: async () => [comment],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: "2026-08-02T01:30:00.000Z",
+        actor_id: "actor:symphony",
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+
+  const record = await writer.readPlanCompletion(planAfterTerminal, {
+    specification: recordSpecification,
+    approval_record: recordApproval,
+  });
+
+  assert.notEqual(record, null);
+  assert.equal(record!.stage_id, planId);
+  assert.equal("outcome" in record!.completion ? record!.completion.outcome : null, "failed");
+});
+
+test("terminal Plan completion read rejects wrong cycle and instruction anchors", async () => {
+  const planBeforeTerminal = planOnlyRequest("in_progress", `symphony:v1:${recordDigest("8")}`);
+  const planAfterTerminal = planOnlyRequest("failed");
+  const planId = parseTaskIssueId(planAfterTerminal.plan_issue!.issue_id);
+  const basisDocumentDigest = createHash("sha256")
+    .update(planAfterTerminal.plan_issue!.description_markdown, "utf8")
+    .digest("hex");
+  const projection = (overrides: {
+    readonly cycle_id?: string;
+    readonly instruction_digest?: string;
+  } = {}) => ({
+    issue_id: planId,
+    cycle_id: overrides.cycle_id ?? cycleId,
+    basis_issue_revision: planBeforeTerminal.plan_issue!.revision,
+    basis_status: "In Progress" as const,
+    basis_document_digest: basisDocumentDigest,
+    record_kind: "stage_completion" as const,
+    stage_id: planId,
+    completion: {
+      outcome: "failed" as const,
+      instruction_digest: overrides.instruction_digest ?? basisDocumentDigest,
+      reason_markdown: "The Plan failed before graph materialization.",
+    },
+  });
+  const commentFor = (value: unknown): LinearIssueRecordComment => {
+    const bodyMarkdown = renderTaskIssueRecordProjectionMarkdown(value);
+    return {
+      comment_id: recordSpecification.plan_completion_record_id,
+      issue_id: planId,
+      provider_created_at: "2026-08-02T02:00:00.000Z",
+      provider_updated_at: "2026-08-02T02:00:00.000Z",
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: createHash("sha256").update(bodyMarkdown, "utf8").digest("hex"),
+      body_markdown: bodyMarkdown,
+    };
+  };
+  const writerFor = (comment: LinearIssueRecordComment) => new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: unexpectedManager(),
+    record_reader: {
+      readIssueRecordComments: async () => [comment],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: "2026-08-02T01:30:00.000Z",
+        actor_id: "actor:symphony",
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+
+  await assert.rejects(
+    () => writerFor(commentFor(projection({ cycle_id: "CYCLE-WRONG" }))).readPlanCompletion(
+      planAfterTerminal,
+      { specification: recordSpecification, approval_record: recordApproval },
+    ),
+    /plan_completion_anchor_mismatch/u,
+  );
+  await assert.rejects(
+    () => writerFor(commentFor(projection({ instruction_digest: recordDigest("0") }))).readPlanCompletion(
+      planAfterTerminal,
+      { specification: recordSpecification, approval_record: recordApproval },
+    ),
+    /plan_completion_basis_mismatch/u,
+  );
+});
+
+test("the real writer selects exact Cycle terminal records and rejects invalid completion observations", async () => {
+  const graphFixture = singleWorkGraph();
+  const terminalRequest = requestWithGraph(graphFixture.graph, {
+    cycle_status: "failed",
+    cycle_revision: `symphony:v1:${recordDigest("7")}`,
+    plan_status: "done",
+    plan_revision: "revision:plan:done:external-cycle-writer",
+    work_issues: [graphFixture.work],
+    work_statuses: ["todo"],
+    verify_issue: graphFixture.verify,
+    issue_history: [cycleHistory("Failed")],
+  });
+  const basis = Object.freeze({ specification: recordSpecification, approval_record: recordApproval });
+  const comments = new Map<TaskIssueId, LinearIssueRecordComment[]>();
+  const manager = unexpectedManager();
+  manager.create_issue_comment = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    const comment: LinearIssueRecordComment = {
+      comment_id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      provider_created_at: "2026-08-03T02:00:00.000Z",
+      provider_updated_at: "2026-08-03T02:00:00.000Z",
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: createHash("sha256").update(call.input.body_markdown, "utf8").digest("hex"),
+      body_markdown: call.input.body_markdown,
+    };
+    comments.set(call.input.issue_id, [...(comments.get(call.input.issue_id) ?? []), comment]);
+    return parseTaskMcpResult({
+      ...resultEnvelope(call),
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: comment.comment_id, issue_id: comment.issue_id },
+        fresh_comment: {
+          comment_id: comment.comment_id,
+          issue_id: comment.issue_id,
+          provider_created_at: comment.provider_created_at,
+          provider_updated_at: comment.provider_updated_at,
+          provider_edited_at: comment.provider_edited_at,
+          provider_archived_at: comment.provider_archived_at,
+          actor_id: comment.actor_id,
+          body_digest: comment.body_digest,
+        },
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  const writer = new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: manager,
+    record_reader: {
+      readIssueRecordComments: async (issueId) => comments.get(issueId) ?? [],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: "2026-08-02T01:30:00.000Z",
+        actor_id: "actor:symphony",
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+  const execution = Object.freeze({ assertActive: () => undefined });
+
+  const invalidation = await writer.persistExternalTerminalCycleInvalidation(
+    terminalRequest,
+    basis,
+    [],
+    execution,
+  );
+  assert.equal(invalidation.record_id, recordSpecification.cycle_invalidation_record_id);
+  assert.equal(invalidation.observed_status, "Failed");
+  assert.equal(invalidation.successor_policy, "allowed");
+  assert.deepEqual((invalidation.successor_evidence as { readonly closed_stage_record_digests: readonly string[] })
+    .closed_stage_record_digests, []);
+  const selectedInvalidation = await writer.readCycleTerminalRecord(terminalRequest, basis);
+  assert.equal(selectedInvalidation?.record_kind, "cycle_invalidation");
+
+  const completionBody = renderTaskIssueRecordProjectionMarkdown({
+    issue_id: parseTaskIssueId(cycleId),
+    cycle_id: parseTaskIssueId(cycleId),
+    basis_issue_revision: `symphony:v1:${recordDigest("8")}`,
+    basis_status: "In Progress",
+    basis_document_digest: createHash("sha256")
+      .update(terminalRequest.specification.cycle_description_markdown, "utf8")
+      .digest("hex"),
+    record_kind: "cycle_completion",
+    successor_policy: "allowed",
+    completion: {
+      outcome: "failed",
+      failure_phase: "in_progress",
+      specification_seal_digest: recordSpecification.specification_seal_digest,
+      graph_seal_digest: recordDigest("1"),
+      observed_execution_graph_digest: recordDigest("2"),
+      observed_cycle_document_digest: recordDigest("3"),
+      failed_stage_id: null,
+      reason_code: "work_failed",
+      reason_markdown: "The Work failed.",
+    },
+  });
+  const completionComment: LinearIssueRecordComment = {
+    comment_id: recordSpecification.cycle_completion_record_id,
+    issue_id: parseTaskIssueId(cycleId),
+    provider_created_at: "2026-08-03T02:00:00.000Z",
+    provider_updated_at: "2026-08-03T02:00:00.000Z",
+    provider_edited_at: null,
+    provider_archived_at: null,
+    actor_id: "actor:symphony",
+    body_digest: createHash("sha256").update(completionBody, "utf8").digest("hex"),
+    body_markdown: completionBody,
+  };
+  const completionWriter = new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: unexpectedManager(),
+    record_reader: {
+      readIssueRecordComments: async () => [completionComment],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: "2026-08-02T01:30:00.000Z",
+        actor_id: "actor:symphony",
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+  const selectedCompletion = await completionWriter.readCycleTerminalRecord(terminalRequest, basis);
+  assert.equal(selectedCompletion?.record_kind, "cycle_completion");
+
+  const invalidRequest = requestWithGraph(graphFixture.graph, {
+    cycle_status: "failed",
+    cycle_revision: `symphony:v1:${recordDigest("9")}`,
+    plan_status: "done",
+    plan_revision: "revision:plan:done:invalid-cycle-record",
+    work_issues: [graphFixture.work],
+    work_statuses: ["todo"],
+    verify_issue: graphFixture.verify,
+    issue_history: [cycleHistory("Failed")],
+    issue_record_observations: [{
+      record_id: recordSpecification.cycle_completion_record_id,
+      issue_id: parseTaskIssueId(cycleId),
+      expected_record_kind: "cycle_completion",
+      observation_kind: "updated",
+      provider_created_at: ISSUE_TIMESTAMP,
+      provider_updated_at: ISSUE_TIMESTAMP,
+      archived_at: null,
+      observed_body_digest: recordDigest("0"),
+      parse_error_code: "record_updated",
+    }],
+  });
+  await assert.rejects(
+    () => completionWriter.readCycleTerminalRecord(invalidRequest, basis),
+    /cycle_terminal_record_observation_invalid/u,
+  );
+});
+
 test("completed Work creates one exact real commit and passed Verify reaches Awaiting Acceptance", async (context) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-cycle-commit-verify-"));
   context.after(() => rm(temporary, { recursive: true, force: true }));
@@ -3182,9 +4087,10 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
   });
   const workspaceIdentity = {
     root_id: deliveryIdentity.root_id,
+    cycle_id: cycleId,
     repository_id: deliveryIdentity.repository_id,
     base_branch: deliveryIdentity.base_branch,
-    head_branch: deliveryIdentity.head_branch,
+    head_branch: createCycleHeadBranch(cycleId),
   };
   const baseRevision = parseRevision(await runGit(repositoryPath, ["rev-parse", "HEAD"]));
   assert.equal((await workspace.prepare({
@@ -3192,7 +4098,7 @@ test("completed Work creates one exact real commit and passed Verify reaches Awa
     correlation_id: correlationId,
     expected_base_revision: baseRevision,
   })).outcome, "applied");
-  const worktreePath = workspace.pathFor(rootId);
+  const worktreePath = workspace.pathFor(cycleId);
   await writeFile(path.join(worktreePath, "README.md"), "completed Work\n", "utf8");
   const dirty = await workspace.read(workspaceIdentity);
   assert.equal(dirty.workspace_state, "dirty");

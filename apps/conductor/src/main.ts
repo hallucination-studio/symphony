@@ -27,7 +27,8 @@ export async function runForeground(
   control: ForegroundControl,
 ): Promise<void> {
   while (!control.stopRequested()) {
-    await runProductionPoll(production);
+    const poll = await runProductionPoll(production);
+    if (poll.stopped) return;
     if (!control.stopRequested()) await control.wait(production.polling_interval_ms);
   }
 }

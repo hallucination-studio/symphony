@@ -7,9 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
-  parseCorrelationId,
   parseRepositoryId,
-  parseRevision,
   parseRootIssueId,
   parseRuntimeGeneration,
 } from "../contracts/identity.js";
@@ -64,7 +62,7 @@ function taskEvent(snapshot: ReturnType<typeof taskSnapshot>, fromTaskDigest: st
   });
 }
 
-test("accepted observation fresh-reads the real Root worktree across adjacent facts", async (context) => {
+test("accepted observation fresh-reads the real Root repository across adjacent facts", async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-accepted-observation-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const repositoryPath = path.join(directory, "repository");
@@ -76,8 +74,6 @@ test("accepted observation fresh-reads the real Root worktree across adjacent fa
   await writeFile(path.join(repositoryPath, "README.md"), "baseline\n", "utf8");
   await git(repositoryPath, ["add", "README.md"]);
   await git(repositoryPath, ["commit", "-m", "baseline"]);
-  const revision = parseRevision(await git(repositoryPath, ["rev-parse", "HEAD"]));
-
   const rootId = parseRootIssueId("LIN-1");
   const repositoryId = parseRepositoryId("repo:fixture");
   const delivery = createDeliveryIdentity({
@@ -100,12 +96,6 @@ test("accepted observation fresh-reads the real Root worktree across adjacent fa
     command_timeout_ms: 10_000,
     max_output_bytes: 4 * 1024 * 1024,
   });
-  assert.equal((await workspace.prepare({
-    ...workspaceIdentity,
-    correlation_id: parseCorrelationId("corr:prepare"),
-    expected_base_revision: revision,
-  })).outcome, "applied");
-
   const observations = new AcceptedRootObservation({
     root_id: rootId,
     runtime_generation: parseRuntimeGeneration(1),
@@ -116,7 +106,7 @@ test("accepted observation fresh-reads the real Root worktree across adjacent fa
   if (bootstrap.kind !== "bootstrap") return;
   observations.accept(bootstrap);
 
-  await writeFile(workspace.pathFor(rootId) + "/README.md", "changed\n", "utf8");
+  await writeFile(path.join(repositoryPath, "README.md"), "changed\n", "utf8");
   const latestTask = taskSnapshot("revision:task:2");
   const prepared = await observations.prepare(
     taskEvent(latestTask, taskSnapshotDigest(initialTask), "corr:poll:2"),

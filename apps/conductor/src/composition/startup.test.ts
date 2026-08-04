@@ -30,6 +30,7 @@ function config(programData: string) {
       in_progress: "state:root:in-progress",
       in_review: "state:root:in-review",
       done: "state:root:done",
+      failed: "state:cycle:failed",
     },
     workflow: {
       labels: {
@@ -69,12 +70,12 @@ function config(programData: string) {
       "git:get_status",
       "git:get_diff",
     ],
-    root_routing: [{
+    root: {
       root_id: "ROOT-1",
       repository_id: "repo-1",
       repository_path: path.join(programData, "repository"),
       base_branch: "main",
-    }],
+    },
   };
 }
 

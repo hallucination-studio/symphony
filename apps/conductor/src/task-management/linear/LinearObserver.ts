@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   parseCorrelationId,
+  parseRootIssueId,
   type CorrelationId,
   type RootIssueId,
   type TaskDigest,
@@ -49,6 +50,7 @@ interface PollingBaseline {
 }
 
 export interface LinearObserverOptions {
+  readonly root_id: RootIssueId;
   readonly log: (entry: TaskObservationLog) => void;
   readonly identity_factory?: () => string;
   readonly now?: () => Date;
@@ -62,7 +64,8 @@ function failureReason(error: unknown, phase: "inventory" | "root"): FailureReas
 }
 
 export class LinearObserver implements TaskManageObserverInterface {
-  readonly #baselines = new Map<RootIssueId, PollingBaseline>();
+  readonly #rootId: RootIssueId;
+  #baseline: PollingBaseline | undefined;
   readonly #identityFactory: () => string;
   readonly #now: () => Date;
 
@@ -70,6 +73,7 @@ export class LinearObserver implements TaskManageObserverInterface {
     private readonly queries: LinearObserverQueries,
     private readonly options: LinearObserverOptions,
   ) {
+    this.#rootId = parseRootIssueId(options.root_id);
     this.#identityFactory = options.identity_factory ?? randomUUID;
     this.#now = options.now ?? (() => new Date());
   }
@@ -77,10 +81,9 @@ export class LinearObserver implements TaskManageObserverInterface {
   async poll_once(): Promise<readonly TaskObservationEvent[]> {
     const correlationId = parseCorrelationId(this.#identityFactory());
     const observedAt = this.#now().toISOString();
-    const rootIds = new Set(this.#baselines.keys());
     let failures = 0;
     try {
-      for (const root of await this.queries.inventoryRoots()) rootIds.add(root.root_id);
+      await this.queries.inventoryRoots();
     } catch (error) {
       failures += 1;
       this.options.log(Object.freeze({
@@ -91,44 +94,42 @@ export class LinearObserver implements TaskManageObserverInterface {
     }
 
     const events: TaskObservationEvent[] = [];
-    for (const rootId of [...rootIds].sort()) {
-      try {
-        const current = await this.queries.readRootSnapshot(rootId);
-        const digest = taskSnapshotDigest(current);
-        const previous = this.#baselines.get(rootId);
-        const taskChangeOrigins = (await Promise.all(current.issues.map(
-          ({ issue_id }) => this.queries.readLatestIssueChangeOrigin(issue_id),
-        ))).filter((entry): entry is TaskChangeOriginEvidence => entry !== null)
-          .sort((left, right) => left.issue_id.localeCompare(right.issue_id));
-        const event = parseTaskObservationEvent({
-          schema_version: 1,
-          root_id: rootId,
-          correlation_id: correlationId,
-          observed_at: observedAt,
-          from_task_digest: previous?.digest ?? null,
-          to_task_digest: digest,
-          task: current,
-          task_changes: previous === undefined || previous.digest === digest
-            ? []
-            : taskSnapshotChanges(previous.snapshot, current),
-          task_change_origins: taskChangeOrigins,
-        });
-        this.#baselines.set(rootId, Object.freeze({ digest, snapshot: current }));
-        events.push(event);
-      } catch (error) {
-        failures += 1;
-        this.options.log(Object.freeze({
-          event: "task_observation_root_failed",
-          correlation_id: correlationId,
-          root_id: rootId,
-          reason_code: failureReason(error, "root"),
-        }));
-      }
+    try {
+      const current = await this.queries.readRootSnapshot(this.#rootId);
+      const digest = taskSnapshotDigest(current);
+      const previous = this.#baseline;
+      const taskChangeOrigins = (await Promise.all(current.issues.map(
+        ({ issue_id }) => this.queries.readLatestIssueChangeOrigin(issue_id),
+      ))).filter((entry): entry is TaskChangeOriginEvidence => entry !== null)
+        .sort((left, right) => left.issue_id.localeCompare(right.issue_id));
+      const event = parseTaskObservationEvent({
+        schema_version: 1,
+        root_id: this.#rootId,
+        correlation_id: correlationId,
+        observed_at: observedAt,
+        from_task_digest: previous?.digest ?? null,
+        to_task_digest: digest,
+        task: current,
+        task_changes: previous === undefined || previous.digest === digest
+          ? []
+          : taskSnapshotChanges(previous.snapshot, current),
+        task_change_origins: taskChangeOrigins,
+      });
+      this.#baseline = Object.freeze({ digest, snapshot: current });
+      events.push(event);
+    } catch (error) {
+      failures += 1;
+      this.options.log(Object.freeze({
+        event: "task_observation_root_failed",
+        correlation_id: correlationId,
+        root_id: this.#rootId,
+        reason_code: failureReason(error, "root"),
+      }));
     }
     this.options.log(Object.freeze({
       event: "task_observation_poll_completed",
       correlation_id: correlationId,
-      roots_polled: rootIds.size,
+      roots_polled: 1,
       events_emitted: events.length,
       failures,
     }));

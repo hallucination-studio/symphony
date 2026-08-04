@@ -26,8 +26,10 @@ import {
   parseGitSnapshot,
   parseRootBootstrap,
   parseRootFactDiff,
+  parseRootSemanticSnapshot,
   type RootBootstrap,
   type RootFactDiff,
+  type RootSemanticSnapshot,
 } from "../../contracts/observation.js";
 import {
   canonicalTaskRevision,
@@ -44,7 +46,6 @@ import {
   bindRootTaskManageCommand,
   RootTaskManageCommandBinding,
 } from "../../runtime/RootTaskManageCommand.js";
-import { createAcceptedRevisionAuthority } from "../../runtime/RootAcceptedRevision.js";
 import type { RootToolBinding, RootToolSpec } from "../../runtime/RootToolBoundary.js";
 import type { TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
 import type { LinearIssueRecordComment } from "../../task-management/linear/LinearQueries.js";
@@ -89,7 +90,6 @@ const workflow = parseTaskWorkflowIdentities({
   },
 });
 const callerAuthority = createTaskManageCallerAuthority();
-const acceptedRevisionAuthority = createAcceptedRevisionAuthority();
 
 const reconciledRootDescription = [
   "# Root",
@@ -381,6 +381,22 @@ function diff(
     task_changes: [],
     git_changes: [],
   }, { root_id: rootId, runtime_generation: runtimeGeneration });
+}
+
+function semanticSnapshot(
+  source: RootBootstrap,
+  correlation = "corr:semantic:1",
+): RootSemanticSnapshot {
+  return parseRootSemanticSnapshot({
+    ...source,
+    correlation_id: correlation,
+    routing: {
+      disposition: "root_boundary",
+      selected_route: "WF-ROUTE-001",
+      active_cycle_id: null,
+    },
+    notification: null,
+  }, { root_id: rootId, runtime_generation: generation });
 }
 
 function completed(
@@ -705,7 +721,6 @@ function trustedCodexTools(
       record_reader: { readIssueRecordComments: async () => [] },
       service_actor_id: "actor:symphony",
       approved_cycle_reader: { readApprovedCycle: async () => null },
-      accepted_revision_issuer: acceptedRevisionAuthority.issuer,
     }),
     declared_tools: declaredTools,
   });
@@ -768,7 +783,6 @@ async function controlledFixture(
         record_reader: { readIssueRecordComments },
         service_actor_id: "actor:symphony",
         approved_cycle_reader: { readApprovedCycle: async () => null },
-        accepted_revision_issuer: acceptedRevisionAuthority.issuer,
       }),
       capabilities,
     }),
@@ -1120,7 +1134,7 @@ test("Codex Root transport admits module-bound production read-only Git tools", 
   });
   const gitSnapshot = bootstrap().git;
   const declarations = createRootGitReadTools({
-    git: { read: async () => gitSnapshot },
+    git: { readRoot: async () => gitSnapshot },
     workspace: {
       root_id: rootId,
       repository_id: gitSnapshot.repository_id,
@@ -1478,6 +1492,34 @@ test("bootstrap and adjacent diff use one thread, strict outcomes, and accepted 
   }
 });
 
+test("a later Root semantic turn uses a complete snapshot on the existing thread", async () => {
+  const source = bootstrap();
+  const refreshed = semanticSnapshot(completeRootBootstrap());
+  const f = await fixture([
+    completed("corr:bootstrap:1"),
+    completed("corr:semantic:1"),
+  ]);
+
+  try {
+    assert.equal((await f.root.run(source)).outcome, "quiescent");
+    assert.equal((await f.root.run(refreshed)).outcome, "quiescent");
+    assert.equal(f.transports.created.length, 1);
+    assert.equal(f.transports.created[0]?.requests.length, 2);
+    const requests = f.transports.created[0]?.requests ?? [];
+    assert.equal(JSON.parse(requests[1]?.input ?? "{}").input_kind, "semantic_snapshot");
+    assert.deepEqual(await new RootContinuityStore(f.rootHome).load(), {
+      schema_version: 1,
+      root_id: rootId,
+      runtime_generation: generation,
+      thread_id: "thread:1",
+      accepted_observation_digest: rootObservationDigest(refreshed.task, refreshed.git),
+      in_flight_correlation: null,
+    });
+  } finally {
+    await f.root.close();
+  }
+});
+
 test("throwing log observers cannot split Reconcill and runtime continuity", async () => {
   const rootHome = await mkdtemp(path.join(os.tmpdir(), "symphony-r52-log-observer-"));
   await mkdir(path.join(rootHome, "symphony"));
@@ -1723,9 +1765,37 @@ test("process and output failures stay sanitized and preserve the in-flight fenc
     },
   }]);
   await assert.rejects(invalid.root.run(bootstrap()), /root_reconcill_boundary_failed/u);
+  assert.equal(invalid.logs.some((entry) => (
+    entry.event === "root_reconcill_turn_failed"
+    && entry.reason_code === "invalid_contract"
+    && entry.cause_code === "invalid_contract_keys"
+  )), true);
   const invalidContinuity = await new RootContinuityStore(invalid.rootHome).load();
   assert.equal(invalidContinuity.accepted_observation_digest, firstDigest);
   assert.equal(invalidContinuity.in_flight_correlation, "corr:bootstrap:1");
+});
+
+test("invalid quiescent output exposes a sanitized model-outcome cause", async () => {
+  const invalid = await fixture([{
+    turn_id: "turn:invalid-quiescent",
+    status: "completed",
+    output: {
+      schema_version: 1,
+      root_id: rootId,
+      runtime_generation: generation,
+      correlation_id: "corr:bootstrap:1",
+      outcome: "quiescent",
+      sanitized_reason: "must be null for quiescent",
+    },
+  }]);
+
+  await assert.rejects(invalid.root.run(bootstrap()), /root_reconcill_boundary_failed/u);
+  assert.equal(invalid.logs.some((entry) => (
+    entry.event === "root_reconcill_turn_failed"
+    && entry.reason_code === "invalid_contract"
+    && entry.cause_code === "quiescent_reason_present"
+  )), true);
+  await invalid.root.close();
 });
 
 test("tool-call budget exhaustion stops visibly and accepts only the observed input", async () => {

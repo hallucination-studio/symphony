@@ -11,7 +11,7 @@ import {
   parseMarkdownText,
 } from "../contracts/validation.js";
 import type {
-  GitWorkspaceInterface,
+  GitRootReadInterface,
   RootWorkspaceIdentity,
 } from "../git/api/GitWorkspaceInterface.js";
 import type { RootToolExecution } from "./RootToolBoundary.js";
@@ -30,7 +30,7 @@ export interface RootGitDiffReader {
 }
 
 interface CreateRootGitReadToolsOptions {
-  readonly git: Pick<GitWorkspaceInterface, "read">;
+  readonly git: GitRootReadInterface;
   readonly workspace: RootWorkspaceIdentity;
   readonly diff_reader: RootGitDiffReader;
 }
@@ -68,7 +68,7 @@ function rootGitReadTool(
       execution.assertActive();
       return name === "get_diff"
         ? options.diff_reader.read()
-        : options.git.read(options.workspace);
+        : options.git.readRoot(options.workspace);
     },
     parseResult(value: unknown): unknown {
       if (name === "get_diff") {

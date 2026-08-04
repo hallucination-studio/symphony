@@ -267,6 +267,19 @@ test("Linear SDK adapter projects query objects into data-only closed pages", as
   assert.equal(JSON.stringify(await client.getIssue("root-1")).includes("sdk_private"), false);
 });
 
+test("Linear SDK adapter normalizes empty issue descriptions to null", async () => {
+  const emptyDescription = { ...sdkIssue("empty-description"), description: "" };
+  const client = new LinearSdkQueryClient({
+    issues: async () => connection([emptyDescription]),
+  } as never);
+
+  assert.equal((await client.getIssue("empty-description") as { description: string | null }).description, null);
+  assert.equal(
+    ((await client.listIssues(null, 1) as { nodes: readonly [{ description: string | null }] }).nodes[0]).description,
+    null,
+  );
+});
+
 test("exact getIssue includes archived issues and returns null when the identity is absent", async () => {
   const calls: unknown[] = [];
   const client = new LinearSdkQueryClient({

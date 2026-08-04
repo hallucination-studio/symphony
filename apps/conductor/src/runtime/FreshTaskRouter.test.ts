@@ -34,6 +34,7 @@ const rootStates = {
   in_progress: "root:in-progress",
   in_review: "root:in-review",
   done: "root:done",
+  failed: workflow.cycle_states.failed,
 } as const;
 
 const states = {
@@ -69,6 +70,8 @@ function cycleStatus(status: keyof typeof workflow.cycle_states): TaskIssueSnaps
 function task(cycles: readonly (keyof typeof workflow.cycle_states)[], options: {
   readonly delegated?: boolean;
   readonly rootStatus?: string;
+  readonly records?: readonly unknown[];
+  readonly issueHistory?: readonly unknown[];
 } = {}) {
   return parseTaskSnapshot({
     root_id: "root-1",
@@ -76,7 +79,10 @@ function task(cycles: readonly (keyof typeof workflow.cycle_states)[], options: 
     issues: [canonicalIssue({
       issue_id: "root-1",
       kind: "root", status_id: options.rootStatus ?? rootStates.in_progress,
-      status: options.rootStatus === rootStates.done ? "Done" : options.rootStatus === rootStates.in_review ? "In Review" : options.rootStatus === rootStates.todo ? "Todo" : "In Progress",
+      status: options.rootStatus === rootStates.done ? "Done"
+        : options.rootStatus === rootStates.in_review ? "In Review"
+          : options.rootStatus === rootStates.failed ? "Failed"
+            : options.rootStatus === rootStates.todo ? "Todo" : "In Progress",
       title: "Root",
       description_markdown: "# Root", parent_issue_id: null, label_ids: [workflow.labels.root],
       delegate_id: options.delegated === false ? null : "actor:agent",
@@ -90,8 +96,161 @@ function task(cycles: readonly (keyof typeof workflow.cycle_states)[], options: 
       priority: null,
     }))],
     relations: [],
-    resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
+    resource_creation_evidence: [], issue_history: options.issueHistory ?? [],
+    issue_record_observations: options.records ?? [],
   });
+}
+
+function acceptedDeliveryRecords(): readonly unknown[] {
+  const digest = (character: string) => character.repeat(64);
+  const revision = (character: string) => `symphony:v1:${digest(character)}`;
+  const firstRound = {
+    linear_snapshot_digest: digest("1"),
+    linear_observed_at: "2026-08-03T00:00:00.000Z",
+    git_exact_revision: digest("2"),
+    git_observed_at: "2026-08-03T00:00:00.000Z",
+    root_revision: revision("3"),
+  };
+  const secondRound = {
+    ...firstRound,
+    linear_observed_at: "2026-08-03T00:00:01.000Z",
+    git_observed_at: "2026-08-03T00:00:01.000Z",
+  };
+  return [{
+    record_id: "record:cycle:approval:1",
+    revision: revision("4"),
+    issue_id: "cycle-1",
+    cycle_id: "cycle-1",
+    actor_id: "actor:agent",
+    created_at: "2026-08-03T00:00:00.000Z",
+    updated_at: "2026-08-03T00:00:00.000Z",
+    archived_at: null,
+    basis_issue_revision: revision("5"),
+    basis_status: "Draft",
+    basis_document_digest: digest("6"),
+    record_kind: "cycle_approval",
+    identity_derivation_version: "symphony-identity:v1",
+    predecessor_cycle_issue_id: null,
+    predecessor_terminal_record_id: "record:first-cycle",
+    plan_issue_id: "plan-1",
+    plan_completion_record_id: "record:plan:completion:1",
+    plan_invalidation_record_id: "record:plan:invalidation:1",
+    cycle_completion_record_id: "record:cycle:completion:1",
+    cycle_invalidation_record_id: "record:cycle:invalidation:1",
+    delivery_completion_record_id: "record:delivery:completion:1",
+    delivery_invalidation_record_id: "record:delivery:invalidation:1",
+    specification_seal_digest: digest("7"),
+    workspace_base_revision: digest("8"),
+  }, {
+    record_id: "record:cycle:completion:1",
+    revision: revision("9"),
+    issue_id: "cycle-1",
+    cycle_id: "cycle-1",
+    actor_id: "actor:agent",
+    created_at: "2026-08-03T00:00:02.000Z",
+    updated_at: "2026-08-03T00:00:02.000Z",
+    archived_at: null,
+    basis_issue_revision: revision("a"),
+    basis_status: "Awaiting Acceptance",
+    basis_document_digest: digest("b"),
+    record_kind: "cycle_completion",
+    successor_policy: "not_applicable",
+    completion: {
+      outcome: "accepted",
+      specification_seal_digest: digest("7"),
+      graph_seal_digest: digest("c"),
+      acceptance_basis_digest: digest("d"),
+      stage_revisions: [{ issue_id: "stage-1", revision: revision("e"), terminal_record_digest: digest("f") }],
+      stage_completion_digests: [{ issue_id: "stage-1", digest: digest("0") }],
+      exact_revision: digest("2"),
+      acceptance_convergence_proof: {
+        proof_scope: "acceptance",
+        first_round: firstRound,
+        second_round: secondRound,
+        observation_order: "linear -> git -> linear -> git",
+        stable_decision_basis_digest: digest("a"),
+      },
+      acceptance_markdown: "Accepted.",
+    },
+  }];
+}
+
+function deliveryTerminalRecord(kind: "completion" | "invalidation"): Record<string, unknown> {
+  const digest = (character: string) => character.repeat(64);
+  const revision = (character: string) => `symphony:v1:${digest(character)}`;
+  const common = {
+    record_id: kind === "completion" ? "record:delivery:completion:1" : "record:delivery:invalidation:1",
+    revision: revision("1"),
+    issue_id: "root-1",
+    cycle_id: "cycle-1",
+    actor_id: "actor:agent",
+    created_at: "2026-08-03T00:00:03.000Z",
+    updated_at: "2026-08-03T00:00:03.000Z",
+    archived_at: null,
+    basis_issue_revision: revision("2"),
+    basis_status: "In Review",
+    basis_document_digest: digest("3"),
+    record_kind: kind === "completion" ? "delivery_completion" : "delivery_invalidation",
+    root_id: "root-1",
+    accepted_cycle_id: "cycle-1",
+    exact_revision: digest("4"),
+    accepted_record_digest: digest("5"),
+    acceptance_basis_digest: digest("6"),
+    observed_root_status: "In Review",
+  };
+  if (kind === "completion") {
+    return {
+      ...common,
+      observed_remote_revision: digest("4"),
+      observed_pull_request_identity: "https://github.example/pull/1",
+      observed_pull_request_head: digest("4"),
+      convergence_proof: {
+        proof_scope: "delivery",
+        first_round: {
+          linear_snapshot_digest: digest("7"),
+          linear_observed_at: "2026-08-03T00:00:03.000Z",
+          root_revision: revision("2"),
+          git_exact_revision: digest("4"),
+          git_observed_at: "2026-08-03T00:00:03.000Z",
+          remote_ref_revision: digest("4"),
+          pull_request_identity: "https://github.example/pull/1",
+          pull_request_revision: revision("8"),
+          pull_request_head: digest("4"),
+          pull_request_state: "open",
+          delivery_provider_observed_at: "2026-08-03T00:00:03.000Z",
+        },
+        second_round: {
+          linear_snapshot_digest: digest("7"),
+          linear_observed_at: "2026-08-03T00:00:04.000Z",
+          root_revision: revision("2"),
+          git_exact_revision: digest("4"),
+          git_observed_at: "2026-08-03T00:00:04.000Z",
+          remote_ref_revision: digest("4"),
+          pull_request_identity: "https://github.example/pull/1",
+          pull_request_revision: revision("8"),
+          pull_request_head: digest("4"),
+          pull_request_state: "open",
+          delivery_provider_observed_at: "2026-08-03T00:00:04.000Z",
+        },
+        observation_order: "linear -> git -> delivery -> linear -> git -> delivery",
+        stable_decision_basis_digest: digest("9"),
+      },
+    };
+  }
+  return {
+    ...common,
+    observed_remote_revision: null,
+    observed_pull_request_identity: null,
+    observed_pull_request_head: null,
+    invalidation_evidence: {
+      kind: "root_done_before_completion",
+      observed_root_revision: revision("2"),
+      observed_delivery_facts_digest: digest("a"),
+    },
+    resolution_policy: "permanently_quarantined",
+    reason_code: "root_done_before_completion",
+    reason_markdown: "The Root reached Done before delivery completion.",
+  };
 }
 
 function route(
@@ -108,6 +267,14 @@ function route(
     root_states: rootStates,
     workflow,
   });
+}
+
+function routeWithRecords(
+  cycles: readonly (keyof typeof workflow.cycle_states)[],
+  records: readonly unknown[],
+  options: Parameters<typeof task>[1] = {},
+) {
+  return route(cycles, { ...options, records });
 }
 
 test("bounded origin routes external Root edits at least once without treating service writes as external", () => {
@@ -205,4 +372,110 @@ test("fresh boundary states and park have deterministic owners", () => {
   assert.equal(route(["awaiting_acceptance"]).selected.route_id, "WF-ROUTE-007");
   assert.equal(route(["succeeded"]).selected.route_id, "WF-ROUTE-008");
   assert.equal(route([], { delegated: false }).selected.route_id, "WF-ROUTE-014");
+});
+
+test("an accepted Cycle without a delivery terminal record selects the DeliveryFinalizer", () => {
+  const routing = routeWithRecords(["succeeded"], acceptedDeliveryRecords());
+
+  assert.equal(routing.selected.route_id, "WF-ROUTE-010");
+  assert.equal(routing.selected.consumer, "delivery_finalizer");
+  assert.equal(routing.selected.cycle_id, "cycle-1");
+});
+
+test("Root Done with an accepted Cycle and no delivery terminal record persists delivery invalidation first", () => {
+  const routing = routeWithRecords(["succeeded"], acceptedDeliveryRecords(), { rootStatus: rootStates.done });
+
+  assert.equal(routing.selected.route_id, "WF-ROUTE-012");
+  assert.equal(routing.selected.consumer, "delivery_finalizer");
+  assert.equal(routing.selected.cycle_id, "cycle-1");
+});
+
+test("delivery terminal records close the gap and do not re-enter delivery or successor routing", () => {
+  for (const terminal of ["completion", "invalidation"] as const) {
+    const routing = routeWithRecords(
+      ["succeeded"],
+      [...acceptedDeliveryRecords(), deliveryTerminalRecord(terminal)],
+    );
+    assert.equal(routing.selected.route_id, terminal === "completion" ? "WF-ROUTE-014" : "WF-ROUTE-010");
+    assert.equal(routing.selected.consumer, terminal === "completion" ? "park" : "delivery_finalizer");
+    assert.equal(routing.matches.some(({ route_id }) => route_id === "WF-ROUTE-008"), false);
+  }
+});
+
+test("Root Done with a valid delivery invalidation is cleanup-ready, while a gap is not", () => {
+  const invalidated = routeWithRecords(
+    ["succeeded"],
+    [...acceptedDeliveryRecords(), deliveryTerminalRecord("invalidation")],
+    { rootStatus: rootStates.done },
+  );
+  assert.equal(invalidated.selected.route_id, "WF-ROUTE-013");
+
+  const gap = routeWithRecords(["succeeded"], acceptedDeliveryRecords(), { rootStatus: rootStates.done });
+  assert.equal(gap.selected.route_id, "WF-ROUTE-012");
+});
+
+test("a Root projected Failed is parked and cannot re-enter semantic or delivery work", () => {
+  const routing = route([], { rootStatus: rootStates.failed });
+
+  assert.deepEqual(routing.matches.map(({ route_id, consumer }) => [route_id, consumer]), [
+    ["WF-ROUTE-014", "park"],
+  ]);
+});
+
+test("external terminal Cycle routing requires external status-origin evidence", () => {
+  const change: ConcreteTaskChange = {
+    kind: "field_changed",
+    issue_id: parseTaskIssueId("cycle-1"),
+    field: "status",
+    before: workflow.cycle_states.in_progress,
+    after: workflow.cycle_states.failed,
+  };
+
+  for (const origin of [undefined, "symphony", "unknown"] as const) {
+    const routing = route(
+      ["failed"],
+      {},
+      [change],
+      origin === undefined ? [] : [{
+        issue_id: parseTaskIssueId("cycle-1"),
+        change_origin: origin,
+        changed_fields: ["status"],
+      }],
+    );
+    assert.equal(routing.matches.some(({ route_id }) => route_id === "WF-ROUTE-018"), false);
+    assert.equal(routing.selected.route_id, "WF-ROUTE-008");
+  }
+
+  const external = route(["failed"], {}, [change], [{
+    issue_id: parseTaskIssueId("cycle-1"),
+    change_origin: "external",
+    changed_fields: ["status"],
+  }]);
+  assert.equal(external.selected.route_id, "WF-ROUTE-018");
+});
+
+test("restart routes an externally terminal Cycle from fresh history without notification changes", () => {
+  const routing = route(["failed"], {
+    issueHistory: [{
+      history_id: "history:cycle-terminal",
+      issue_id: "cycle-1",
+      provider_created_at: "2026-08-03T00:00:01.000Z",
+      provider_updated_at: "2026-08-03T00:00:01.000Z",
+      actor_id: "actor:external",
+      change_origin: "external",
+      changed_fields: ["status"],
+      from_status: "In Progress",
+      to_status: "Failed",
+      from_parent_issue_id: "root-1",
+      to_parent_issue_id: "root-1",
+      added_label_ids: [],
+      removed_label_ids: [],
+      archived: null,
+      trashed: null,
+      relation_changes: [],
+    }],
+  });
+
+  assert.deepEqual(routing.matches.map(({ route_id }) => route_id), ["WF-ROUTE-018", "WF-ROUTE-008"]);
+  assert.equal(routing.selected.route_id, "WF-ROUTE-018");
 });

@@ -11,19 +11,29 @@ import {
   parseCorrelationId,
   parseCycleIssueId,
   parseRepositoryId,
+  parseRevision,
   parseRootIssueId,
   parseRuntimeGeneration,
+  parseStageIssueId,
   parseTaskIssueId,
 } from "../contracts/identity.js";
 import { deriveCycleUuid } from "../contracts/cycle-identities.js";
 import { renderTaskIssueRecordProjectionMarkdown } from "../contracts/cycle-record-markdown.js";
+import type { CycleAdvanceRequest } from "../contracts/cycle.js";
 import { parseRootDefinition } from "../contracts/cycle.js";
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import { parseGitSnapshot } from "../contracts/observation.js";
 import { canonicalTaskRevision, parseTaskSnapshot } from "../contracts/task-management.js";
-import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import { createCycleHeadBranch, createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
+import type {
+  CycleWorkspaceIdentity,
+  PrepareWorkspaceRequest,
+} from "../git/api/GitWorkspaceInterface.js";
+import { createAcceptedRevisionAuthority } from "../runtime/RootAcceptedRevision.js";
+import type { FreshRouteMatch } from "../runtime/FreshTaskRouter.js";
 import { parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
 import { ExactGitDiffReader, ProductionCycleReader } from "./ProductionRuntime.js";
+import { ProductionDeliveryFinalizer } from "./ProductionRuntime.js";
 
 const exec = promisify(execFile);
 
@@ -136,6 +146,32 @@ const git = parseGitSnapshot({
   pull_request: null,
 });
 
+function cycleGit(effects: string[] = []) {
+  return {
+    readRoot: async () => {
+      effects.push("readRoot");
+      return git;
+    },
+    prepare: async (request: PrepareWorkspaceRequest) => ({
+      ...(() => {
+        effects.push("prepare");
+        return {};
+      })(),
+      schema_version: 1 as const,
+      outcome: "applied" as const,
+      target_id: request.cycle_id,
+      correlation_id: request.correlation_id,
+    }),
+    read: async (identity: CycleWorkspaceIdentity) => {
+      effects.push(`read:${identity.head_branch}`);
+      return parseGitSnapshot({
+        ...git,
+        head_branch: identity.head_branch,
+      });
+    },
+  };
+}
+
 async function gitCommand(cwd: string, args: readonly string[]): Promise<string> {
   const result = await exec("git", args, { cwd, encoding: "utf8" });
   return result.stdout.trim();
@@ -166,12 +202,17 @@ async function exactDiffReader(directory: string): Promise<ExactGitDiffReader> {
     ...git,
     head_revision: headRevision,
   });
-  return new ExactGitDiffReader({ read: async () => snapshot }, directory, workspace);
+  return new ExactGitDiffReader({ readRoot: async () => snapshot }, directory, workspace);
 }
 
 function persistedApprovalFixture(
   actorId = "actor:symphony",
   plan: Readonly<{ revision: string; status: string; title?: string }> | null = null,
+  facts: Readonly<{
+    resource_creation_evidence?: readonly unknown[];
+    issue_history?: readonly unknown[];
+    issue_record_observations?: readonly unknown[];
+  }> = {},
 ) {
   const version = "symphony-identity:v1";
   const timestamp = "2026-08-02T01:00:00.000Z";
@@ -301,9 +342,9 @@ function persistedApprovalFixture(
       ...(planFields === null ? [] : [issue(planFields)]),
     ],
     relations: [],
-    resource_creation_evidence: [],
-    issue_history: [],
-    issue_record_observations: [],
+    resource_creation_evidence: facts.resource_creation_evidence ?? [],
+    issue_history: facts.issue_history ?? [],
+    issue_record_observations: facts.issue_record_observations ?? [],
   });
   return {
     cycle_id: deterministicCycleId,
@@ -334,7 +375,7 @@ test("production Cycle reader rebuilds stable seals without retained workflow st
       readRootSnapshot: async () => firstFixture.task,
       readIssueRecordComments: async () => [firstFixture.comment],
     },
-    { read: async () => git },
+    cycleGit(),
     workspace,
     "actor:symphony",
   );
@@ -359,7 +400,7 @@ test("production Cycle reader rebuilds stable seals without retained workflow st
       readRootSnapshot: async () => secondFixture.task,
       readIssueRecordComments: async () => [secondFixture.comment],
     },
-    { read: async () => git },
+    cycleGit(),
     workspace,
     "actor:symphony",
   );
@@ -375,6 +416,303 @@ test("production Cycle reader rebuilds stable seals without retained workflow st
     secondFixture.task.issues.find(({ kind }) => kind === "plan")?.revision,
   );
   assert.equal(started?.plan_issue?.sealed_revision, first.plan_issue.sealed_revision);
+});
+
+test("production Cycle reader propagates fresh Task evidence into the Cycle snapshot", async () => {
+  const creationFields = {
+    evidence_id: "evidence:root:1",
+    resource_kind: "issue" as const,
+    resource_id: rootId,
+    creation_actor_id: "actor:symphony",
+    provider_created_at: "2026-08-02T01:00:00.000Z",
+    evidence_source: "current_resource" as const,
+  };
+  const fixture = persistedApprovalFixture("actor:symphony", {
+    revision: "revision:plan:evidence",
+    status: workflow.stage_states.todo,
+  }, {
+    resource_creation_evidence: [{
+      ...creationFields,
+      canonical_evidence_digest: canonicalTaskRevision(creationFields),
+    }],
+    issue_history: [{
+      history_id: "history:root:1",
+      issue_id: rootId,
+      provider_created_at: "2026-08-02T01:00:00.000Z",
+      provider_updated_at: "2026-08-02T01:00:01.000Z",
+      actor_id: "actor:external",
+      change_origin: "external",
+      changed_fields: ["status"],
+      from_status: "In Progress",
+      to_status: "In Review",
+      from_parent_issue_id: null,
+      to_parent_issue_id: null,
+      added_label_ids: [],
+      removed_label_ids: [],
+      archived: null,
+      trashed: null,
+      relation_changes: [],
+    }],
+    issue_record_observations: [{
+      record_id: "record:root:missing",
+      issue_id: rootId,
+      expected_record_kind: "cycle_completion",
+      observation_kind: "missing",
+      provider_created_at: null,
+      provider_updated_at: null,
+      archived_at: null,
+      observed_body_digest: null,
+      parse_error_code: "record_missing",
+    }],
+  });
+  const reader = new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => fixture.task,
+      readIssueRecordComments: async () => [fixture.comment],
+    },
+    cycleGit(),
+    workspace,
+    "actor:symphony",
+  );
+
+  const snapshot = await reader.read({
+    root_id: rootId,
+    cycle_id: parseCycleIssueId(fixture.cycle_id),
+    runtime_generation: generation,
+    correlation_id: parseCorrelationId("corr:evidence"),
+  });
+
+  assert.deepEqual(snapshot?.resource_creation_evidence, fixture.task.resource_creation_evidence);
+  assert.deepEqual(snapshot?.issue_history, fixture.task.issue_history);
+  assert.deepEqual(snapshot?.issue_record_observations, fixture.task.issue_record_observations);
+});
+
+test("production Cycle reader reads an accepted Cycle worktree without preparing it", async () => {
+  const fixture = persistedApprovalFixture("actor:symphony", {
+    revision: "revision:plan:accepted-read",
+    status: workflow.stage_states.todo,
+  });
+  const effects: string[] = [];
+  const reader = new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => fixture.task,
+      readIssueRecordComments: async () => [fixture.comment],
+    },
+    cycleGit(effects),
+    workspace,
+    "actor:symphony",
+  );
+
+  const snapshot = await reader.readAcceptedCycle(
+    fixture.cycle_id,
+    parseCorrelationId("corr:accepted-read"),
+  );
+
+  assert.ok(snapshot);
+  assert.deepEqual(effects, [`read:${createCycleHeadBranch(parseCycleIssueId(fixture.cycle_id))}`]);
+});
+
+function acceptedTaskFixture() {
+  const fixture = persistedApprovalFixture();
+  const issues = fixture.task.issues.map((issue) => {
+    if (issue.kind !== "cycle") return issue;
+    const { revision, ...immutableFields } = issue;
+    void revision;
+    const fields = {
+      ...immutableFields,
+      status_id: workflow.cycle_states.succeeded,
+      status: "Succeeded" as const,
+    };
+    return {
+      ...fields,
+      revision: canonicalTaskRevision(fields),
+    };
+  });
+  return parseTaskSnapshot({ ...fixture.task, issues });
+}
+
+function acceptedCycleSnapshot(
+  cycleId: ReturnType<typeof parseCycleIssueId>,
+  correlationId: ReturnType<typeof parseCorrelationId>,
+  revision: ReturnType<typeof parseRevision>,
+  cycleStatus: "succeeded" | "failed" = "succeeded",
+): CycleAdvanceRequest {
+  const cycleRevision = canonicalTaskRevision({ cycle_id: cycleId, cycle_status: cycleStatus });
+  const stageRevision = canonicalTaskRevision({ cycle_id: cycleId, stage: "done" });
+  const verifyRevision = canonicalTaskRevision({ cycle_id: cycleId, verify: "done" });
+  const specificationSeal = "a".repeat(64);
+  const graphSeal = "b".repeat(64);
+  return {
+    schema_version: 1,
+    root_id: rootId,
+    cycle_id: cycleId,
+    runtime_generation: generation,
+    correlation_id: correlationId,
+    cycle_revision: cycleRevision,
+    cycle_status: cycleStatus,
+    specification: { seal_digest: specificationSeal },
+    plan_issue: {
+      issue_id: parseStageIssueId("PLAN-ACCEPTED"),
+      sealed_revision: stageRevision,
+      kind: "plan",
+      title: "Plan",
+      description_markdown: "# Plan",
+      parent_cycle_id: cycleId,
+      revision: stageRevision,
+      status: "done",
+    },
+    sealed_work_issues: [{
+      issue_id: parseStageIssueId("WORK-ACCEPTED"),
+      sealed_revision: stageRevision,
+      kind: "work",
+      title: "Work",
+      description_markdown: "# Work",
+      parent_cycle_id: cycleId,
+      revision: stageRevision,
+      status: "done",
+    }],
+    verify_issue: {
+      issue_id: parseStageIssueId("VERIFY-ACCEPTED"),
+      sealed_revision: verifyRevision,
+      kind: "verify",
+      title: "Verify",
+      description_markdown: "# Verify",
+      parent_cycle_id: cycleId,
+      revision: verifyRevision,
+      status: "done",
+    },
+    sealed_relations: [],
+    sealed_graph_digest: graphSeal,
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
+    git: parseGitSnapshot({
+      ...git,
+      head_branch: createCycleHeadBranch(cycleId),
+      head_revision: revision,
+      diff_digest: "sha256:accepted",
+    }),
+  } as unknown as CycleAdvanceRequest;
+}
+
+function deliveryRouteFor(cycleId: ReturnType<typeof parseCycleIssueId>): FreshRouteMatch {
+  return Object.freeze({
+    route_id: "WF-ROUTE-010",
+    priority: 70,
+    consumer: "delivery_finalizer",
+    cycle_id: cycleId,
+  });
+}
+
+test("production DeliveryFinalizer rebuilds authorization from fresh Cycle/Git facts on every phase", async () => {
+  const task = acceptedTaskFixture();
+  const cycleId = parseCycleIssueId(task.issues.find(({ kind }) => kind === "cycle")!.issue_id);
+  const firstRevision = parseRevision("2".repeat(40));
+  const secondRevision = parseRevision("3".repeat(40));
+  const correlationId = parseCorrelationId("corr:delivery-fresh");
+  let reads = 0;
+  const deliveredRevisions: string[] = [];
+  const finalizer = new ProductionDeliveryFinalizer({
+    target: { root_id: rootId, runtime_generation: generation },
+    repository_id: workspace.repository_id,
+    base_branch: workspace.base_branch,
+    workflow,
+    cycle_reader: {
+      readAcceptedCycle: async (receivedCycleId, receivedCorrelationId) => {
+        reads += 1;
+        assert.equal(receivedCycleId, cycleId);
+        assert.equal(receivedCorrelationId, correlationId);
+        return acceptedCycleSnapshot(
+          cycleId,
+          receivedCorrelationId,
+          reads === 1 ? firstRevision : secondRevision,
+        );
+      },
+    },
+    accepted_revision: createAcceptedRevisionAuthority(),
+    delivery: {
+      deliver: async (authorization) => {
+        deliveredRevisions.push(authorization.acceptance_view.exact_revision);
+        return {
+          outcome: "delivered" as const,
+          root_id: rootId,
+          cycle_id: cycleId,
+          exact_revision: authorization.acceptance_view.exact_revision,
+          pull_request: {
+            provider: "github",
+            repository_id: workspace.repository_id,
+            base_branch: workspace.base_branch,
+            head_branch: createRootHeadBranch(rootId),
+            state: "open" as const,
+            head_revision: authorization.acceptance_view.exact_revision,
+            url: "https://github.example/pull/accepted",
+          },
+          root_revision: task.issues.find(({ kind }) => kind === "root")!.revision,
+        };
+      },
+    },
+    log: () => undefined,
+  });
+
+  const prepared = await finalizer.prepare({
+    task,
+    route: deliveryRouteFor(cycleId),
+    correlation_id: correlationId,
+    runtime_generation: generation,
+  });
+  const result = await finalizer.run(prepared);
+
+  assert.equal(result.outcome, "delivery_completed");
+  assert.equal(reads, 2);
+  assert.deepEqual(deliveredRevisions, [secondRevision]);
+});
+
+test("production DeliveryFinalizer rejects fresh invalidation before delivery effects", async () => {
+  const task = acceptedTaskFixture();
+  const cycleId = parseCycleIssueId(task.issues.find(({ kind }) => kind === "cycle")!.issue_id);
+  const correlationId = parseCorrelationId("corr:delivery-invalid");
+  let reads = 0;
+  let deliveryCalls = 0;
+  const finalizer = new ProductionDeliveryFinalizer({
+    target: { root_id: rootId, runtime_generation: generation },
+    repository_id: workspace.repository_id,
+    base_branch: workspace.base_branch,
+    workflow,
+    cycle_reader: {
+      readAcceptedCycle: async (receivedCycleId, receivedCorrelationId) => {
+        reads += 1;
+        return acceptedCycleSnapshot(
+          parseCycleIssueId(receivedCycleId),
+          receivedCorrelationId,
+          parseRevision("4".repeat(40)),
+          reads === 1 ? "succeeded" : "failed",
+        );
+      },
+    },
+    accepted_revision: createAcceptedRevisionAuthority(),
+    delivery: {
+      deliver: async () => {
+        deliveryCalls += 1;
+        throw new Error("unexpected_delivery_effect");
+      },
+    },
+    log: () => undefined,
+  });
+
+  const prepared = await finalizer.prepare({
+    task,
+    route: deliveryRouteFor(cycleId),
+    correlation_id: correlationId,
+    runtime_generation: generation,
+  });
+
+  await assert.rejects(finalizer.run(prepared), /accepted_cycle_facts_invalid/u);
+  assert.equal(reads, 2);
+  assert.equal(deliveryCalls, 0);
 });
 
 test("production Cycle reader derives changed Stage seals from fresh immutable content", async () => {
@@ -394,7 +732,7 @@ test("production Cycle reader derives changed Stage seals from fresh immutable c
       readRootSnapshot: async () => fixture.task,
       readIssueRecordComments: async () => [fixture.comment],
     },
-    { read: async () => git },
+    cycleGit(),
     workspace,
     "actor:symphony",
   ).read({
@@ -417,7 +755,7 @@ test("production Cycle reader rebuilds the sealed basis only from the exact pers
       readRootSnapshot: async () => fixture.task,
       readIssueRecordComments: async () => [fixture.comment],
     },
-    { read: async () => git },
+    cycleGit(),
     workspace,
     "actor:symphony",
   );
@@ -435,7 +773,7 @@ test("production Cycle reader rebuilds the sealed basis only from the exact pers
       readRootSnapshot: async () => foreign.task,
       readIssueRecordComments: async () => [foreign.comment],
     },
-    { read: async () => git },
+    cycleGit(),
     workspace,
     "actor:symphony",
   );

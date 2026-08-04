@@ -1,5 +1,6 @@
 import type {
   CorrelationId,
+  CycleIssueId,
   ObservationDigest,
   RepositoryId,
   Revision,
@@ -16,12 +17,20 @@ export interface RootWorkspaceIdentity {
   readonly head_branch: string;
 }
 
-export interface PrepareWorkspaceRequest extends RootWorkspaceIdentity {
+export interface CycleWorkspaceIdentity extends RootWorkspaceIdentity {
+  readonly cycle_id: CycleIssueId;
+}
+
+export interface GitRootReadInterface {
+  readRoot(identity: RootWorkspaceIdentity): Promise<GitSnapshot>;
+}
+
+export interface PrepareWorkspaceRequest extends CycleWorkspaceIdentity {
   readonly correlation_id: CorrelationId;
   readonly expected_base_revision: Revision;
 }
 
-export interface CommitWorkspaceRequest extends RootWorkspaceIdentity {
+export interface CommitWorkspaceRequest extends CycleWorkspaceIdentity {
   readonly correlation_id: CorrelationId;
   readonly expected_head_revision: Revision;
   readonly expected_diff_digest: ObservationDigest;
@@ -43,7 +52,7 @@ export interface GitCommitProof extends GitCommitProofBasis {
 
 export interface GitWorkspaceInterface {
   prepare(request: PrepareWorkspaceRequest): Promise<MutationResult>;
-  read(identity: RootWorkspaceIdentity): Promise<GitSnapshot>;
-  readCommitProof(identity: RootWorkspaceIdentity, carryingObjectId: Revision): Promise<GitCommitProof>;
+  read(identity: CycleWorkspaceIdentity): Promise<GitSnapshot>;
+  readCommitProof(identity: CycleWorkspaceIdentity, carryingObjectId: Revision): Promise<GitCommitProof>;
   commit(request: CommitWorkspaceRequest): Promise<MutationResult>;
 }

@@ -572,7 +572,7 @@ RootRoutingDisposition = {
 
 | Contract value | Required binding | Forbidden substitute | Owner |
 |---|---|---|---|
-| `TaskWorkflowStateMap` | every semantic status maps to one present, active, distinct Linear state ID | name inference、shared ID、default state | `TM-SNAP-006`, `TM-PROVIDER-007` |
+| `TaskWorkflowStateMap` | one present, active ID per semantic status<br>IDs are distinct within each map | name inference、default state | `TM-SNAP-006`, `TM-PROVIDER-007` |
 | `TaskIssueSnapshot.revision` | versioned canonical digest of every normalized field and provider time | Linear revision claim、`updatedAt` alias、partial hash | `TM-SNAP-001`, `TM-SNAP-005` |
 | `TaskIssueHistoryEntry[]` | complete bounded grouped history for every known Root/Cycle/Stage | polling diff、per-mutation order、immutable before-bytes | `TM-SNAP-003` |
 | `TaskResourceCreationEvidence[]` | exact resource identity、creator and provider time from fresh provider evidence | caller timestamp、mutation receipt、relation change without exact relation ID | `TM-SNAP-001`, `TM-SNAP-002`, `TM-PROVIDER-001`, `TM-PROVIDER-002` |

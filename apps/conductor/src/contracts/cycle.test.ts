@@ -19,6 +19,7 @@ import {
   sealCycleSpecification,
 } from "./cycle.js";
 import { MAX_MARKDOWN_TEXT_LENGTH, parseMarkdownText } from "./validation.js";
+import { canonicalTaskRevision } from "./task-management.js";
 
 const rootTarget = Object.freeze({
   root_id: parseRootIssueId("LIN-ROOT"),
@@ -644,6 +645,9 @@ function cycleExecutionSnapshotSource() {
     ],
     verify_issue: executionStage(sealedGraphSource.verify_issue, "revision:verify:current", "todo"),
     sealed_relations: sealedGraphSource.relations,
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
     git: {
       repository_id: "repo:symphony",
       base_branch: "main",
@@ -668,10 +672,86 @@ test("CycleExecutionSnapshot binds current Cycle facts to one frozen specificati
   assert.equal(parsed.specification.seal_digest, snapshotTarget.specification.seal_digest);
   assert.equal(parsed.sealed_graph_digest, snapshotTarget.sealed_graph.seal_digest);
   assert.equal(parsed.sealed_work_issues[1]?.status, "in_progress");
+  assert.deepEqual(parsed.resource_creation_evidence, []);
+  assert.deepEqual(parsed.issue_history, []);
+  assert.deepEqual(parsed.issue_record_observations, []);
   assert.ok(Object.isFrozen(parsed));
   assert.ok(Object.isFrozen(parsed.sealed_work_issues));
   assert.ok(Object.isFrozen(parsed.sealed_relations));
   assert.ok(Object.isFrozen(parsed.git));
+});
+
+test("CycleExecutionSnapshot preserves complete Task evidence and rejects malformed evidence", () => {
+  const source = cycleExecutionSnapshotSource();
+  const creationFields = {
+    evidence_id: "evidence:work:1",
+    resource_kind: "issue" as const,
+    resource_id: "LIN-WORK-1",
+    creation_actor_id: "actor:symphony",
+    provider_created_at: "2026-07-30T00:00:00.000Z",
+    evidence_source: "current_resource" as const,
+  };
+  const history = {
+    history_id: "history:work:1",
+    issue_id: "LIN-WORK-1",
+    provider_created_at: "2026-07-30T00:00:00.000Z",
+    provider_updated_at: "2026-07-30T00:00:01.000Z",
+    actor_id: "actor:external",
+    change_origin: "external",
+    changed_fields: ["status"],
+    from_status: "Todo",
+    to_status: "Done",
+    from_parent_issue_id: "LIN-CYCLE",
+    to_parent_issue_id: "LIN-CYCLE",
+    added_label_ids: [],
+    removed_label_ids: [],
+    archived: null,
+    trashed: null,
+    relation_changes: [],
+  } as const;
+  const recordObservation = {
+    record_id: "record:work:completion:missing",
+    issue_id: "LIN-WORK-1",
+    expected_record_kind: "stage_completion",
+    observation_kind: "missing",
+    provider_created_at: null,
+    provider_updated_at: null,
+    archived_at: null,
+    observed_body_digest: null,
+    parse_error_code: "record_missing",
+  } as const;
+  const parsed = parseCycleExecutionSnapshot({
+    ...source,
+    resource_creation_evidence: [{
+      ...creationFields,
+      canonical_evidence_digest: canonicalTaskRevision(creationFields),
+    }],
+    issue_history: [history],
+    issue_record_observations: [recordObservation],
+  }, snapshotTarget);
+
+  assert.equal(parsed.resource_creation_evidence[0]?.resource_id, "LIN-WORK-1");
+  assert.equal(parsed.issue_history[0]?.to_status, "Done");
+  const observedRecord = parsed.issue_record_observations[0];
+  assert.ok(observedRecord !== undefined && "observation_kind" in observedRecord);
+  assert.equal(observedRecord.observation_kind, "missing");
+  assert.throws(
+    () => parseCycleExecutionSnapshot({
+      ...source,
+      resource_creation_evidence: [{
+        ...creationFields,
+        canonical_evidence_digest: `symphony:v1:${"0".repeat(64)}`,
+      }],
+    }, snapshotTarget),
+    /task_creation_evidence_digest_mismatch/u,
+  );
+  assert.throws(
+    () => parseCycleExecutionSnapshot({
+      ...source,
+      issue_history: [{ ...history, changed_fields: [] }],
+    }, snapshotTarget),
+    /empty_task_history_entry/u,
+  );
 });
 
 test("CycleExecutionSnapshot accepts empty and Plan-only pre-materialization graphs", () => {

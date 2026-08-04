@@ -466,6 +466,7 @@ function conductorConfiguration(linear, git) {
       in_progress: linear.states["In Progress"],
       in_review: linear.states["In Review"],
       done: linear.states.Done,
+      failed: linear.states.Failed,
     },
     workflow: {
       labels: {
@@ -493,12 +494,12 @@ function conductorConfiguration(linear, git) {
       },
     },
     root_capabilities: ROOT_CAPABILITIES,
-    root_routing: [{
+    root: {
       root_id: linear.rootId,
       repository_id: git.repositoryId,
       repository_path: git.repositoryPath,
       base_branch: git.baseBranch,
-    }],
+    },
   });
 }
 

@@ -35,8 +35,10 @@ import {
 import {
   parseRootBootstrap,
   parseRootFactDiff,
+  parseRootSemanticSnapshot,
   type RootBootstrap,
   type RootFactDiff,
+  type RootSemanticSnapshot,
 } from "../../contracts/observation.js";
 import {
   parseRootTurnOutcome,
@@ -66,6 +68,14 @@ import { RootContinuityStore } from "./RootContinuityStore.js";
 import { rootReconcillOutputSchema, rootReconcillPrompt } from "./RootPrompt.js";
 
 export { rootReconcillOutputSchema } from "./RootPrompt.js";
+
+const INTERNAL_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}(?::[a-z][a-z0-9_]{0,31})?$/u;
+
+function internalCauseCode(error: unknown): string | undefined {
+  return error instanceof Error && INTERNAL_ERROR_CODE.test(error.message)
+    ? error.message
+    : undefined;
+}
 
 function homeKey(rootHome: string): string {
   const normalized = path.normalize(rootHome).replace(/[\\/]+$/u, "");
@@ -174,7 +184,7 @@ interface RootReconcillLogIdentity {
   readonly runtime_generation: RuntimeGeneration;
   readonly correlation_id: CorrelationId;
   readonly thread_id: ThreadId;
-  readonly input_kind: "bootstrap" | "diff";
+  readonly input_kind: "bootstrap" | "diff" | "semantic_snapshot";
 }
 
 export type RootReconcillLog =
@@ -186,6 +196,7 @@ export type RootReconcillLog =
   | (RootReconcillLogIdentity & {
     readonly event: "root_reconcill_turn_failed";
     readonly reason_code: "boundary_unavailable" | "continuity_unavailable" | "invalid_contract";
+    readonly cause_code?: string;
   });
 
 export interface RootReconcillOptions {
@@ -205,7 +216,7 @@ function parseModelTurnOutcome(value: unknown, target: RuntimeTarget): RootTurnO
     "sanitized_reason",
   ]);
   if (record.outcome === "quiescent") {
-    if (record.sanitized_reason !== null) throw new Error("invalid_model_outcome");
+    if (record.sanitized_reason !== null) throw new Error("quiescent_reason_present");
     return parseRootTurnOutcome({
       schema_version: record.schema_version,
       root_id: record.root_id,
@@ -214,9 +225,10 @@ function parseModelTurnOutcome(value: unknown, target: RuntimeTarget): RootTurnO
       outcome: record.outcome,
     }, target);
   }
-  if (record.outcome !== "stopped" || record.sanitized_reason === null) {
+  if (record.outcome !== "stopped") {
     throw new Error("invalid_model_outcome");
   }
+  if (record.sanitized_reason === null) throw new Error("stopped_reason_missing");
   return parseRootTurnOutcome(record, target);
 }
 
@@ -235,10 +247,9 @@ function controlOutcome(
   });
 }
 
-function acceptedDigest(input: RootBootstrap | RootFactDiff): ObservationDigest {
-  return "task" in input
-    ? rootObservationDigest(input.task, input.git)
-    : parseObservationDigest(input.to_observation_digest);
+function acceptedDigest(input: RootBootstrap | RootFactDiff | RootSemanticSnapshot): ObservationDigest {
+  if (!("task" in input)) return parseObservationDigest(input.to_observation_digest);
+  return rootObservationDigest(input.task, input.git, "routing" in input ? input.routing : undefined);
 }
 
 class BoundRootReconcill implements RootReconcillInterface {
@@ -308,14 +319,18 @@ class BoundRootReconcill implements RootReconcillInterface {
   }
 
   async #run(rawInput: RootReconcillInput): Promise<RootTurnOutcome> {
-    const inputKind = typeof rawInput === "object" && rawInput !== null && "task" in rawInput
-      ? "bootstrap" as const
-      : "diff" as const;
-    let input: RootBootstrap | RootFactDiff;
+    const inputKind = typeof rawInput === "object" && rawInput !== null && "routing" in rawInput
+      ? "semantic_snapshot" as const
+      : typeof rawInput === "object" && rawInput !== null && "task" in rawInput
+        ? "bootstrap" as const
+        : "diff" as const;
+    let input: RootBootstrap | RootFactDiff | RootSemanticSnapshot;
     try {
       input = inputKind === "bootstrap"
         ? parseRootBootstrap(rawInput, this.#target)
-        : parseRootFactDiff(rawInput, this.#target);
+        : inputKind === "semantic_snapshot"
+          ? parseRootSemanticSnapshot(rawInput, this.#target)
+          : parseRootFactDiff(rawInput, this.#target);
     } catch {
       this.#terminal = true;
       throw new Error("root_reconcill_invalid_input");
@@ -325,6 +340,14 @@ class BoundRootReconcill implements RootReconcillInterface {
       if (this.#acceptedDigest !== null) throw new Error("root_already_bootstrapped");
       await this.#writeContinuity(
         nextDigest,
+        input.correlation_id,
+        input.correlation_id,
+        inputKind,
+      );
+    } else if (inputKind === "semantic_snapshot") {
+      if (this.#acceptedDigest === null) throw new Error("root_bootstrap_required");
+      await this.#writeContinuity(
+        this.#acceptedDigest,
         input.correlation_id,
         input.correlation_id,
         inputKind,
@@ -408,6 +431,7 @@ class BoundRootReconcill implements RootReconcillInterface {
         event: "root_reconcill_turn_failed",
         ...identity,
         reason_code: "boundary_unavailable",
+        cause_code: "codex_turn_failed",
       }));
       throw new Error("root_reconcill_boundary_failed");
     } else if ("output" in result) {
@@ -415,12 +439,14 @@ class BoundRootReconcill implements RootReconcillInterface {
         outcome = parseModelTurnOutcome(result.output, this.#target);
         if (outcome.outcome !== "quiescent" && outcome.outcome !== "stopped") throw new Error("invalid_model_outcome");
         if (outcome.correlation_id !== input.correlation_id) throw new Error("turn_correlation_mismatch");
-      } catch {
+      } catch (error) {
         this.#terminal = true;
+        const causeCode = internalCauseCode(error) ?? "invalid_model_outcome";
         this.#log(Object.freeze({
           event: "root_reconcill_turn_failed",
           ...identity,
           reason_code: "invalid_contract",
+          cause_code: causeCode,
         }));
         throw new Error("root_reconcill_boundary_failed");
       }
@@ -464,7 +490,7 @@ class BoundRootReconcill implements RootReconcillInterface {
     digest: ObservationDigest,
     inFlightCorrelation: CorrelationId | null,
     logCorrelation: CorrelationId,
-    inputKind: "bootstrap" | "diff",
+    inputKind: "bootstrap" | "diff" | "semantic_snapshot",
   ): Promise<void> {
     try {
       await this.#continuity.write({
@@ -495,8 +521,8 @@ class BoundRootReconcill implements RootReconcillInterface {
   }
 
   #logIdentity(
-    input: RootBootstrap | RootFactDiff,
-    inputKind: "bootstrap" | "diff",
+    input: RootBootstrap | RootFactDiff | RootSemanticSnapshot,
+    inputKind: "bootstrap" | "diff" | "semantic_snapshot",
   ): RootReconcillLogIdentity {
     return Object.freeze({
       root_id: this.rootId,

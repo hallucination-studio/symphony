@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -80,13 +80,30 @@ async function fixture() {
   return { root, repository, revision, identity, scm, delivery };
 }
 
-test("GitScmDelivery pushes only the exact local revision to the approved remote ref", async () => {
+async function leaseRaceExecutable(root: string, branch: string, externalRevision: string): Promise<string> {
+  const executable = path.join(root, "lease-race-git.mjs");
+  const marker = path.join(root, "lease-race-fired");
+  await writeFile(executable, [
+    "#!/usr/bin/env node",
+    "import { existsSync } from 'node:fs';",
+    "import { spawnSync } from 'node:child_process';",
+    `const args = process.argv.slice(2); const marker = ${JSON.stringify(marker)};`,
+    `if (args.includes('push') && !existsSync(marker)) {`,
+    `  spawnSync('git', ['push', 'origin', ${JSON.stringify(`${externalRevision}:refs/heads/${branch}`)}], { cwd: process.cwd(), stdio: 'inherit' });`,
+    "  await import('node:fs/promises').then(({ writeFile }) => writeFile(marker, 'fired'));",
+    "}",
+    "const result = spawnSync('git', args, { cwd: process.cwd(), stdio: 'inherit' });",
+    "process.exit(result.status ?? 1);",
+    "",
+  ].join("\n"), "utf8");
+  await chmod(executable, 0o700);
+  return executable;
+}
+
+test("GitScmDelivery uses an expected-old lease for exact remote revision updates", async () => {
   const f = await fixture();
   try {
     assert.equal((await f.delivery.read(f.identity)).remote_revision, null);
-    await git(f.repository, "commit", "--allow-empty", "-m", "unaccepted local head");
-    const otherRevision = parseRevision(await git(f.repository, "rev-parse", "HEAD"));
-    assert.notEqual(otherRevision, f.revision);
     const pushed = await f.delivery.push({
       identity: f.identity,
       verified_revision: f.revision,
@@ -96,15 +113,53 @@ test("GitScmDelivery pushes only the exact local revision to the approved remote
     assert.equal(pushed.outcome, "applied");
     assert.equal((await f.delivery.read(f.identity)).remote_revision, f.revision);
 
-    await git(f.repository, "push", "origin", `${otherRevision}:refs/heads/${f.identity.head_branch}`);
-    const conflict = await f.delivery.push({
+    await git(f.repository, "commit", "--allow-empty", "-m", "next exact revision");
+    const nextRevision = parseRevision(await git(f.repository, "rev-parse", "HEAD"));
+    const updated = await f.delivery.push({
+      identity: f.identity,
+      verified_revision: nextRevision,
+      expected_remote_revision: f.revision,
+      correlation_id: parseCorrelationId("delivery:lease-update"),
+    });
+    assert.equal(updated.outcome, "applied");
+    assert.equal((await f.delivery.read(f.identity)).remote_revision, nextRevision);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("GitScmDelivery reports a stale expected-old lease without overwriting an external update", async () => {
+  const f = await fixture();
+  try {
+    await f.delivery.push({
       identity: f.identity,
       verified_revision: f.revision,
-      expected_remote_revision: otherRevision,
-      correlation_id: parseCorrelationId("delivery:conflict"),
+      expected_remote_revision: null,
+      correlation_id: parseCorrelationId("delivery:lease-base"),
     });
-    assert.equal(conflict.outcome, "precondition_failed");
-    assert.equal((await f.delivery.read(f.identity)).remote_revision, otherRevision);
+    await git(f.repository, "commit", "--allow-empty", "-m", "external revision");
+    const externalRevision = parseRevision(await git(f.repository, "rev-parse", "HEAD"));
+    await git(f.repository, "commit", "--allow-empty", "-m", "candidate revision");
+    const candidateRevision = parseRevision(await git(f.repository, "rev-parse", "HEAD"));
+    const executable = await leaseRaceExecutable(f.root, f.identity.head_branch, externalRevision);
+    const racedDelivery = await GitScmDelivery.create({
+      executable,
+      repository_path: f.repository,
+      repository_id: f.identity.repository_id,
+      command_timeout_ms: 5_000,
+      max_output_bytes: 64 * 1024,
+      scm: f.scm,
+    });
+    const conflict = await racedDelivery.push({
+      identity: f.identity,
+      verified_revision: candidateRevision,
+      expected_remote_revision: f.revision,
+      correlation_id: parseCorrelationId("delivery:stale-lease"),
+    });
+
+    assert.equal(conflict.outcome, "readback_mismatch");
+    assert.equal(conflict.reason, "push_remote_conflict");
+    assert.equal((await racedDelivery.read(f.identity)).remote_revision, externalRevision);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

@@ -1,8 +1,8 @@
 import type { RootIssueId, RuntimeGeneration } from "../../contracts/identity.js";
-import type { RootBootstrap, RootFactDiff } from "../../contracts/observation.js";
+import type { RootBootstrap, RootFactDiff, RootSemanticSnapshot } from "../../contracts/observation.js";
 import type { RootTurnOutcome } from "../../contracts/runtime.js";
 
-export type RootReconcillInput = RootBootstrap | RootFactDiff;
+export type RootReconcillInput = RootBootstrap | RootFactDiff | RootSemanticSnapshot;
 
 export interface RootReconcillInterface {
   readonly rootId: RootIssueId;

@@ -1,10 +1,10 @@
 import {
+  parseCycleIssueId,
   parseRootIssueId,
   type RootIssueId,
+  type CycleIssueId,
   type RuntimeGeneration,
 } from "../contracts/identity.js";
-import type { RootReconcillInterface } from "../root-reconcill/api/RootReconcillInterface.js";
-import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import {
   RootRuntime,
   type RegisteredRootRuntime,
@@ -19,7 +19,11 @@ export type {
 } from "./RootRuntime.js";
 
 export interface RootRuntimeCleanup {
-  delete(rootId: RootIssueId, isLive: (rootId: RootIssueId) => boolean): Promise<void>;
+  delete(
+    rootId: RootIssueId,
+    cycleIds: readonly CycleIssueId[],
+    isLive: (rootId: RootIssueId) => boolean,
+  ): Promise<void>;
 }
 
 export type RootRuntimeRetirementResult =
@@ -37,63 +41,53 @@ const NO_ROOT_HOME_CLEANUP: RootRuntimeCleanup = Object.freeze({
   delete: async () => undefined,
 });
 
-interface RuntimeResources {
-  readonly cycle: CycleMachineHostInterface;
-  readonly turn: RootReconcillInterface;
-}
-
 export class RootRuntimeRegistry {
-  readonly #cycles = new Set<CycleMachineHostInterface>();
-  readonly #creating = new Map<RootIssueId, Promise<RegisteredRootRuntime>>();
-  readonly #resources = new Map<RootIssueId, RuntimeResources>();
-  readonly #retiring = new Map<RootIssueId, Promise<RootRuntimeRetirementResult>>();
-  readonly #runtimes = new Map<RootIssueId, RegisteredRootRuntime>();
-  readonly #turns = new Set<RootReconcillInterface>();
+  readonly #boundRootId: RootIssueId;
+  #creating: Promise<RegisteredRootRuntime> | null = null;
+  #retirement: Promise<RootRuntimeRetirementResult> | null = null;
+  #runtime: RegisteredRootRuntime | null = null;
 
   constructor(
+    boundRootId: RootIssueId,
     private readonly factory: RootRuntimeFactory,
     private readonly cleanup: RootRuntimeCleanup = NO_ROOT_HOME_CLEANUP,
-  ) {}
+  ) {
+    this.#boundRootId = parseRootIssueId(boundRootId);
+  }
 
-  get size(): number { return this.#runtimes.size; }
+  get size(): number { return this.#runtime === null ? 0 : 1; }
 
-  has(rootId: RootIssueId): boolean { return this.#runtimes.has(rootId); }
+  has(rootId: RootIssueId): boolean {
+    return parseRootIssueId(rootId) === this.#boundRootId && this.#runtime !== null;
+  }
 
   generation(rootId: RootIssueId): RuntimeGeneration | null {
-    return this.#runtimes.get(rootId)?.target.runtime_generation ?? null;
+    return parseRootIssueId(rootId) === this.#boundRootId
+      ? this.#runtime?.target.runtime_generation ?? null
+      : null;
   }
 
   async getOrCreate(rootId: RootIssueId): Promise<RegisteredRootRuntime> {
-    const normalizedRootId = parseRootIssueId(rootId);
-    if (this.#retiring.has(normalizedRootId)) throw new Error("root_runtime_retiring");
-    const existing = this.#runtimes.get(normalizedRootId);
-    if (existing !== undefined) return existing;
-    let creation = this.#creating.get(normalizedRootId);
-    if (creation === undefined) {
+    const normalizedRootId = this.#assertBoundRoot(rootId);
+    if (this.#retirement !== null) throw new Error("root_runtime_retiring");
+    const existing = this.#runtime;
+    if (existing !== null) return existing;
+    let creation = this.#creating;
+    if (creation === null) {
       creation = this.#create(normalizedRootId);
-      this.#creating.set(normalizedRootId, creation);
+      this.#creating = creation;
     }
     try {
       const runtime = await creation;
-      if (this.#retiring.has(normalizedRootId)) throw new Error("root_runtime_retiring");
+      if (this.#retirement !== null) throw new Error("root_runtime_retiring");
       return runtime;
     } finally {
-      if (this.#creating.get(normalizedRootId) === creation) this.#creating.delete(normalizedRootId);
+      if (this.#creating === creation) this.#creating = null;
     }
   }
 
   async #create(rootId: RootIssueId): Promise<RegisteredRootRuntime> {
     const binding = await this.factory.create(rootId);
-    const turnAliased = this.#turns.has(binding.turn);
-    const cycleAliased = this.#cycles.has(binding.cycle);
-    if (turnAliased || cycleAliased) {
-      const cleanup: Promise<void>[] = [];
-      if (!cycleAliased) cleanup.push(this.#begin(() => binding.cycle.retire()));
-      if (!turnAliased) cleanup.push(this.#begin(() => binding.turn.close()));
-      await Promise.allSettled(cleanup);
-      throw new Error("root_runtime_resource_alias");
-    }
-
     let runtime: RootRuntime;
     try {
       runtime = new RootRuntime(binding);
@@ -107,28 +101,32 @@ export class RootRuntimeRegistry {
       ]);
       throw error;
     }
-    this.#cycles.add(binding.cycle);
-    this.#turns.add(binding.turn);
-    this.#resources.set(rootId, Object.freeze({ cycle: binding.cycle, turn: binding.turn }));
-    this.#runtimes.set(rootId, runtime);
+    this.#runtime = runtime;
     return runtime;
   }
 
-  retire(rootId: RootIssueId): Promise<RootRuntimeRetirementResult> {
-    const normalizedRootId = parseRootIssueId(rootId);
-    const existing = this.#retiring.get(normalizedRootId);
-    if (existing !== undefined) return existing;
-    const retirement = this.#retire(normalizedRootId);
-    this.#retiring.set(normalizedRootId, retirement);
+  retire(
+    rootId: RootIssueId,
+    cycleIds: readonly CycleIssueId[] = [],
+  ): Promise<RootRuntimeRetirementResult> {
+    const normalizedRootId = this.#assertBoundRoot(rootId);
+    const normalizedCycleIds = Object.freeze(cycleIds.map(parseCycleIssueId));
+    const existing = this.#retirement;
+    if (existing !== null) return existing;
+    const retirement = this.#retire(normalizedRootId, normalizedCycleIds);
+    this.#retirement = retirement;
     return retirement;
   }
 
-  async #retire(rootId: RootIssueId): Promise<RootRuntimeRetirementResult> {
-    const creating = this.#creating.get(rootId);
-    if (creating !== undefined) await creating.catch(() => undefined);
-    const runtime = this.#runtimes.get(rootId);
+  async #retire(
+    rootId: RootIssueId,
+    cycleIds: readonly CycleIssueId[],
+  ): Promise<RootRuntimeRetirementResult> {
+    const creating = this.#creating;
+    if (creating !== null) await creating.catch(() => undefined);
+    const runtime = this.#runtime;
     const runtimeGeneration = runtime?.target.runtime_generation ?? null;
-    if (runtime !== undefined) {
+    if (runtime !== null) {
       try {
         await runtime.retire();
       } catch {
@@ -138,17 +136,12 @@ export class RootRuntimeRegistry {
           reason_code: "runtime_shutdown_failed",
         });
       }
-      if (this.#runtimes.get(rootId) === runtime) this.#runtimes.delete(rootId);
-      const resources = this.#resources.get(rootId);
-      if (resources !== undefined) {
-        this.#cycles.delete(resources.cycle);
-        this.#turns.delete(resources.turn);
-        this.#resources.delete(rootId);
-      }
+      if (this.#runtime === runtime) this.#runtime = null;
     }
     try {
-      await this.cleanup.delete(rootId, (candidate) => (
-        this.#runtimes.has(candidate) || this.#creating.has(candidate)
+      await this.cleanup.delete(rootId, cycleIds, (candidate) => (
+        parseRootIssueId(candidate) === this.#boundRootId
+        && (this.#runtime !== null || this.#creating !== null)
       ));
     } catch {
       return Object.freeze({
@@ -158,6 +151,12 @@ export class RootRuntimeRegistry {
       });
     }
     return Object.freeze({ outcome: "completed", runtime_generation: runtimeGeneration });
+  }
+
+  #assertBoundRoot(rootId: RootIssueId): RootIssueId {
+    const normalizedRootId = parseRootIssueId(rootId);
+    if (normalizedRootId !== this.#boundRootId) throw new Error("bound_root_identity_mismatch");
+    return normalizedRootId;
   }
 
   #begin(action: () => Promise<void>): Promise<void> {

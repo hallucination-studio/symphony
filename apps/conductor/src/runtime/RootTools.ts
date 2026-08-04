@@ -89,6 +89,32 @@ const PAGE_PROPERTIES = Object.freeze({
   page_size: { const: ROOT_TASK_PAGE_SIZE },
 });
 
+const CREATE_ISSUE_JSON_SHAPE_GUIDANCE = [
+  "Emit this exact nested JSON shape.",
+  'Valid: {"issue_id":"11111111-1111-4111-8111-111111111111","parent_issue_id":"ROOT","expected_parent_revision":"REVISION","desired":{"title":"TITLE","description":"MARKDOWN","state_id":"STATE_ID","label_ids":["LABEL_ID"],"delegate_id":null,"priority":null}}.',
+  "Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input.",
+].join(" ");
+
+const UPDATE_ISSUE_JSON_SHAPE_GUIDANCE = [
+  "Use this exact nested JSON shape (replace placeholders with current facts).",
+  'Valid: {"issue_id":"ISSUE_ID","expected_revision":"REVISION","desired":{"title":"TITLE"}}.',
+  'Valid tool arguments: {"schema_version":1,"function":"update_issue","root_id":"ROOT","runtime_generation":1,"correlation_id":"CORR","capability":"task_manage:update_issue","input":{"issue_id":"ISSUE_ID","expected_revision":"REVISION","desired":{"title":"TITLE"}}}.',
+  "The input object contains exactly issue_id, expected_revision, and desired. The desired object contains exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority. Put no other keys anywhere in the input object.",
+].join(" ");
+
+const UPDATE_ISSUE_DESIRED_GUIDANCE = [
+  "Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside this desired object; do not place any of those fields beside desired in the parent input object.",
+  '{"title":"TITLE"} is a valid desired object.',
+  "The desired object contains exactly one field.",
+  "Emit one field only.",
+].join(" ");
+
+const CREATE_ISSUE_ID_GUIDANCE = "issue_id must be a fresh UUIDv4; never a name or placeholder.";
+
+function cycleCreateIdentityGuidance(taskContract: RootTaskManageToolContract): string {
+  return `For this Root, state_id must be exactly ${taskContract.cycle_draft_state_id} and label_ids must be [${taskContract.cycle_label_id}]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders.`;
+}
+
 function objectSchema(properties: JsonSchema, required = Object.keys(properties), extra: JsonSchema = {}): JsonSchema {
   return { type: "object", additionalProperties: false, properties, required, ...extra };
 }
@@ -105,37 +131,67 @@ function taskInputSchema(
     case "list_children": return objectSchema({ parent_issue_id: IDENTITY_SCHEMA, ...PAGE_PROPERTIES });
     case "list_relations": return objectSchema({ issue_id: IDENTITY_SCHEMA, ...PAGE_PROPERTIES });
     case "create_issue": return objectSchema({
-      issue_id: UUID_V4_SCHEMA,
+      issue_id: {
+        ...UUID_V4_SCHEMA,
+        description: "Use a fresh UUIDv4 for issue_id; never use an issue name or placeholder.",
+      },
       parent_issue_id: { enum: [taskContract.root_id] },
       expected_parent_revision: IDENTITY_SCHEMA,
       desired: objectSchema({
         title: { type: "string", minLength: 1, maxLength: 1024, pattern: "^[^\\r\\n\\u0000]+$" },
-        description: { type: "string", maxLength: 100_000, pattern: "^[^\\u0000]*$" },
-        state_id: { enum: [taskContract.cycle_draft_state_id] },
+        description: {
+          description: "For a Cycle Draft target, use at most one level-1 title followed by exactly these level-2 headings in order: Root Definition Revision, Requirement, Domain Knowledge, Root ADR, Acceptance, Architecture, Feature Design, Code Design, Boundaries, Acceptance Mapping, Failure Strategy. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase.",
+          type: "string",
+          maxLength: 100_000,
+          pattern: "^[^\\u0000]*$",
+        },
+        state_id: {
+          enum: [taskContract.cycle_draft_state_id],
+          description: cycleCreateIdentityGuidance(taskContract),
+        },
         label_ids: {
           type: "array",
           minItems: 1,
           maxItems: 1,
           uniqueItems: true,
+          description: cycleCreateIdentityGuidance(taskContract),
           items: { enum: [taskContract.cycle_label_id] },
         },
         delegate_id: { enum: [null] },
         priority: { enum: [null] },
+      }, ["title", "description", "state_id", "label_ids", "delegate_id", "priority"], {
+        description: "This desired object contains exactly title, description, state_id, label_ids, delegate_id, and priority; all six fields belong inside desired and none may be placed beside desired in the parent input object. " + cycleCreateIdentityGuidance(taskContract),
+        maxProperties: 6,
       }),
+    }, ["issue_id", "parent_issue_id", "expected_parent_revision", "desired"], {
+      description: "This input contains exactly issue_id, parent_issue_id, expected_parent_revision, and desired; put exactly title, description, state_id, label_ids, delegate_id, and priority inside desired. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, preserving headings and Markdown; never paraphrase. " + CREATE_ISSUE_ID_GUIDANCE + " " + cycleCreateIdentityGuidance(taskContract) + " " + CREATE_ISSUE_JSON_SHAPE_GUIDANCE,
     });
-    case "update_issue": return objectSchema({
-      issue_id: IDENTITY_SCHEMA,
-      expected_revision: IDENTITY_SCHEMA,
-      desired: objectSchema({
+    case "update_issue": {
+      const desiredProperties = {
         title: { type: "string", minLength: 1, maxLength: 1024, pattern: "^[^\\r\\n\\u0000]+$" },
-        description: { anyOf: [{ type: "string", maxLength: 100_000, pattern: "^[^\\u0000]*$" }, { type: "null" }] },
+        description: {
+          description: "For a Root target, use one optional level-1 title followed by exactly these level-2 headings in order: Requirement, Domain Knowledge, Root ADR, Acceptance. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence.",
+          anyOf: [{ type: "string", maxLength: 100_000, pattern: "^[^\\u0000]*$" }, { type: "null" }],
+        },
         state_id: IDENTITY_SCHEMA,
         parent_id: NULLABLE_IDENTITY_SCHEMA,
         label_ids: { type: "array", maxItems: 256, uniqueItems: true, items: IDENTITY_SCHEMA },
         delegate_id: NULLABLE_DELEGATE_SCHEMA,
         priority: { anyOf: [{ type: "integer", minimum: 0, maximum: 100 }, { type: "null" }] },
-      }, [], { minProperties: 1 }),
-    });
+      };
+      return objectSchema({
+        issue_id: IDENTITY_SCHEMA,
+        expected_revision: IDENTITY_SCHEMA,
+        desired: objectSchema(desiredProperties, [], {
+          description: UPDATE_ISSUE_DESIRED_GUIDANCE,
+          minProperties: 1,
+          maxProperties: 1,
+          oneOf: Object.entries(desiredProperties).map(([field, property]) => objectSchema({ [field]: property }, [field])),
+        }),
+      }, ["issue_id", "expected_revision", "desired"], {
+        description: "This is the nested input object. It contains exactly issue_id, expected_revision, and desired; put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired. Do not put schema_version, function, root_id, runtime_generation, correlation_id, capability, or any desired field in this object beside desired." + " " + UPDATE_ISSUE_JSON_SHAPE_GUIDANCE,
+      });
+    }
     case "archive_issue": return objectSchema({
       issue_id: IDENTITY_SCHEMA,
       expected_revision: IDENTITY_SCHEMA,
@@ -163,8 +219,8 @@ const TASK_DESCRIPTIONS = Object.freeze({
   get_issue: "Read one Task Manager issue by exact identity",
   list_issues: "List Task Manager issues with explicit cursor pagination",
   list_children: "List direct child issues with explicit cursor pagination",
-  create_issue: "Create one complete Cycle Draft under the exact Root using the schema-bound Draft state and Cycle label",
-  update_issue: "Update approved fields on one exact issue revision",
+  create_issue: "Create one Cycle Draft under the exact Root.",
+  update_issue: "Update exactly one field on one exact issue revision. The input keys are exactly issue_id, expected_revision, and desired. Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired; parent_id is nested inside desired, never beside desired." + " " + UPDATE_ISSUE_JSON_SHAPE_GUIDANCE,
   archive_issue: "Archive one exact issue revision",
   list_relations: "List relations for one issue with explicit cursor pagination",
   create_relation: "Create one relation using exact endpoint preconditions",
@@ -198,7 +254,9 @@ function taskSpec(
   return deepFreeze({
     type: "function" as const,
     name: functionName,
-    description: TASK_DESCRIPTIONS[functionName],
+    description: functionName === "create_issue"
+      ? `${TASK_DESCRIPTIONS[functionName]} ${CREATE_ISSUE_JSON_SHAPE_GUIDANCE} ${CREATE_ISSUE_ID_GUIDANCE} ${cycleCreateIdentityGuidance(taskContract)}`
+      : TASK_DESCRIPTIONS[functionName],
     inputSchema: objectSchema({
       ...commonProperties(target, capability),
       function: { const: functionName },

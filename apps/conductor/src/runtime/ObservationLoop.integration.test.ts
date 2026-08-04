@@ -135,6 +135,7 @@ test("polling drives undelegated idle and complete fresh Root snapshots", async 
     },
     readLatestIssueChangeOrigin: async () => null,
   }, {
+    root_id: rootId,
     log: () => undefined,
     identity_factory: () => correlations.shift() ?? "corr:unexpected",
     now: () => new Date("2026-07-30T10:00:00.000Z"),
@@ -152,7 +153,7 @@ test("polling drives undelegated idle and complete fresh Root snapshots", async 
     diff_digest: "sha256:clean",
     pull_request: null,
   });
-  const registry = new RootRuntimeRegistry({
+  const registry = new RootRuntimeRegistry(rootId, {
     create: async (createdRootId) => {
       creations += 1;
       const workspace = Object.freeze({
@@ -178,7 +179,7 @@ test("polling drives undelegated idle and complete fresh Root snapshots", async 
           retire: async () => undefined,
         } satisfies CycleMachineHostInterface,
         git: {
-          read: async () => {
+          readRoot: async () => {
             gitReads += 1;
             return gitSnapshot;
           },
@@ -202,6 +203,7 @@ test("polling drives undelegated idle and complete fresh Root snapshots", async 
     },
   });
   const conductor = new SerialConductor(registry, {
+    root_id: rootId,
     agent_actor_id: agentActor,
     root_kind_label_id: "label:root",
     root_states: {
@@ -209,6 +211,7 @@ test("polling drives undelegated idle and complete fresh Root snapshots", async 
       in_progress: "state:root:in-progress",
       in_review: "state:root:in-review",
       done: "state:root:done",
+      failed: "state:cycle:failed",
     },
     workflow: {
       labels: {

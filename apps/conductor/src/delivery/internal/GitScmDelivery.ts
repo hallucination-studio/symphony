@@ -111,13 +111,11 @@ export class GitScmDelivery implements DeliveryInterface {
       return result(request, "precondition_failed", "remote_revision_mismatch");
     }
     if (before.remote_revision === request.verified_revision) return result(request, "applied");
-    if (before.remote_revision !== null) {
-      return result(request, "precondition_failed", "remote_revision_conflict");
-    }
     await this.#assertLocalRevision(request.verified_revision);
     try {
       await this.#commands.run(this.repositoryPath, [
         "push",
+        `--force-with-lease=refs/heads/${request.identity.head_branch}:${request.expected_remote_revision ?? "0".repeat(request.verified_revision.length)}`,
         "origin",
         `${request.verified_revision}:refs/heads/${request.identity.head_branch}`,
       ]);

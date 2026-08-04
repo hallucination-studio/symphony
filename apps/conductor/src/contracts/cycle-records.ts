@@ -1426,7 +1426,29 @@ function parseNullableString(value: unknown, code: string): string | null {
   return value === null ? null : parseIdentifier(value, code);
 }
 
-function parseDeliveryRound(value: unknown): Readonly<Record<string, unknown>> {
+export interface DeliveryObservationRoundRecord {
+  readonly linear_snapshot_digest: Digest;
+  readonly linear_observed_at: string;
+  readonly root_revision: TaskRevision;
+  readonly git_exact_revision: Digest;
+  readonly git_observed_at: string;
+  readonly remote_ref_revision: Digest | null;
+  readonly pull_request_identity: string | null;
+  readonly pull_request_revision: TaskRevision | null;
+  readonly pull_request_head: Digest | null;
+  readonly pull_request_state: string | null;
+  readonly delivery_provider_observed_at: string;
+}
+
+export interface DeliveryConvergenceProofRecord {
+  readonly proof_scope: "delivery";
+  readonly first_round: DeliveryObservationRoundRecord;
+  readonly second_round: DeliveryObservationRoundRecord;
+  readonly observation_order: "linear -> git -> delivery -> linear -> git -> delivery";
+  readonly stable_decision_basis_digest: Digest;
+}
+
+function parseDeliveryRound(value: unknown): DeliveryObservationRoundRecord {
   const record = asRecord(value);
   assertExactKeys(record, [
     "linear_snapshot_digest", "linear_observed_at", "root_revision", "git_exact_revision",
@@ -1451,7 +1473,7 @@ function parseDeliveryRound(value: unknown): Readonly<Record<string, unknown>> {
   });
 }
 
-function parseDeliveryProof(value: unknown): Readonly<Record<string, unknown>> {
+function parseDeliveryProof(value: unknown): DeliveryConvergenceProofRecord {
   const record = asRecord(value);
   assertExactKeys(record, [
     "proof_scope", "first_round", "second_round", "observation_order", "stable_decision_basis_digest",
@@ -1489,7 +1511,7 @@ export interface DeliveryCompletionRecord extends TaskIssueRecordCommon {
   readonly observed_remote_revision: Digest;
   readonly observed_pull_request_identity: string;
   readonly observed_pull_request_head: Digest;
-  readonly convergence_proof: Readonly<Record<string, unknown>>;
+  readonly convergence_proof: DeliveryConvergenceProofRecord;
 }
 
 export function parseDeliveryCompletionRecord(value: unknown): DeliveryCompletionRecord {
@@ -1514,7 +1536,7 @@ export function parseDeliveryCompletionRecord(value: unknown): DeliveryCompletio
   const pullRequestIdentity = parseIdentifier(record.observed_pull_request_identity);
   const pullRequestHead = parseDigest(record.observed_pull_request_head);
   const proof = parseDeliveryProof(record.convergence_proof);
-  const finalRound = proof.second_round as Readonly<Record<string, unknown>>;
+  const finalRound = proof.second_round;
   if (
     common.basis_status !== "In Review"
     || exactRevision !== remoteRevision
@@ -1541,8 +1563,8 @@ export function parseDeliveryCompletionRecord(value: unknown): DeliveryCompletio
 export type DeliveryInvalidationEvidence =
   | {
     readonly kind: "convergence_mismatch";
-    readonly first_round: Readonly<Record<string, unknown>>;
-    readonly second_round: Readonly<Record<string, unknown>>;
+    readonly first_round: DeliveryObservationRoundRecord;
+    readonly second_round: DeliveryObservationRoundRecord;
     readonly observation_order: "linear -> git -> delivery -> linear -> git -> delivery";
     readonly mismatched_fields: readonly [string, ...string[]];
     readonly first_basis_digest: Digest;

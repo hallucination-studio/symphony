@@ -124,7 +124,7 @@ function specs(target: RuntimeTarget): readonly RootToolSpec[] {
     {
       type: "function" as const,
       name: "list_code_directory",
-      description: "List one non-sensitive code directory with bounded cursor pagination",
+      description: "List one non-sensitive code directory with bounded cursor pagination. Use the flat schema exactly; never add function or input.",
       inputSchema: objectSchema({
         ...commonProperties(target, ROOT_CODE_INSPECTION_CAPABILITIES.list_code_directory),
         path: codePath,
@@ -140,7 +140,7 @@ function specs(target: RuntimeTarget): readonly RootToolSpec[] {
     {
       type: "function" as const,
       name: "read_code_file",
-      description: "Read a bounded line window from one non-sensitive code file",
+      description: "Read a bounded line window from one non-sensitive code file. Use the flat schema exactly; never add function or input.",
       inputSchema: objectSchema({
         ...commonProperties(target, ROOT_CODE_INSPECTION_CAPABILITIES.read_code_file),
         path: codePath,
@@ -155,7 +155,7 @@ function specs(target: RuntimeTarget): readonly RootToolSpec[] {
     {
       type: "function" as const,
       name: "search_code",
-      description: "Search non-sensitive code text under one directory with bounded results",
+      description: "Search non-sensitive code text under one directory with bounded results. Use the flat schema exactly; never add function or input.",
       inputSchema: objectSchema({
         ...commonProperties(target, ROOT_CODE_INSPECTION_CAPABILITIES.search_code),
         path: codePath,

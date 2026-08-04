@@ -1,8 +1,13 @@
 import {
+  parseCorrelationId,
+  parseCycleIssueId,
   parseRepositoryId,
   parseRootIssueId,
   parseRuntimeGeneration,
+  type CorrelationId,
+  type CycleIssueId,
   type RootIssueId,
+  type RuntimeGeneration,
 } from "../contracts/identity.js";
 import type { CycleAdvanceResult } from "../contracts/cycle.js";
 import { parseTaskObservationEvent } from "../contracts/observation.js";
@@ -13,7 +18,7 @@ import type {
   PreparedCycleAction,
 } from "../cycle/internal/CycleMachine.js";
 import { parseBoundedString } from "../contracts/validation.js";
-import type { GitWorkspaceInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
+import type { GitRootReadInterface, RootWorkspaceIdentity } from "../git/api/GitWorkspaceInterface.js";
 import {
   AcceptedRootObservation,
   type PreparedRootObservation,
@@ -25,15 +30,57 @@ import type {
   RootReconcillInterface,
 } from "../root-reconcill/api/RootReconcillInterface.js";
 import { boundaryError } from "../contracts/common-outcomes.js";
-import type { FreshRouteConsumer, FreshRouteMatch } from "./FreshTaskRouter.js";
+import type { FreshRouteConsumer, FreshRouteId, FreshRouteMatch } from "./FreshTaskRouter.js";
+import type { RootBoundaryRouting } from "../contracts/observation.js";
+import type { TaskSnapshot } from "../contracts/task-management.js";
 
 export type RootTurnInput = RootReconcillInput;
+
+export type DeliveryFinalizerRouteId = Extract<FreshRouteId, "WF-ROUTE-010" | "WF-ROUTE-012">;
+
+export interface PreparedDeliveryFinalizer {
+  readonly kind: "delivery_finalizer";
+  readonly root_id: RootIssueId;
+  readonly runtime_generation: RuntimeGeneration;
+  readonly correlation_id: CorrelationId;
+  readonly selected_route: DeliveryFinalizerRouteId;
+  readonly cycle_id: CycleIssueId;
+}
+
+export type DeliveryFinalizerOutcome =
+  | "delivery_completed"
+  | "delivery_invalidated"
+  | "root_projected"
+  | "no_action"
+  | "effect_unknown";
+
+export interface DeliveryFinalizerResult {
+  readonly kind: "delivery_finalizer_result";
+  readonly root_id: RootIssueId;
+  readonly runtime_generation: RuntimeGeneration;
+  readonly correlation_id: CorrelationId;
+  readonly selected_route: DeliveryFinalizerRouteId;
+  readonly cycle_id: CycleIssueId;
+  readonly outcome: DeliveryFinalizerOutcome;
+  readonly reason_code?: string;
+}
+
+export interface DeliveryFinalizerHostInterface {
+  prepare(input: Readonly<{
+    readonly task: TaskSnapshot;
+    readonly route: FreshRouteMatch;
+    readonly correlation_id: CorrelationId;
+    readonly runtime_generation: RuntimeGeneration;
+  }>): Promise<PreparedDeliveryFinalizer>;
+  run(prepared: PreparedDeliveryFinalizer): Promise<DeliveryFinalizerResult>;
+}
 
 export interface RootRuntimeBinding {
   readonly target: RuntimeTarget;
   readonly workspace: RootWorkspaceIdentity;
   readonly cycle: CycleMachineHostInterface;
-  readonly git: Pick<GitWorkspaceInterface, "read">;
+  readonly git: GitRootReadInterface;
+  readonly delivery_finalizer?: DeliveryFinalizerHostInterface;
   readonly turn: RootReconcillInterface;
 }
 
@@ -46,20 +93,120 @@ export interface RegisteredRootRuntime {
   readonly workspace: RootWorkspaceIdentity;
   prepare(taskInput: unknown, selectedRoute?: FreshRouteMatch | FreshRouteConsumer | "auto"): Promise<RootRuntimePreparation>;
   prepareCycleContinuation(): Promise<CycleMachinePreparation>;
+  prepareDeliveryFinalizer(
+    task: TaskSnapshot,
+    route: FreshRouteMatch,
+    correlationId: CorrelationId,
+  ): Promise<PreparedDeliveryFinalizer>;
   run(prepared: PreparedRootObservation): Promise<RootTurnOutcome>;
   runCycle(prepared: PreparedCycleAction): Promise<CycleAdvanceResult>;
+  runDeliveryFinalizer(prepared: PreparedDeliveryFinalizer): Promise<DeliveryFinalizerResult>;
   accept(prepared: PreparedRootObservation): void;
   retire(): Promise<void>;
 }
 
-export type RootRuntimePreparation = RootObservationAttempt | PreparedCycleAction;
+export type RootRuntimePreparation = RootObservationAttempt | PreparedCycleAction | PreparedDeliveryFinalizer;
+
+function rootBoundaryRouting(selectedRoute: FreshRouteMatch | FreshRouteConsumer | "auto"): RootBoundaryRouting {
+  if (typeof selectedRoute !== "object" || selectedRoute.consumer !== "root_boundary") {
+    return Object.freeze({ disposition: "root_boundary", selected_route: "WF-ROUTE-001", active_cycle_id: null });
+  }
+  if (selectedRoute.route_id === "WF-ROUTE-001") {
+    return Object.freeze({ disposition: "root_boundary", selected_route: selectedRoute.route_id, active_cycle_id: null });
+  }
+  if (selectedRoute.route_id === "WF-ROUTE-008") {
+    if (selectedRoute.cycle_id === null) throw new Error("root_successor_predecessor_missing");
+    return Object.freeze({
+      disposition: "root_boundary",
+      selected_route: selectedRoute.route_id,
+      active_cycle_id: null,
+      predecessor_cycle_id: parseCycleIssueId(selectedRoute.cycle_id),
+    });
+  }
+  if (
+    selectedRoute.route_id !== "WF-ROUTE-002"
+    && selectedRoute.route_id !== "WF-ROUTE-005"
+    && selectedRoute.route_id !== "WF-ROUTE-007"
+  ) throw new Error("root_boundary_route_invalid");
+  if (selectedRoute.cycle_id === null) throw new Error("root_active_cycle_missing");
+  return Object.freeze({
+    disposition: "root_boundary",
+    selected_route: selectedRoute.route_id,
+    active_cycle_id: parseCycleIssueId(selectedRoute.cycle_id),
+  });
+}
+
+function selectedExternalTerminalCycleId(
+  selectedRoute: FreshRouteMatch | FreshRouteConsumer | "auto",
+): ReturnType<typeof parseCycleIssueId> | undefined {
+  if (typeof selectedRoute !== "object" || selectedRoute.route_id !== "WF-ROUTE-018") return undefined;
+  if (selectedRoute.cycle_id === null) throw new Error("external_terminal_cycle_missing");
+  return parseCycleIssueId(selectedRoute.cycle_id);
+}
+
+function deliveryFinalizerRoute(route: FreshRouteMatch): Readonly<{
+  readonly route_id: DeliveryFinalizerRouteId;
+  readonly cycle_id: CycleIssueId;
+}> {
+  if (
+    route.consumer !== "delivery_finalizer"
+    || (route.route_id !== "WF-ROUTE-010" && route.route_id !== "WF-ROUTE-012")
+    || route.cycle_id === null
+  ) throw new Error("delivery_finalizer_route_invalid");
+  return Object.freeze({
+    route_id: route.route_id,
+    cycle_id: parseCycleIssueId(route.cycle_id),
+  });
+}
+
+function assertPreparedDeliveryFinalizer(
+  prepared: PreparedDeliveryFinalizer,
+  target: RuntimeTarget,
+): void {
+  if (
+    prepared.kind !== "delivery_finalizer"
+    || parseRootIssueId(prepared.root_id) !== target.root_id
+    || parseRuntimeGeneration(prepared.runtime_generation) !== target.runtime_generation
+    || parseCorrelationId(prepared.correlation_id) !== prepared.correlation_id
+    || parseCycleIssueId(prepared.cycle_id) !== prepared.cycle_id
+    || (prepared.selected_route !== "WF-ROUTE-010" && prepared.selected_route !== "WF-ROUTE-012")
+  ) throw new Error("delivery_finalizer_preparation_invalid");
+}
+
+function assertDeliveryFinalizerResult(
+  result: DeliveryFinalizerResult,
+  prepared: PreparedDeliveryFinalizer,
+): DeliveryFinalizerResult {
+  if (
+    result.kind !== "delivery_finalizer_result"
+    || parseRootIssueId(result.root_id) !== prepared.root_id
+    || parseRuntimeGeneration(result.runtime_generation) !== prepared.runtime_generation
+    || parseCorrelationId(result.correlation_id) !== prepared.correlation_id
+    || parseCycleIssueId(result.cycle_id) !== prepared.cycle_id
+    || result.selected_route !== prepared.selected_route
+    || ![
+      "delivery_completed",
+      "delivery_invalidated",
+      "root_projected",
+      "no_action",
+      "effect_unknown",
+    ].includes(result.outcome)
+  ) throw new Error("delivery_finalizer_result_invalid");
+  if (result.reason_code !== undefined) {
+    parseBoundedString(result.reason_code, "invalid_delivery_finalizer_reason", 128);
+  }
+  return Object.freeze(result);
+}
 
 export class RootRuntime implements RegisteredRootRuntime {
   readonly #cycle: CycleMachineHostInterface;
-  readonly #git: Pick<GitWorkspaceInterface, "read">;
+  readonly #deliveryFinalizer: DeliveryFinalizerHostInterface | null;
+  readonly #git: GitRootReadInterface;
   readonly #observations: AcceptedRootObservation;
   readonly #prepared = new WeakSet<PreparedRootObservation>();
+  readonly #preparedDeliveryFinalizers = new WeakSet<PreparedDeliveryFinalizer>();
   readonly #started = new WeakSet<PreparedRootObservation>();
+  readonly #startedDeliveryFinalizers = new WeakSet<PreparedDeliveryFinalizer>();
   readonly #outcomes = new WeakMap<PreparedRootObservation, RootTurnOutcome>();
   readonly #target: RuntimeTarget;
   readonly #turn: RootReconcillInterface;
@@ -92,6 +239,7 @@ export class RootRuntime implements RegisteredRootRuntime {
     this.#workspace = workspace;
     this.#git = binding.git;
     this.#cycle = binding.cycle;
+    this.#deliveryFinalizer = binding.delivery_finalizer ?? null;
     this.#turn = binding.turn;
     this.#observations = new AcceptedRootObservation(this.#target, this.#git);
   }
@@ -115,6 +263,14 @@ export class RootRuntime implements RegisteredRootRuntime {
     ) return this.#observations.prepare(observation, this.#workspace);
 
     const selectedConsumer = typeof selectedRoute === "object" ? selectedRoute.consumer : selectedRoute;
+    if (selectedConsumer === "delivery_finalizer") {
+      if (typeof selectedRoute !== "object") throw new Error("delivery_finalizer_route_required");
+      return this.prepareDeliveryFinalizer(
+        observation.task,
+        selectedRoute,
+        observation.correlation_id,
+      );
+    }
     if (selectedConsumer === "cycle_machine") {
       const cycle = await this.#cycle.prepare(
         observation.task,
@@ -123,6 +279,7 @@ export class RootRuntime implements RegisteredRootRuntime {
         typeof selectedRoute === "object" && selectedRoute.route_id === "WF-ROUTE-015"
           ? "admission_lost"
           : undefined,
+        selectedExternalTerminalCycleId(selectedRoute),
       );
       if (cycle.kind !== "root_available") return cycle;
       return Object.freeze({
@@ -146,10 +303,37 @@ export class RootRuntime implements RegisteredRootRuntime {
       if (cycle.kind !== "root_available") return cycle;
     }
     const attempt = selectedConsumer === "root_boundary"
-      ? await this.#observations.prepareFresh(taskInput, this.#workspace)
+      ? await this.#observations.prepareFresh(taskInput, this.#workspace, rootBoundaryRouting(selectedRoute))
       : await this.#observations.prepare(taskInput, this.#workspace);
-    if (attempt.kind === "bootstrap" || attempt.kind === "diff") this.#prepared.add(attempt);
+    if (attempt.kind === "bootstrap" || attempt.kind === "diff" || attempt.kind === "semantic_snapshot") {
+      this.#prepared.add(attempt);
+    }
     return attempt;
+  }
+
+  async prepareDeliveryFinalizer(
+    task: TaskSnapshot,
+    route: FreshRouteMatch,
+    correlationId: CorrelationId,
+  ): Promise<PreparedDeliveryFinalizer> {
+    const finalizer = this.#deliveryFinalizer;
+    if (finalizer === null) throw new Error("delivery_finalizer_unavailable");
+    if (task.root_id !== this.#target.root_id) throw new Error("delivery_finalizer_root_mismatch");
+    const selected = deliveryFinalizerRoute(route);
+    const prepared = await finalizer.prepare(Object.freeze({
+      task,
+      route,
+      correlation_id: parseCorrelationId(correlationId),
+      runtime_generation: this.#target.runtime_generation,
+    }));
+    assertPreparedDeliveryFinalizer(prepared, this.#target);
+    if (
+      prepared.selected_route !== selected.route_id
+      || prepared.cycle_id !== selected.cycle_id
+      || prepared.correlation_id !== correlationId
+    ) throw new Error("delivery_finalizer_preparation_mismatch");
+    this.#preparedDeliveryFinalizers.add(prepared);
+    return prepared;
   }
 
   prepareCycleContinuation(): Promise<CycleMachinePreparation> {
@@ -158,6 +342,24 @@ export class RootRuntime implements RegisteredRootRuntime {
 
   runCycle(prepared: PreparedCycleAction): Promise<CycleAdvanceResult> {
     return this.#cycle.run(prepared);
+  }
+
+  async runDeliveryFinalizer(prepared: PreparedDeliveryFinalizer): Promise<DeliveryFinalizerResult> {
+    if (!this.#preparedDeliveryFinalizers.has(prepared)) {
+      throw new Error("invalid_delivery_finalizer_candidate");
+    }
+    if (this.#startedDeliveryFinalizers.has(prepared)) {
+      throw new Error("delivery_finalizer_already_started");
+    }
+    assertPreparedDeliveryFinalizer(prepared, this.#target);
+    const finalizer = this.#deliveryFinalizer;
+    if (finalizer === null) throw new Error("delivery_finalizer_unavailable");
+    this.#startedDeliveryFinalizers.add(prepared);
+    try {
+      return assertDeliveryFinalizerResult(await finalizer.run(prepared), prepared);
+    } finally {
+      this.#preparedDeliveryFinalizers.delete(prepared);
+    }
   }
 
   async run(prepared: PreparedRootObservation): Promise<RootTurnOutcome> {

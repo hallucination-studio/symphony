@@ -65,6 +65,10 @@ test("Root code inspection lists, reads, and searches fresh non-sensitive code w
     "read_code_file",
     "search_code",
   ]);
+  for (const spec of inspection.specs) {
+    assert.equal(spec.description.includes("flat schema"), true);
+    assert.equal(spec.description.includes("never add function or input"), true);
+  }
 
   const listed = await binding(inspection, "list_code_directory").execute({
     ...envelope("code_inspection:list_directory"),

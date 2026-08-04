@@ -9,7 +9,14 @@ import type {
   ConcreteTaskChange,
   TaskChangeOriginEvidence,
 } from "../contracts/observation.js";
-import type { TaskIssueSnapshot, TaskSnapshot } from "../contracts/task-management.js";
+import type {
+  CycleApprovalRecord,
+} from "../contracts/cycle-records.js";
+import type {
+  TaskIssueRecordObservation,
+  TaskIssueSnapshot,
+  TaskSnapshot,
+} from "../contracts/task-management.js";
 import type { TaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
 
 export type FreshRouteId =
@@ -21,7 +28,9 @@ export type FreshRouteId =
   | "WF-ROUTE-007"
   | "WF-ROUTE-008"
   | "WF-ROUTE-009"
+  | "WF-ROUTE-010"
   | "WF-ROUTE-011"
+  | "WF-ROUTE-012"
   | "WF-ROUTE-013"
   | "WF-ROUTE-014"
   | "WF-ROUTE-015"
@@ -33,6 +42,7 @@ export type FreshRouteConsumer =
   | "root_boundary"
   | "cycle_machine"
   | "family_guard"
+  | "delivery_finalizer"
   | "cleanup"
   | "park";
 
@@ -58,6 +68,7 @@ export interface FreshTaskRouterInput {
     in_progress: TaskStateId | string;
     in_review: TaskStateId | string;
     done: TaskStateId | string;
+    failed: TaskStateId | string;
   }>;
   readonly workflow: TaskWorkflowIdentities;
   readonly permanent_quarantine?: boolean;
@@ -72,7 +83,9 @@ const ROUTES = Object.freeze({
   "WF-ROUTE-007": [90, "root_boundary"],
   "WF-ROUTE-008": [120, "root_boundary"],
   "WF-ROUTE-009": [10, "family_guard"],
+  "WF-ROUTE-010": [70, "delivery_finalizer"],
   "WF-ROUTE-011": [20, "cycle_machine"],
+  "WF-ROUTE-012": [30, "delivery_finalizer"],
   "WF-ROUTE-013": [40, "cleanup"],
   "WF-ROUTE-014": [140, "park"],
   "WF-ROUTE-015": [55, "cycle_machine"],
@@ -137,13 +150,26 @@ function sealedMutation(
 }
 
 function externallyTerminalized(
+  task: TaskSnapshot,
   changes: readonly ConcreteTaskChange[],
   cycle: TaskIssueSnapshot,
+  origins: readonly TaskChangeOriginEvidence[],
 ): boolean {
-  return changes.some((change) => change.kind === "field_changed"
+  const notificationEvidence = origins.some((evidence) => (
+    evidence.issue_id === cycle.issue_id
+    && evidence.change_origin === "external"
+    && evidence.changed_fields.includes("status")
+  )) && changes.some((change) => change.kind === "field_changed"
     && change.issue_id === cycle.issue_id
     && change.field === "status"
     && change.after === cycle.status_id);
+  if (notificationEvidence) return true;
+  return task.issue_history.some((entry) => (
+    entry.issue_id === cycle.issue_id
+    && entry.change_origin === "external"
+    && entry.changed_fields.includes("status")
+    && entry.to_status === cycle.status
+  ));
 }
 
 function mechanicalTaskChange(
@@ -160,8 +186,82 @@ function mechanicalTaskChange(
   });
 }
 
+type DeliveryTerminalState = "none" | "completion" | "invalidation" | "invalid";
+
+interface AcceptedDeliveryFact {
+  readonly cycle_id: CycleIssueId;
+  readonly terminal_state: DeliveryTerminalState;
+}
+
+function validRecord(value: TaskIssueRecordObservation): value is Exclude<TaskIssueRecordObservation, {
+  readonly observation_kind: string;
+}> {
+  return !("observation_kind" in value);
+}
+
+function exactRecord(
+  task: TaskSnapshot,
+  recordId: string,
+): TaskIssueRecordObservation | undefined {
+  const matches = task.issue_record_observations.filter(({ record_id }) => record_id === recordId);
+  if (matches.length > 1) throw new Error("delivery_record_slot_ambiguous");
+  return matches[0];
+}
+
+function deliverySlotState(
+  task: TaskSnapshot,
+  recordId: string,
+  expectedKind: "delivery_completion" | "delivery_invalidation",
+): DeliveryTerminalState {
+  const record = exactRecord(task, recordId);
+  if (record === undefined) return "none";
+  if (!validRecord(record) || record.record_kind !== expectedKind) return "invalid";
+  return expectedKind === "delivery_completion" ? "completion" : "invalidation";
+}
+
+function acceptedDeliveryFact(
+  task: TaskSnapshot,
+  cycle: TaskIssueSnapshot,
+): AcceptedDeliveryFact | null {
+  if (cycle.status !== "Succeeded") return null;
+  const cycleRecords = task.issue_record_observations.filter(({ issue_id }) => issue_id === cycle.issue_id);
+  const approvals = cycleRecords.filter((record): record is CycleApprovalRecord => (
+    validRecord(record) && record.record_kind === "cycle_approval"
+  ));
+  if (approvals.length === 0) return null;
+  if (approvals.length !== 1) throw new Error("delivery_approval_ambiguous");
+  const approval = approvals[0]!;
+  const accepted = exactRecord(task, approval.cycle_completion_record_id);
+  if (
+    accepted === undefined
+    || !validRecord(accepted)
+    || accepted.record_kind !== "cycle_completion"
+    || accepted.issue_id !== cycle.issue_id
+    || accepted.cycle_id !== cycle.issue_id
+    || accepted.basis_status !== "Awaiting Acceptance"
+    || accepted.successor_policy !== "not_applicable"
+    || accepted.completion.outcome !== "accepted"
+  ) return null;
+  const invalidation = deliverySlotState(task, approval.delivery_invalidation_record_id, "delivery_invalidation");
+  if (invalidation === "invalidation") {
+    return Object.freeze({ cycle_id: parseCycleIssueId(cycle.issue_id), terminal_state: "invalidation" });
+  }
+  if (invalidation === "invalid") {
+    return Object.freeze({ cycle_id: parseCycleIssueId(cycle.issue_id), terminal_state: "invalid" });
+  }
+  const completion = deliverySlotState(task, approval.delivery_completion_record_id, "delivery_completion");
+  return Object.freeze({
+    cycle_id: parseCycleIssueId(cycle.issue_id),
+    terminal_state: completion === "completion" || completion === "invalid" ? completion : "none",
+  });
+}
+
 export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
   const root = rootIssue(input.task);
+  if (root.status_id === input.root_states.failed && input.permanent_quarantine !== true) {
+    const selected = match("WF-ROUTE-014", null);
+    return Object.freeze({ selected, matches: Object.freeze([selected]) });
+  }
   const rootId = parseTaskIssueId(input.task.root_id);
   const cycles = input.task.issues
     .filter(({ parent_issue_id, label_ids }) => (
@@ -174,11 +274,29 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
     || status === "awaiting_acceptance");
   const active = nonTerminal[0];
   const activeCycleId = active === undefined ? null : parseCycleIssueId(active.issue.issue_id);
+  const acceptedDeliveries = cycles
+    .map(({ issue, status }) => status === "succeeded" ? acceptedDeliveryFact(input.task, issue) : null)
+    .filter((fact): fact is AcceptedDeliveryFact => fact !== null);
+  if (acceptedDeliveries.length > 1) throw new Error("multiple_accepted_delivery_cycles");
+  const acceptedDelivery = acceptedDeliveries[0] ?? null;
   const admitted = root.delegate_id === input.agent_actor_id;
   const matches: FreshRouteMatch[] = [];
   const origins = new Map(input.task_change_origins.map(({ issue_id, change_origin }) => [issue_id, change_origin]));
 
   if (input.permanent_quarantine === true) matches.push(match("WF-ROUTE-016", null));
+
+  if (acceptedDelivery !== null) {
+    if (acceptedDelivery.terminal_state === "invalid") {
+      matches.push(match("WF-ROUTE-016", acceptedDelivery.cycle_id));
+    } else if (acceptedDelivery.terminal_state === "none") {
+      matches.push(match(
+        root.status_id === input.root_states.done ? "WF-ROUTE-012" : "WF-ROUTE-010",
+        acceptedDelivery.cycle_id,
+      ));
+    } else if (acceptedDelivery.terminal_state === "invalidation" && root.status_id !== input.root_states.done) {
+      matches.push(match("WF-ROUTE-010", acceptedDelivery.cycle_id));
+    }
+  }
 
   if (nonTerminal.length > 1) {
     matches.push(match("WF-ROUTE-009", null));
@@ -187,7 +305,7 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
       .filter(({ parent_issue_id }) => parent_issue_id === active.issue.issue_id)
       .map(({ issue_id }) => issue_id));
     const mutated = sealedMutation(input.task_changes, active.issue, stageIds, origins);
-    if (externallyTerminalized(input.task_changes, active.issue)) {
+    if (externallyTerminalized(input.task, input.task_changes, active.issue, input.task_change_origins)) {
       matches.push(match("WF-ROUTE-018", activeCycleId));
     }
     if (root.status_id === input.root_states.done) {
@@ -225,10 +343,12 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
     const terminal = cycles.at(-1);
     if (terminal !== undefined) {
       const terminalId = parseCycleIssueId(terminal.issue.issue_id);
-      if (externallyTerminalized(input.task_changes, terminal.issue)) {
+      if (externallyTerminalized(input.task, input.task_changes, terminal.issue, input.task_change_origins)) {
         matches.push(match("WF-ROUTE-018", terminalId));
       }
-      matches.push(match("WF-ROUTE-008", terminalId));
+      if (acceptedDelivery === null || acceptedDelivery.terminal_state === "none") {
+        matches.push(match("WF-ROUTE-008", terminalId));
+      }
     } else if (root.status_id === input.root_states.todo || root.status_id === input.root_states.in_progress) {
       matches.push(match("WF-ROUTE-001", null));
     }
