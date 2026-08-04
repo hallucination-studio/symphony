@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { LinearClient, LinearErrorType } from "@linear/sdk";
@@ -193,7 +193,12 @@ function initialRootDescription(runId, fixtureDirectory) {
   ].join("\n");
 }
 
-async function createLinearFixture(access, runId, fixtureDirectory) {
+async function createLinearFixture(
+  access,
+  runId,
+  fixtureDirectory,
+  description = initialRootDescription(runId, fixtureDirectory),
+) {
   const client = humanClient(access);
   const createdStateIds = [];
   const rootId = randomUUID();
@@ -234,7 +239,6 @@ async function createLinearFixture(access, runId, fixtureDirectory) {
       uniqueByName(catalog.labels, name, `missing_label_${name}`).id,
     ]));
     const agentActorId = await symphonyActor(client);
-    const description = initialRootDescription(runId, fixtureDirectory);
     const receipt = await client.createIssue({
       id: rootId,
       teamId: team.id,
@@ -609,6 +613,12 @@ function kindOf(issue, labels) {
   return matches[0].slice("symphony:kind/".length);
 }
 
+function recordOfKind(records, kind, code) {
+  const matches = records.filter((record) => record.record_kind === kind);
+  assert.equal(matches.length, 1, code);
+  return matches[0];
+}
+
 function transitionTime(histories, issueId, stateId, code) {
   const transition = histories[issueId]?.find((entry) => entry.toStateId === stateId);
   assert.ok(transition, code);
@@ -679,7 +689,7 @@ function assertExecutionHistory(tree, histories, linear) {
   return { firstWork, secondWork, verify };
 }
 
-async function waitForInReview(fixtures, linear, deadline, signal) {
+async function waitForTree(fixtures, linear, predicate, deadline, signal, timeoutCode) {
   let latest;
   let consecutiveTransientFailures = 0;
   while (Date.now() < deadline) {
@@ -704,12 +714,25 @@ async function waitForInReview(fixtures, linear, deadline, signal) {
     consecutiveTransientFailures = 0;
     latest = observation.tree;
     assert.ok(latest, "linear_poll_tree_missing");
-    if (latest.root.state === "In Review") return latest;
-    const terminalFailure = latest.cycles.some((cycle) => ["Rejected", "Failed", "Canceled"].includes(cycle.state));
-    assert.equal(terminalFailure, false, "cycle_reached_unexpected_terminal_state");
+    if (predicate(latest)) return latest;
     await delay(POLL_INTERVAL_MS, undefined, { signal });
   }
-  throw new Error("accepted_root_scenario_timed_out");
+  throw new Error(timeoutCode);
+}
+
+async function waitForInReview(fixtures, linear, deadline, signal) {
+  return waitForTree(
+    fixtures,
+    linear,
+    (latest) => {
+      const terminalFailure = latest.cycles.some((cycle) => ["Rejected", "Failed", "Canceled"].includes(cycle.state));
+      assert.equal(terminalFailure, false, "cycle_reached_unexpected_terminal_state");
+      return latest.root.state === "In Review";
+    },
+    deadline,
+    signal,
+    "accepted_root_scenario_timed_out",
+  );
 }
 
 async function delegateRoot(access, fixture) {
@@ -718,6 +741,40 @@ async function delegateRoot(access, fixture) {
   assert.equal(receipt.success, true, "root_delegation_failed");
   const root = await client.issue(fixture.rootId);
   assert.equal(root.delegateId, fixture.agentActorId, "root_delegation_readback_mismatch");
+}
+
+async function updateIssueState(access, issueId, stateId, readbackCode = "external_state_update_failed") {
+  const client = humanClient(access);
+  const receipt = await client.updateIssue(issueId, { stateId });
+  assert.equal(receipt.success, true, readbackCode);
+  const issue = await client.issue(issueId);
+  assert.equal(issue.stateId, stateId, `${readbackCode}_readback_mismatch`);
+}
+
+async function updateIssueDescription(access, issueId, description) {
+  const client = humanClient(access);
+  const receipt = await client.updateIssue(issueId, { description });
+  assert.equal(receipt.success, true, "external_description_update_failed");
+  const issue = await client.issue(issueId);
+  assert.equal(issue.description, description, "external_description_update_readback_mismatch");
+}
+
+async function issueRecords(access, issueId) {
+  const client = humanClient(access);
+  const issue = await client.issue(issueId);
+  const comments = await issue.comments({ first: 100 });
+  assert.equal(comments.pageInfo.hasNextPage, false, "record_comment_page_incomplete");
+  return Object.freeze(comments.nodes.map((comment) => {
+    const tree = fromMarkdown(comment.body);
+    const code = tree.children?.find((node) => node.type === "code" && node.lang === "json");
+    if (code?.type !== "code" || typeof code.value !== "string") return null;
+    try {
+      const record = JSON.parse(code.value);
+      return record !== null && typeof record === "object" && !Array.isArray(record) ? record : null;
+    } catch {
+      return null;
+    }
+  }).filter((record) => record !== null));
 }
 
 async function gitEvidence(fixture, fixtureDirectory) {
@@ -791,7 +848,8 @@ test("execution graph requires exactly one Work blocks relation", () => {
   );
 });
 
-test("external Root reaches accepted multi-Work delivery through public boundaries", {
+function registerAcceptedRootScenario() {
+  test("RM-E2E-001..007 external Root reaches accepted multi-Work delivery through public boundaries", {
   timeout: NODE_TEST_TIMEOUT_MS,
 }, async () => {
   const runId = `e7-${randomUUID().replaceAll("-", "")}`;
@@ -869,6 +927,70 @@ test("external Root reaches accepted multi-Work delivery through public boundari
       const delivered = await fixtures.operate(() => gitEvidence(git, fixtureDirectory));
       assert.match(delivered.revision, /^[0-9a-f]{40}$/u);
       assert.match(delivered.pullRequestUrl, /^https:\/\/github\.com\//u);
+
+      const stageRecords = await Promise.all(cycle.stages.map(async (stage) => (
+        fixtures.operate((access) => issueRecords(access, stage.id))
+      )));
+      for (const [index, records] of stageRecords.entries()) {
+        const completion = recordOfKind(records, "stage_completion", `stage_completion_record_missing_${index}`);
+        assert.equal(completion.stage_id, cycle.stages[index].id, `stage_completion_owner_mismatch_${index}`);
+        assert.equal(completion.basis_status, "In Progress", `stage_completion_basis_mismatch_${index}`);
+      }
+      const cycleRecords = await fixtures.operate((access) => issueRecords(access, cycle.id));
+      const approval = recordOfKind(cycleRecords, "cycle_approval", "cycle_approval_record_missing");
+      assert.equal(approval.cycle_id, cycle.id, "cycle_approval_owner_mismatch");
+      const completion = recordOfKind(cycleRecords, "cycle_completion", "cycle_completion_record_missing");
+      assert.equal(completion.successor_policy, "not_applicable", "accepted_successor_policy_mismatch");
+      assert.equal(completion.completion.outcome, "accepted", "accepted_cycle_outcome_missing");
+      const acceptanceProof = completion.completion.acceptance_convergence_proof;
+      assert.equal(acceptanceProof.proof_scope, "acceptance", "acceptance_proof_scope_mismatch");
+      assert.equal(acceptanceProof.observation_order, "linear -> git -> linear -> git");
+      assert.deepEqual(acceptanceProof.first_round, acceptanceProof.second_round);
+
+      const rootRecords = await fixtures.operate((access) => issueRecords(access, linear.rootId));
+      const delivery = recordOfKind(rootRecords, "delivery_completion", "delivery_completion_record_missing");
+      assert.equal(delivery.root_id, linear.rootId, "delivery_record_root_mismatch");
+      assert.equal(delivery.accepted_cycle_id, cycle.id, "delivery_record_cycle_mismatch");
+      assert.equal(delivery.exact_revision, delivery.observed_remote_revision, "delivery_revision_mismatch");
+      assert.equal(delivery.exact_revision, delivery.observed_pull_request_head, "delivery_pr_revision_mismatch");
+      assert.equal(delivery.observed_pull_request_identity, delivered.pullRequestUrl, "delivery_pr_identity_mismatch");
+      const deliveryProof = delivery.convergence_proof;
+      assert.equal(deliveryProof.proof_scope, "delivery", "delivery_proof_scope_mismatch");
+      assert.equal(
+        deliveryProof.observation_order,
+        "linear -> git -> delivery -> linear -> git -> delivery",
+      );
+      assert.deepEqual(deliveryProof.first_round, deliveryProof.second_round);
     },
   });
-});
+  });
+}
+
+export {
+  CYCLE_SECTIONS,
+  KIND_LABEL_NAMES,
+  NODE_TEST_TIMEOUT_MS,
+  ROOT_SECTIONS,
+  SCENARIO_TIMEOUT_MS,
+  cleanupGitFixture,
+  cleanupLinearFixture,
+  command,
+  conductorConfiguration,
+  createGitFixture,
+  createLinearFixture,
+  delegateRoot,
+  headBranch,
+  initialRootDescription,
+  issueHistory,
+  issueRecords,
+  readRootTree,
+  remoteRevision,
+  updateIssueDescription,
+  updateIssueState,
+  waitForInReview,
+  waitForTree,
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  registerAcceptedRootScenario();
+}
