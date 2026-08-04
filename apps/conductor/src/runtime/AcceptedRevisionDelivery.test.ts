@@ -9,11 +9,14 @@ import {
   parseRuntimeGeneration,
   parseTaskIssueId,
   parseTaskLabelId,
-  parseTaskRevision,
   parseTaskStateId,
 } from "../contracts/identity.js";
 import type { PullRequestSnapshot } from "../contracts/observation.js";
-import type { TaskIssueSnapshot } from "../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  type TaskIssueSnapshot,
+} from "../contracts/task-management.js";
 import { parseMarkdownText } from "../contracts/validation.js";
 import type {
   DeliverRevisionRequest,
@@ -49,6 +52,7 @@ const otherRevision = parseRevision("b".repeat(40));
 const rootLabel = parseTaskLabelId("label:root");
 const rootInProgress = parseTaskStateId("state:root-in-progress");
 const rootInReview = parseTaskStateId("state:root-in-review");
+const rootDone = parseTaskStateId("state:root-done");
 const identity = createDeliveryIdentity({
   provider: "github",
   root_id: rootId,
@@ -142,17 +146,22 @@ class FakeDelivery implements DeliveryInterface {
   }
 }
 
-function rootIssue(statusId = rootInProgress, taskRevision = "revision:root:1"): TaskIssueSnapshot {
-  return {
+function rootIssue(
+  statusId = rootInProgress,
+  title = "D5 Root",
+): TaskIssueSnapshot {
+  const status: TaskIssueSnapshot["status"] = statusId === rootInReview
+    ? "In Review"
+    : statusId === rootDone ? "Done" : "In Progress";
+  const fields = {
     issue_id: parseTaskIssueId(rootId),
-    revision: parseTaskRevision(taskRevision),
     provider_created_at: "2026-08-03T00:00:00.000Z",
     provider_updated_at: "2026-08-03T00:00:00.000Z",
     creation_actor_id: "actor:symphony",
     kind: "root",
     status_id: statusId,
-    status: statusId === rootInReview ? "In Review" : "In Progress",
-    title: "D5 Root",
+    status,
+    title,
     description_markdown: parseMarkdownText("# Root\n\nDeliver the accepted revision."),
     parent_issue_id: null,
     label_ids: [rootLabel],
@@ -161,6 +170,10 @@ function rootIssue(statusId = rootInProgress, taskRevision = "revision:root:1"):
     archived: false,
     trashed: false,
   };
+  return parseTaskIssueSnapshotChange({
+    ...fields,
+    revision: canonicalTaskRevision(fields),
+  });
 }
 
 class FakeTaskManager implements TaskManageCommandInterface {
@@ -193,10 +206,10 @@ class FakeTaskManager implements TaskManageCommandInterface {
     assert.deepEqual(call.input.desired, { state_id: rootInReview });
     const before = this.current;
     if (this.materializeUpdate) {
-      this.current = rootIssue(rootInReview, "revision:root:in-review");
+      this.current = rootIssue(rootInReview);
     }
     const receiptResource = this.substituteAppliedReceipt
-      ? { ...this.current, title: "Substituted Root" }
+      ? rootIssue(rootInReview, "Substituted Root")
       : this.current;
     return Promise.resolve(parseTaskMcpResult({
       schema_version: 1,
@@ -406,7 +419,7 @@ test("a conflicting Root status cannot be replaced after exact delivery", async 
   const f = fixture();
   f.delivery.remoteRevision = revision;
   f.delivery.pullRequests = [pullRequest()];
-  f.task.current = rootIssue(parseTaskStateId("state:root-done"), "revision:root:done");
+  f.task.current = rootIssue(rootDone);
 
   const result = await f.coordinator.deliver(f.authorization, correlationId, liveExecution);
 

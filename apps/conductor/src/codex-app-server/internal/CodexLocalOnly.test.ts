@@ -75,6 +75,16 @@ async function assertDirectoryExcludes(directory: string, forbidden: string): Pr
   }
 }
 
+function isCodexSandboxSetupUnavailable(error: unknown): boolean {
+  const failure = error as {
+    readonly code?: unknown;
+    readonly stderr?: unknown;
+  };
+  return failure.code === 71
+    && typeof failure.stderr === "string"
+    && /^sandbox-exec: sandbox_apply: Operation not permitted\n?$/u.test(failure.stderr);
+}
+
 function fakeSpawner(
   mutate?: (method: string, response: Record<string, unknown>) => Record<string, unknown>,
 ) {
@@ -873,75 +883,156 @@ test("installed Codex sandbox enforces the Root filesystem profile without parti
     GCM_INTERACTIVE: "never",
   };
   const probeScript = String.raw`
-    const fs = require("node:fs/promises");
+    const childProcess = require("node:child_process");
     const path = require("node:path");
+    const operationScript = String.raw${"`"}
+      const fs = require("node:fs");
+      const zlib = require("node:zlib");
+      const [name, ...args] = process.argv.slice(1);
+      const operations = {
+        code_read: () => fs.readFileSync(args[0], "utf8"),
+        code_search: () => fs.readdirSync(args[0]),
+        create: () => fs.writeFileSync(args[0], "created\\n"),
+        update: () => fs.appendFileSync(args[0], "changed\\n"),
+        delete: () => fs.unlinkSync(args[0]),
+        chmod: () => fs.chmodSync(args[0], 0o600),
+        env_read: () => fs.readFileSync(args[0], "utf8"),
+        arbitrary_private_key_read: () => fs.readFileSync(args[0], "utf8"),
+        key_read: () => fs.readFileSync(args[0], "utf8"),
+        putty_key_read: () => fs.readFileSync(args[0], "utf8"),
+        java_keystore_read: () => fs.readFileSync(args[0], "utf8"),
+        pk8_key_read: () => fs.readFileSync(args[0], "utf8"),
+        backup_key_read: () => fs.readFileSync(args[0], "utf8"),
+        credentials_read: () => fs.readFileSync(args[0], "utf8"),
+        gcloud_credentials_read: () => fs.readFileSync(args[0], "utf8"),
+        nested_gitconfig_read: () => fs.readFileSync(args[0], "utf8"),
+        nested_git_config_read: () => fs.readFileSync(args[0], "utf8"),
+        terraform_credentials_read: () => fs.readFileSync(args[0], "utf8"),
+        deep_env_read: () => fs.readFileSync(args[0], "utf8"),
+        git_config_read: () => fs.readFileSync(args[0], "utf8"),
+        git_head_read: () => fs.readFileSync(args[0], "utf8"),
+        git_object_read: () => zlib.inflateSync(fs.readFileSync(args[0])).toString("utf8"),
+        root_auth_read: () => fs.readFileSync(args[0], "utf8"),
+        root_profile_read: () => fs.readFileSync(args[0], "utf8"),
+        root_profile_overwrite: () => fs.writeFileSync(args[0], "changed\\n"),
+        root_profile_create: () => fs.writeFileSync(args[0], "created\\n"),
+        root_sqlite_read: () => fs.readFileSync(args[0], "utf8"),
+        root_thread_history_read: () => fs.readFileSync(args[0], "utf8"),
+        root_models_cache_read: () => fs.readFileSync(args[0], "utf8"),
+        root_installation_read: () => fs.readFileSync(args[0], "utf8"),
+        root_import_state_read: () => fs.readFileSync(args[0], "utf8"),
+        root_agents_read: () => fs.readFileSync(args[0], "utf8"),
+        root_tmp_read: () => fs.readFileSync(args[0], "utf8"),
+        root_db_backup_read: () => fs.readFileSync(args[0], "utf8"),
+        root_memory_read: () => fs.readFileSync(args[0], "utf8"),
+        root_writer_lock_read: () => fs.readFileSync(args[0], "utf8"),
+        root_authority_write: () => fs.writeFileSync(args[0], "changed\\n"),
+        root_authority_rename: () => fs.renameSync(args[0], args[1]),
+        root_authority_delete: () => fs.rmdirSync(args[0]),
+        root_global_state_read: () => fs.readFileSync(args[0], "utf8"),
+        root_rules_read: () => fs.readFileSync(args[0], "utf8"),
+        root_state_read: () => fs.readFileSync(args[0], "utf8"),
+        code_link_create: () => fs.symlinkSync(args[0], args[1]),
+        outside_link_create: () => fs.symlinkSync(args[0], args[1]),
+        code_write_via_root_link: () => fs.appendFileSync(args[0], "changed\\n"),
+        outside_read_via_root_link: () => fs.readFileSync(args[0], "utf8"),
+        root_home_write: () => fs.writeFileSync(args[0], "allowed\\n"),
+        outside_write: () => fs.writeFileSync(args[0], "outside\\n"),
+        slash_tmp_write: () => fs.writeFileSync(args[0], "temporary\\n"),
+      };
+      try {
+        const operation = operations[name];
+        if (typeof operation !== "function") throw new Error("unknown_operation");
+        operation();
+        process.stdout.write(JSON.stringify({ ok: true }));
+      } catch (error) {
+        process.stdout.write(JSON.stringify({
+          ok: false,
+          code: error && error.code || null,
+        }));
+      }
+    ${"`"};
     const [workspace, rootHome, outside, slashTmp, deeplyNested, secretObject] = process.argv.slice(1);
+    const code = path.join(workspace, "src", "code.ts");
+    const operations = [
+      ["code_read", [code]],
+      ["code_search", [path.join(workspace, "src")]],
+      ["create", [path.join(workspace, "created.txt")]],
+      ["update", [code]],
+      ["delete", [path.join(workspace, "obsolete.txt")]],
+      ["chmod", [code]],
+      ["env_read", [path.join(workspace, "nested", ".env.production")]],
+      ["arbitrary_private_key_read", [path.join(workspace, "notes.txt")]],
+      ["key_read", [path.join(workspace, "nested", "certs", "deploy.pem")]],
+      ["putty_key_read", [path.join(workspace, "nested", "certs", "identity.ppk")]],
+      ["java_keystore_read", [path.join(workspace, "nested", "certs", "keystore.jks")]],
+      ["pk8_key_read", [path.join(workspace, "nested", "certs", "key.pk8")]],
+      ["backup_key_read", [path.join(workspace, "nested", "certs", "id_rsa.bak")]],
+      ["credentials_read", [path.join(workspace, "nested", "auth", "credentials.json")]],
+      ["gcloud_credentials_read", [path.join(workspace, "nested", "auth", "application_default_credentials.json")]],
+      ["nested_gitconfig_read", [path.join(workspace, "nested", ".gitconfig")]],
+      ["nested_git_config_read", [path.join(workspace, "nested", ".config", "git", "config")]],
+      ["terraform_credentials_read", [path.join(workspace, "nested", ".terraform.d", "credentials.tfrc.json")]],
+      ["deep_env_read", [path.join(deeplyNested, ".env.deep")]],
+      ["git_config_read", [path.join(workspace, ".git", "config")]],
+      ["git_head_read", [path.join(workspace, ".git", "HEAD")]],
+      ["git_object_read", [secretObject]],
+      ["root_auth_read", [path.join(rootHome, "auth.json")]],
+      ["root_profile_read", [path.join(rootHome, "review.config.toml")]],
+      ["root_profile_overwrite", [path.join(rootHome, "review.config.toml")]],
+      ["root_profile_create", [path.join(rootHome, "new.config.toml")]],
+      ["root_sqlite_read", [path.join(rootHome, "state_5.sqlite")]],
+      ["root_thread_history_read", [path.join(rootHome, "thread_history_1.sqlite")]],
+      ["root_models_cache_read", [path.join(rootHome, "models_cache.json")]],
+      ["root_installation_read", [path.join(rootHome, "installation_id")]],
+      ["root_import_state_read", [path.join(rootHome, "external_agent_session_imports.json")]],
+      ["root_agents_read", [path.join(rootHome, "AGENTS.md")]],
+      ["root_tmp_read", [path.join(rootHome, ".tmp", "plugins.sha")]],
+      ["root_db_backup_read", [path.join(rootHome, "db-backups", "state.sqlite")]],
+      ["root_memory_read", [path.join(rootHome, "memories", "memory.md")]],
+      ["root_writer_lock_read", [path.join(rootHome, "thread-writer-locks", "thread.lock")]],
+      ["root_authority_write", [path.join(rootHome, ".symphony-root-authority", "claim")]],
+      ["root_authority_rename", [path.join(rootHome, ".symphony-root-authority"), path.join(rootHome, "moved-authority")]],
+      ["root_authority_delete", [path.join(rootHome, ".symphony-root-authority")]],
+      ["root_global_state_read", [path.join(rootHome, ".codex-global-state.json")]],
+      ["root_rules_read", [path.join(rootHome, "rules", "default.rules")]],
+      ["root_state_read", [path.join(rootHome, "symphony", "continuity.json")]],
+      ["code_link_create", [code, path.join(rootHome, "code-link")]],
+      ["outside_link_create", [path.join(outside, "existing.txt"), path.join(rootHome, "outside-link")]],
+      ["code_write_via_root_link", [path.join(rootHome, "code-link")]],
+      ["outside_read_via_root_link", [path.join(rootHome, "outside-link")]],
+      ["root_home_write", [path.join(rootHome, "result.md")]],
+      ["outside_write", [path.join(outside, "created.txt")]],
+      ["slash_tmp_write", [path.join(slashTmp, "created.txt")]],
+    ];
     const results = {};
-    async function attempt(name, operation) {
-      try { results[name] = { ok: true, value: await operation() }; }
-      catch (error) { results[name] = { ok: false, code: error && error.code || null }; }
+    for (const [name, args] of operations) {
+      const child = childProcess.spawnSync(
+        process.execPath,
+        ["-e", operationScript, name, ...args],
+        { encoding: "utf8" },
+      );
+      if (child.error !== undefined) {
+        results[name] = {
+          ok: false,
+          child_error: child.error && child.error.code || null,
+        };
+      } else try {
+        results[name] = JSON.parse(child.stdout);
+      } catch {
+        results[name] = {
+          ok: false,
+          child_status: child.status,
+          child_signal: child.signal,
+        };
+      }
     }
-    (async () => {
-      const code = path.join(workspace, "src", "code.ts");
-      await attempt("code_read", () => fs.readFile(code, "utf8"));
-      await attempt("code_search", async () => (await fs.readdir(path.join(workspace, "src"))).sort());
-      await attempt("create", () => fs.writeFile(path.join(workspace, "created.txt"), "created\n"));
-      await attempt("update", () => fs.appendFile(code, "changed\n"));
-      await attempt("delete", () => fs.unlink(path.join(workspace, "obsolete.txt")));
-      await attempt("chmod", () => fs.chmod(code, 0o600));
-      await attempt("env_read", () => fs.readFile(path.join(workspace, "nested", ".env.production"), "utf8"));
-      await attempt("arbitrary_private_key_read", () => fs.readFile(path.join(workspace, "notes.txt"), "utf8"));
-      await attempt("key_read", () => fs.readFile(path.join(workspace, "nested", "certs", "deploy.pem"), "utf8"));
-      await attempt("putty_key_read", () => fs.readFile(path.join(workspace, "nested", "certs", "identity.ppk"), "utf8"));
-      await attempt("java_keystore_read", () => fs.readFile(path.join(workspace, "nested", "certs", "keystore.jks"), "utf8"));
-      await attempt("pk8_key_read", () => fs.readFile(path.join(workspace, "nested", "certs", "key.pk8"), "utf8"));
-      await attempt("backup_key_read", () => fs.readFile(path.join(workspace, "nested", "certs", "id_rsa.bak"), "utf8"));
-      await attempt("credentials_read", () => fs.readFile(path.join(workspace, "nested", "auth", "credentials.json"), "utf8"));
-      await attempt("gcloud_credentials_read", () => fs.readFile(path.join(workspace, "nested", "auth", "application_default_credentials.json"), "utf8"));
-      await attempt("nested_gitconfig_read", () => fs.readFile(path.join(workspace, "nested", ".gitconfig"), "utf8"));
-      await attempt("nested_git_config_read", () => fs.readFile(path.join(workspace, "nested", ".config", "git", "config"), "utf8"));
-      await attempt("terraform_credentials_read", () => fs.readFile(path.join(workspace, "nested", ".terraform.d", "credentials.tfrc.json"), "utf8"));
-      await attempt("deep_env_read", () => fs.readFile(path.join(deeplyNested, ".env.deep"), "utf8"));
-      await attempt("git_config_read", () => fs.readFile(path.join(workspace, ".git", "config"), "utf8"));
-      await attempt("git_head_read", () => fs.readFile(path.join(workspace, ".git", "HEAD"), "utf8"));
-      await attempt("git_object_read", async () => require("node:zlib").inflateSync(
-        await fs.readFile(secretObject),
-      ).toString("utf8"));
-      await attempt("root_auth_read", () => fs.readFile(path.join(rootHome, "auth.json"), "utf8"));
-      await attempt("root_profile_read", () => fs.readFile(path.join(rootHome, "review.config.toml"), "utf8"));
-      await attempt("root_profile_overwrite", () => fs.writeFile(path.join(rootHome, "review.config.toml"), "changed\n"));
-      await attempt("root_profile_create", () => fs.writeFile(path.join(rootHome, "new.config.toml"), "created\n"));
-      await attempt("root_sqlite_read", () => fs.readFile(path.join(rootHome, "state_5.sqlite"), "utf8"));
-      await attempt("root_thread_history_read", () => fs.readFile(path.join(rootHome, "thread_history_1.sqlite"), "utf8"));
-      await attempt("root_models_cache_read", () => fs.readFile(path.join(rootHome, "models_cache.json"), "utf8"));
-      await attempt("root_installation_read", () => fs.readFile(path.join(rootHome, "installation_id"), "utf8"));
-      await attempt("root_import_state_read", () => fs.readFile(path.join(rootHome, "external_agent_session_imports.json"), "utf8"));
-      await attempt("root_agents_read", () => fs.readFile(path.join(rootHome, "AGENTS.md"), "utf8"));
-      await attempt("root_tmp_read", () => fs.readFile(path.join(rootHome, ".tmp", "plugins.sha"), "utf8"));
-      await attempt("root_db_backup_read", () => fs.readFile(path.join(rootHome, "db-backups", "state.sqlite"), "utf8"));
-      await attempt("root_memory_read", () => fs.readFile(path.join(rootHome, "memories", "memory.md"), "utf8"));
-      await attempt("root_writer_lock_read", () => fs.readFile(path.join(rootHome, "thread-writer-locks", "thread.lock"), "utf8"));
-      await attempt("root_authority_write", () => fs.writeFile(path.join(rootHome, ".symphony-root-authority", "claim"), "changed\n"));
-      await attempt("root_authority_rename", () => fs.rename(
-        path.join(rootHome, ".symphony-root-authority"),
-        path.join(rootHome, "moved-authority"),
-      ));
-      await attempt("root_authority_delete", () => fs.rmdir(path.join(rootHome, ".symphony-root-authority")));
-      await attempt("root_global_state_read", () => fs.readFile(path.join(rootHome, ".codex-global-state.json"), "utf8"));
-      await attempt("root_rules_read", () => fs.readFile(path.join(rootHome, "rules", "default.rules"), "utf8"));
-      await attempt("root_state_read", () => fs.readFile(path.join(rootHome, "symphony", "continuity.json"), "utf8"));
-      await attempt("code_link_create", () => fs.symlink(code, path.join(rootHome, "code-link")));
-      await attempt("outside_link_create", () => fs.symlink(path.join(outside, "existing.txt"), path.join(rootHome, "outside-link")));
-      await attempt("code_write_via_root_link", () => fs.appendFile(path.join(rootHome, "code-link"), "changed\n"));
-      await attempt("outside_read_via_root_link", () => fs.readFile(path.join(rootHome, "outside-link"), "utf8"));
-      await attempt("root_home_write", () => fs.writeFile(path.join(rootHome, "result.md"), "allowed\n"));
-      await attempt("outside_write", () => fs.writeFile(path.join(outside, "created.txt"), "outside\n"));
-      await attempt("slash_tmp_write", () => fs.writeFile(path.join(slashTmp, "created.txt"), "temporary\n"));
-      process.stdout.write(JSON.stringify(results));
-    })().catch(() => process.exit(2));
+    process.stdout.write(JSON.stringify(results));
   `;
-  await assert.rejects(
-    execFileAsync("codex", [
+  let probe: { readonly stdout: string; readonly stderr: string } | undefined;
+  let sandboxUnavailable = false;
+  try {
+    probe = await execFileAsync("codex", [
       ...sandboxArguments,
       "--",
       process.execPath,
@@ -965,15 +1056,32 @@ test("installed Codex sandbox enforces the Root filesystem profile without parti
       maxBuffer: 1024 * 1024,
       timeout: 20_000,
       env: sandboxEnvironment,
-    }),
-    (error: unknown) => {
-      const failure = error as { readonly code?: unknown; readonly stdout?: unknown };
-      if (process.platform === "darwin") assert.equal(failure.code, 134);
-      else assert.notEqual(failure.code, 0);
-      assert.equal(failure.stdout, "");
-      return true;
-    },
-  );
+    });
+  } catch (error) {
+    if (!isCodexSandboxSetupUnavailable(error)) throw new Error("codex_sandbox_probe_failed");
+    sandboxUnavailable = true;
+  }
+  if (!sandboxUnavailable) {
+    assert.ok(probe);
+    assert.equal(probe.stderr, "");
+    const results = JSON.parse(probe.stdout) as Record<string, {
+      readonly ok?: unknown;
+      readonly code?: unknown;
+      readonly child_signal?: unknown;
+    }>;
+    for (const name of [
+      "create", "update", "delete", "chmod", "root_profile_overwrite", "root_profile_create",
+      "root_authority_write", "root_authority_rename", "root_authority_delete", "code_link_create",
+      "outside_link_create", "code_write_via_root_link", "root_home_write", "outside_write", "slash_tmp_write",
+    ]) {
+      assert.equal(results[name]?.ok, false, name);
+      assert.equal(
+        typeof results[name]?.code === "string" || typeof results[name]?.child_signal === "string",
+        true,
+        name,
+      );
+    }
+  }
   await assert.rejects(readFile(path.join(canonicalWorkspace, "created.txt"), "utf8"), { code: "ENOENT" });
   assert.equal(await readFile(path.join(canonicalWorkspace, "src", "code.ts"), "utf8"), "export const exact = 21 * 2;\n");
   assert.equal(await readFile(path.join(canonicalWorkspace, "obsolete.txt"), "utf8"), "keep me\n");
@@ -988,4 +1096,5 @@ test("installed Codex sandbox enforces the Root filesystem profile without parti
   await assert.rejects(stat(path.join(canonicalRootHome, "outside-link")), { code: "ENOENT" });
   await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
   await assert.rejects(readFile(path.join(canonicalSlashTmp, "created.txt"), "utf8"), { code: "ENOENT" });
+  if (sandboxUnavailable) context.skip("codex_sandbox_unavailable: sandbox_apply_operation_not_permitted");
 });

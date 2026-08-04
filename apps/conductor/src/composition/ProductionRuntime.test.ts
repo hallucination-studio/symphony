@@ -14,7 +14,6 @@ import {
   parseRootIssueId,
   parseRuntimeGeneration,
   parseTaskIssueId,
-  parseTaskRevision,
 } from "../contracts/identity.js";
 import { deriveCycleUuid } from "../contracts/cycle-identities.js";
 import { renderTaskIssueRecordProjectionMarkdown } from "../contracts/cycle-record-markdown.js";

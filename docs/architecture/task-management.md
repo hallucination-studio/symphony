@@ -42,6 +42,15 @@ flowchart TD
 | missing | `WF-FAIL-001` through `WF-FAIL-003` |
 | malformed、updated or archived | record kind and phase select `WF-FAIL-008`, `WF-FAIL-009`, `WF-FAIL-011` or `WF-FAIL-015` |
 
+An external terminal Stage is valid only when fresh normalized facts establish
+one last legal nonterminal status.
+
+The snapshot and grouped history provide `last_valid_basis_status` for the
+typed Stage invalidation basis.
+
+If it is not unique, keep the observation invalid; never fabricate
+`invalid_terminal`.
+
 ## Discovery table
 
 | Rule | Resource class | Discovery anchor | Required follow-up | Unsupported claim |
@@ -59,7 +68,7 @@ flowchart TD
 | `TM-SNAP-001` | Issue | identity/revision/times/creator/status<br>document/parent/labels/delegate/archive/trash | SDK object、raw metadata、credential | current workflow fact |
 | `TM-SNAP-002` | relation | exact ID/endpoints/type, canonical revision, provider times, creation evidence | mutation receipt | sealed graph check |
 | `TM-SNAP-003` | grouped Issue history | actor/origin, changed fields, endpoints, parent/label/archive changes, provider times | raw provider payload | conflict and lifecycle evidence, never per-mutation ordering |
-| `TM-SNAP-004` | record/terminal observation | valid closed record set with invalidation precedence<br>or external terminal plus no matching record evidence | fabricated completed document | transition evidence or pre-effect mechanical route |
+| `TM-SNAP-004` | record/terminal observation | valid closed record set with precedence<br>or external terminal with no matching record<br>and validated `last_valid_basis_status` (`Todo` or `In Progress`) | fabricated completed document<br>guessed status basis or strict mutation-order inference | transition evidence or pre-effect mechanical route<br>ambiguous basis is an invalid observation |
 | `TM-SNAP-005` | canonical revision | versioned deterministic digest of all normalized fields and provider times | `updatedAt` alias or CAS claim | fresh basis and change detection |
 | `TM-SNAP-006` | workflow state map | exact team and one distinct state ID for every required semantic status | name inference、cached/default state | validate every Issue status pair and status mutation |
 

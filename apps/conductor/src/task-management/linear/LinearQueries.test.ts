@@ -238,7 +238,10 @@ test("startup inventory paginates every Root without delegate filtering in stabl
 
   const inventory = await new LinearQueries(client, options()).inventoryRoots();
   assert.ok(inventory.every(({ revision }) => /^symphony:v1:[0-9a-f]{64}$/u.test(revision)));
-  assert.deepEqual(inventory.map(({ revision: _revision, ...root }) => root), [
+  assert.deepEqual(inventory.map(({ revision: _revision, ...root }) => {
+    void _revision;
+    return root;
+  }), [
     {
       root_id: "root-1",
       status: "Todo",

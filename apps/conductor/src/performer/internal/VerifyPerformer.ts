@@ -137,6 +137,11 @@ function targetFrom(input: VerifyPerformerCreateInput): VerifyTarget {
 }
 
 function inconclusiveResult(request: VerifyRequest, sanitizedSummary: string): VerifyResult {
+  const summary = parseMarkdownText(
+    sanitizedSummary,
+    "invalid_verify_summary_markdown",
+    MAX_PERFORMER_SUMMARY_LENGTH,
+  );
   return Object.freeze({
     schema_version: 1,
     root_id: request.root_id,
@@ -149,11 +154,9 @@ function inconclusiveResult(request: VerifyRequest, sanitizedSummary: string): V
     revision: request.revision,
     conclusion: "inconclusive",
     checks: Object.freeze([]),
-    sanitized_summary_markdown: parseMarkdownText(
-      sanitizedSummary,
-      "invalid_verify_summary_markdown",
-      MAX_PERFORMER_SUMMARY_LENGTH,
-    ),
+    sanitized_summary_markdown: summary,
+    reason_code: "verify_inconclusive",
+    reason_markdown: summary,
   });
 }
 
@@ -178,6 +181,14 @@ function verifyPrompt(request: VerifyRequest): string {
 function attachVerifyEnvelope(output: unknown, request: VerifyRequest): Record<string, unknown> {
   const modelOutput = asRecord(output);
   assertExactKeys(modelOutput, MODEL_VERIFY_RESULT_KEYS);
+  const reason = modelOutput.conclusion === "failed"
+    ? { reason_markdown: modelOutput.sanitized_summary_markdown }
+    : modelOutput.conclusion === "inconclusive"
+      ? {
+        reason_code: "verify_inconclusive",
+        reason_markdown: modelOutput.sanitized_summary_markdown,
+      }
+      : {};
   return {
     schema_version: 1,
     root_id: request.root_id,
@@ -189,6 +200,7 @@ function attachVerifyEnvelope(output: unknown, request: VerifyRequest): Record<s
     verify_issue_revision: request.verify_issue_revision,
     revision: request.revision,
     ...modelOutput,
+    ...reason,
   };
 }
 

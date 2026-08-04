@@ -11,7 +11,7 @@ import {
   parseTaskRevision,
   parseTaskStateId,
 } from "../contracts/identity.js";
-import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
+import { canonicalTaskRevision, parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
 import type {
   TaskManageBoundaryExecution,
   TaskManageCommandInterface,
@@ -69,39 +69,71 @@ const workflow = parseTaskWorkflowIdentities({
 function issue(
   issueId: string,
   parentId: string | null,
-  revision: string,
-  status: string,
+  kind: "root" | "cycle" | "work" | "verify",
+  statusId: string,
+  status: "Todo" | "In Progress",
   label: string,
 ) {
-  return {
+  const fields = {
     issue_id: issueId,
-    revision,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    kind,
+    status_id: statusId,
     status,
     title: issueId,
-    description: `# ${issueId}`,
-    parent_id: parentId,
-    labels: [label],
+    description_markdown: `# ${issueId}`,
+    parent_issue_id: parentId,
+    label_ids: [label],
     delegate_id: null,
     priority: null,
+    archived: false,
+    trashed: false,
   };
+  return { ...fields, revision: canonicalTaskRevision(fields) };
 }
 
 function approvedSnapshot(): TaskSnapshot {
+  const workflowStateMap = {
+    team_id: "team:capability-test",
+    todo_state_id: workflow.stage_states.todo,
+    draft_state_id: workflow.cycle_states.draft,
+    in_progress_state_id: workflow.cycle_states.in_progress,
+    awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+    in_review_state_id: "state:root-in-review",
+    done_state_id: workflow.stage_states.done,
+    succeeded_state_id: workflow.cycle_states.succeeded,
+    rejected_state_id: workflow.cycle_states.rejected,
+    failed_state_id: workflow.cycle_states.failed,
+    canceled_state_id: workflow.cycle_states.canceled,
+  };
+  const relationFields = {
+    relation_id: "REL-A",
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    creation_evidence_id: "evidence:REL-A",
+    type: "blocks",
+    source_issue_id: "WORK-A",
+    target_issue_id: "VERIFY-A",
+  };
   return parseTaskSnapshot({
     root_id: rootId,
     issues: [
-      issue("ROOT-A", null, "revision:root:1", "state:root-in-progress", "label:root"),
-      issue("CYCLE-A", "ROOT-A", "revision:cycle:1", "state:cycle-in-progress", "label:cycle"),
-      issue("WORK-A", "CYCLE-A", "revision:work:1", "state:stage-in-progress", "label:work"),
-      issue("VERIFY-A", "CYCLE-A", "revision:verify:1", "state:stage-todo", "label:verify"),
+      issue("ROOT-A", null, "root", workflow.cycle_states.in_progress, "In Progress", workflow.labels.root),
+      issue("CYCLE-A", "ROOT-A", "cycle", workflow.cycle_states.in_progress, "In Progress", workflow.labels.cycle),
+      issue("WORK-A", "CYCLE-A", "work", workflow.stage_states.todo, "Todo", workflow.labels.work),
+      issue("VERIFY-A", "CYCLE-A", "verify", workflow.stage_states.todo, "Todo", workflow.labels.verify),
     ],
-    relations: [{
-      relation_id: "REL-A",
-      revision: "revision:relation:1",
-      type: "blocks",
-      source_issue_id: "WORK-A",
-      target_issue_id: "VERIFY-A",
-    }],
+    workflow_state_map: {
+      ...workflowStateMap,
+      revision: canonicalTaskRevision(workflowStateMap),
+    },
+    relations: [{ ...relationFields, revision: canonicalTaskRevision(relationFields) }],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
 }
 

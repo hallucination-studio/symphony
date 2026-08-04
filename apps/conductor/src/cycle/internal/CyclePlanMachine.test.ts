@@ -863,6 +863,15 @@ function controlledVerifyResult(
     : conclusion === "failed"
       ? "failed"
       : "not_run";
+  const reason = conclusion === "passed" ? {}
+    : conclusion === "failed" ? {
+      reason_markdown: `Controlled Verify failed: ${conclusion}.`,
+    } : conclusion === "inconclusive" ? {
+      reason_code: "controlled_verify_inconclusive",
+      reason_markdown: `Controlled Verify was ${conclusion}.`,
+    } : {
+      reason_markdown: `Controlled Verify was ${conclusion}.`,
+    };
   const value = {
     schema_version: 1 as const,
     root_id: request.root_id,
@@ -880,6 +889,7 @@ function controlledVerifyResult(
       sanitized_summary_markdown: null,
     }],
     sanitized_summary_markdown: `Controlled Verify concluded ${conclusion}.`,
+    ...reason,
   };
   return revision === request.revision
     ? parseVerifyResult(value, request)

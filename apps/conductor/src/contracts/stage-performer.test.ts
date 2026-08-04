@@ -6,6 +6,7 @@ import {
   parsePlanRequest,
   parsePlanResult,
   parseVerifyRequest,
+  parseVerifyResult,
   parseWorkRequest,
   parseWorkResult,
   parseWorkTurnResult,
@@ -139,4 +140,28 @@ test("Work turn keeps ephemeral continuation separate from the persistable compl
     completion_candidate: candidate,
     ephemeral_continuation_markdown: "Continuation is not allowed after the final Work.",
   }, request, false), /ephemeral_continuation_forbidden/u);
+});
+
+test("failed Verify requires a sanitized reason Markdown field", () => {
+  const request = parseVerifyRequest({
+    ...common,
+    cycle_revision: "symphony:v1:" + digest("a"),
+    verify_issue_id: "issue:verify:1",
+    verify_issue_revision: "symphony:v1:" + digest("d"),
+    cycle_specification_markdown: "# Cycle\n\nUse the sealed Verify directives.",
+    verify_instruction_markdown: "Verify every sealed directive exactly once.",
+    revision: digest("e"),
+  });
+  const failed = parseVerifyResult({
+    ...common,
+    input_request_digest: canonicalPerformerRequestDigest(request),
+    verify_issue_id: request.verify_issue_id,
+    revision: request.revision,
+    checks: [],
+    sanitized_summary_markdown: "Execution context was lost.",
+    conclusion: "failed",
+    reason_markdown: "lost_execution_context",
+  }, request);
+  assert.equal(failed.conclusion, "failed");
+  assert.equal(failed.reason_markdown, "lost_execution_context");
 });

@@ -1058,6 +1058,7 @@ StageDocumentCommon {
 ExternalTerminalStageObservation = StageDocumentCommon & {
   kind: plan | work | verify,
   status: Done | Failed | Canceled,
+  last_valid_basis_status: Todo | In Progress,
   projection_state: external_terminal_unrecorded,
   terminal_selection: NoTerminalRecordSelection,
   completion_record_observation:
@@ -1092,6 +1093,15 @@ StageAnyTerminalSelection<CycleId, StageId, InvalidationRecordId,
   StageAnyInvalidationRecord<CycleId, StageId, InvalidationRecordId>
 >
 ```
+
+For `external_terminal_unrecorded`, `last_valid_basis_status` is required
+fresh evidence for the `StageInvalidationRecord.basis_status`.
+
+The Task Manager derives it from fresh snapshot/history; it exists only when
+one `Todo | In Progress` basis is validated.
+
+An absent or ambiguous basis invalidates the observation; never guess. Grouped
+history is evidence, not strict mutation order.
 
 ### Stage projection mismatches
 
@@ -1368,7 +1378,7 @@ VerifyCompletionEvidence {
 }
 PassedVerifyCompletion = VerifyCompletionEvidence & { conclusion: passed }
 FailedVerifyCompletion = VerifyCompletionEvidence & (
-  { conclusion: failed } | {
+  { conclusion: failed, reason_markdown } | {
   conclusion: inconclusive,
   reason_code, reason_markdown
 })
@@ -1377,6 +1387,12 @@ CanceledVerifyCompletion = VerifyCompletionEvidence & {
 }
 VerifyCompletion = PassedVerifyCompletion | FailedVerifyCompletion | CanceledVerifyCompletion
 ```
+
+These rules persist `lost_execution_context` in required sanitized
+`reason_markdown` for failed Plan/Verify; no typed reason code is added.
+
+Markdown explains only. Routing uses typed outcome, phase, and fresh live
+context; it never parses text for failure or next action.
 
 ### Cycle completion payloads
 
@@ -1788,7 +1804,9 @@ VerifyResultEvidence {
   verify_issue_id, revision, checks, sanitized_summary_markdown
 }
 VerifyResult = RoleResultCommon & VerifyResultEvidence & (
-  { conclusion: passed | failed | inconclusive } |
+  { conclusion: passed } |
+  { conclusion: failed, reason_markdown } |
+  { conclusion: inconclusive, reason_code, reason_markdown } |
   { conclusion: canceled, reason_markdown }
 )
 ```

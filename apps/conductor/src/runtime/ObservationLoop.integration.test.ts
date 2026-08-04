@@ -10,7 +10,11 @@ import {
 import {
   parseGitSnapshot,
 } from "../contracts/observation.js";
-import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskSnapshot,
+  type TaskSnapshot,
+} from "../contracts/task-management.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
 import { LinearObserver } from "../task-management/linear/LinearObserver.js";
@@ -19,6 +23,24 @@ import { SerialConductor } from "./SerialConductor.js";
 
 const agentActor = "actor:agent";
 
+const workflowStateFields = {
+  team_id: "team:observation-loop",
+  todo_state_id: "state:root:todo",
+  draft_state_id: "state:cycle:draft",
+  in_progress_state_id: "state:root:in-progress",
+  awaiting_acceptance_state_id: "state:cycle:awaiting-acceptance",
+  in_review_state_id: "state:root:in-review",
+  done_state_id: "state:root:done",
+  succeeded_state_id: "state:cycle:succeeded",
+  rejected_state_id: "state:cycle:rejected",
+  failed_state_id: "state:cycle:failed",
+  canceled_state_id: "state:cycle:canceled",
+} as const;
+const workflowStateMap = Object.freeze({
+  ...workflowStateFields,
+  revision: canonicalTaskRevision(workflowStateFields),
+});
+
 function task(
   rootId: RootIssueId,
   revision: string,
@@ -26,39 +48,73 @@ function task(
   delegateId: string | null,
 ): TaskSnapshot {
   const cycleId = `${rootId}:cycle`;
+  const issue = (fields: {
+    readonly issue_id: string;
+    readonly kind: "root" | "cycle";
+    readonly status_id: string;
+    readonly status: "Todo" | "Draft";
+    readonly title: string;
+    readonly parent_issue_id: string | null;
+    readonly label_ids: readonly string[];
+    readonly delegate_id: string | null;
+    readonly priority: number;
+  }) => {
+    const canonicalFields = {
+      ...fields,
+      provider_created_at: "2026-07-30T10:00:00.000Z",
+      provider_updated_at: "2026-07-30T10:00:00.000Z",
+      creation_actor_id: agentActor,
+      description_markdown: fields.kind === "root" ? "# Root" : "# Cycle",
+      archived: false,
+      trashed: false,
+    };
+    return { ...canonicalFields, revision: canonicalTaskRevision(canonicalFields) };
+  };
   return parseTaskSnapshot({
     root_id: rootId,
+    workflow_state_map: workflowStateMap,
     issues: [
-      {
+      issue({
         issue_id: rootId,
-        revision,
-        status: "state:root:todo",
+        kind: "root",
+        status_id: "state:root:todo",
+        status: "Todo",
         title,
-        description: null,
-        parent_id: null,
-        labels: ["label:root"],
+        parent_issue_id: null,
+        label_ids: ["label:root"],
         delegate_id: delegateId,
         priority: 1,
-      },
-      {
+      }),
+      issue({
         issue_id: cycleId,
-        revision: "revision:cycle:1",
-        status: "state:cycle:draft",
+        kind: "cycle",
+        status_id: "state:cycle:draft",
+        status: "Draft",
         title: "Cycle",
-        description: null,
-        parent_id: rootId,
-        labels: ["label:cycle"],
+        parent_issue_id: rootId,
+        label_ids: ["label:cycle"],
         delegate_id: agentActor,
         priority: 2,
-      },
+      }),
     ],
     relations: [{
-      relation_id: "relation:cycle-blocks-root",
-      revision: "revision:relation:1",
-      type: "blocks",
-      source_issue_id: cycleId,
-      target_issue_id: rootId,
+      ...(() => {
+        const fields = {
+          relation_id: "relation:cycle-blocks-root",
+          provider_created_at: "2026-07-30T10:00:00.000Z",
+          provider_updated_at: "2026-07-30T10:00:00.000Z",
+          creation_actor_id: agentActor,
+          creation_evidence_id: "evidence:relation:cycle-blocks-root",
+          type: "blocks",
+          source_issue_id: cycleId,
+          target_issue_id: rootId,
+        };
+        return { ...fields, revision: canonicalTaskRevision(fields) };
+      })(),
     }],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
 }
 

@@ -14,7 +14,17 @@ import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import {
   parseRootDefinition,
 } from "../contracts/cycle.js";
-import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  parseTaskRelationSnapshot,
+  parseTaskSnapshot,
+  type TaskIssueSnapshot,
+  type TaskKind,
+  type TaskRelationSnapshot,
+  type TaskSnapshot,
+  type TaskWorkflowStatus,
+} from "../contracts/task-management.js";
 import type { TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   createTaskManageCallerAuthority,
@@ -42,8 +52,6 @@ const cycleTaskId = parseTaskIssueId(deriveCycleUuid(
   identityVersion, "cycle_issue", rootId, "first_cycle", "first_cycle",
 ));
 const derivedCycleId = (kind: string) => deriveCycleUuid(identityVersion, kind, cycleTaskId);
-const canonicalRootRevision = `symphony:v1:${"1".repeat(64)}`;
-const canonicalDraftRevision = `symphony:v1:${"2".repeat(64)}`;
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
 const callerAuthority = createTaskManageCallerAuthority();
@@ -74,6 +82,90 @@ const workflow = parseTaskWorkflowIdentities({
     failed: "state:stage-failed", canceled: "state:stage-canceled",
   },
 });
+const workflowStateFields = {
+  team_id: "team:root-tools",
+  todo_state_id: "state:todo",
+  draft_state_id: workflow.cycle_states.draft,
+  in_progress_state_id: workflow.cycle_states.in_progress,
+  awaiting_acceptance_state_id: workflow.cycle_states.awaiting_acceptance,
+  in_review_state_id: "state:in-review",
+  done_state_id: "state:done",
+  succeeded_state_id: workflow.cycle_states.succeeded,
+  rejected_state_id: workflow.cycle_states.rejected,
+  failed_state_id: workflow.cycle_states.failed,
+  canceled_state_id: workflow.cycle_states.canceled,
+} as const;
+
+interface TaskIssueFixtureFields {
+  readonly issue_id: string;
+  readonly kind: TaskKind;
+  readonly status_id: string;
+  readonly status: TaskWorkflowStatus;
+  readonly title: string;
+  readonly description_markdown: string;
+  readonly parent_issue_id: string | null;
+  readonly label_ids: readonly string[];
+  readonly delegate_id: string | null;
+  readonly priority: number | null;
+  readonly provider_created_at?: string;
+  readonly provider_updated_at?: string;
+  readonly creation_actor_id?: string;
+  readonly archived?: boolean;
+  readonly trashed?: boolean;
+}
+
+function taskIssueResource(input: TaskIssueFixtureFields): TaskIssueSnapshot {
+  const fields = {
+    ...input,
+    provider_created_at: input.provider_created_at ?? "2026-08-01T00:00:00.000Z",
+    provider_updated_at: input.provider_updated_at ?? input.provider_created_at ?? "2026-08-01T00:00:00.000Z",
+    creation_actor_id: input.creation_actor_id ?? "actor:symphony",
+    archived: input.archived ?? false,
+    trashed: input.trashed ?? false,
+  };
+  return parseTaskIssueSnapshotChange({
+    ...fields,
+    revision: canonicalTaskRevision(fields),
+  });
+}
+
+function changedTaskIssueResource(
+  current: TaskIssueSnapshot,
+  changes: Partial<Omit<TaskIssueFixtureFields, "issue_id">>,
+  providerUpdatedAt: string,
+): TaskIssueSnapshot {
+  const { revision: _revision, provider_updated_at: _providerUpdatedAt, ...unchanged } = current;
+  void _revision;
+  void _providerUpdatedAt;
+  return taskIssueResource({
+    ...unchanged,
+    ...changes,
+    provider_updated_at: providerUpdatedAt,
+  });
+}
+
+function taskRelationResource(input: {
+  readonly relation_id: string;
+  readonly type: string;
+  readonly source_issue_id: string;
+  readonly target_issue_id: string;
+  readonly provider_created_at?: string;
+  readonly provider_updated_at?: string;
+  readonly creation_actor_id?: string;
+  readonly creation_evidence_id?: string;
+}): TaskRelationSnapshot {
+  const fields = {
+    ...input,
+    provider_created_at: input.provider_created_at ?? "2026-08-01T00:00:00.000Z",
+    provider_updated_at: input.provider_updated_at ?? input.provider_created_at ?? "2026-08-01T00:00:00.000Z",
+    creation_actor_id: input.creation_actor_id ?? "actor:symphony",
+    creation_evidence_id: input.creation_evidence_id ?? `evidence:${input.relation_id}`,
+  };
+  return parseTaskRelationSnapshot({
+    ...fields,
+    revision: canonicalTaskRevision(fields),
+  });
+}
 
 const rootDescription = [
   "# Root",
@@ -94,6 +186,23 @@ const rootDescription = [
   "",
   "Approval returns the digest of the fresh exact revision.",
 ].join("\n");
+
+function rootIssueResource(issueId = "LIN-1", description = rootDescription): TaskIssueSnapshot {
+  return taskIssueResource({
+    issue_id: issueId,
+    kind: "root",
+    status_id: workflowStateFields.todo_state_id,
+    status: "Todo",
+    title: issueId,
+    description_markdown: description,
+    parent_issue_id: null,
+    label_ids: [workflow.labels.root],
+    delegate_id: null,
+    priority: null,
+  });
+}
+
+const canonicalRootRevision = rootIssueResource().revision;
 
 const cycleDescription = [
   "# Cycle Draft",
@@ -162,53 +271,102 @@ const cycleDescription = [
   "",
   "Reject malformed, stale, or substituted facts.",
 ].join("\n");
+
+function cycleIssueResource(
+  description = cycleDescription,
+  status: TaskWorkflowStatus = "Draft",
+  statusId = workflow.cycle_states.draft,
+  providerUpdatedAt?: string,
+): TaskIssueSnapshot {
+  return taskIssueResource({
+    issue_id: cycleTaskId,
+    kind: "cycle",
+    status_id: statusId,
+    status,
+    title: cycleTaskId,
+    description_markdown: description,
+    parent_issue_id: rootId,
+    label_ids: [workflow.labels.cycle],
+    delegate_id: null,
+    priority: null,
+    ...(providerUpdatedAt === undefined ? {} : { provider_updated_at: providerUpdatedAt }),
+  });
+}
+
+const canonicalDraftRevision = cycleIssueResource().revision;
 const correctedCycleDescription = cycleDescription.replace(
   "Derive the seal only from fresh read-back.",
   "Derive and return the seal only from fresh read-back.",
 );
+const correctedDraftResource = cycleIssueResource(
+  correctedCycleDescription,
+  "Draft",
+  workflow.cycle_states.draft,
+  "2026-08-01T00:00:01.000Z",
+);
+const sealedDraftResource = cycleIssueResource(
+  cycleDescription,
+  "In Progress",
+  workflow.cycle_states.in_progress,
+  "2026-08-01T00:00:02.000Z",
+);
 
 function rootTaskSnapshot(
-  relations: readonly unknown[] = [{
-    relation_id: "REL-1",
-    revision: "revision:relation:1",
-    type: "blocks",
-    source_issue_id: cycleTaskId,
-    target_issue_id: "LIN-3",
-  }, {
-    relation_id: "REL-OTHER",
-    revision: "revision:other:1",
-    type: "blocks",
-    source_issue_id: cycleTaskId,
-    target_issue_id: "LIN-4",
-  }],
+  relations: readonly TaskRelationSnapshot[] = [
+    taskRelationResource({
+      relation_id: "REL-1",
+      type: "blocks",
+      source_issue_id: cycleTaskId,
+      target_issue_id: "LIN-3",
+    }),
+    taskRelationResource({
+      relation_id: "REL-OTHER",
+      type: "blocks",
+      source_issue_id: cycleTaskId,
+      target_issue_id: "LIN-4",
+    }),
+  ],
   includeCycle = true,
 ): TaskSnapshot {
-  const issue = (issueId: string, parentId: string | null, revision: string, status: string, label: string) => ({
-    issue_id: issueId,
-    revision,
-    status,
-    title: issueId,
-    description: issueId === "LIN-1"
-      ? rootDescription
-      : issueId === cycleTaskId
-        ? cycleDescription
-        : `## ${issueId}\n\nFixture facts.`,
-    parent_id: parentId,
-    labels: [label],
-    delegate_id: null,
-    priority: null,
-  });
+  const issues = [
+    rootIssueResource(),
+    cycleIssueResource(),
+    taskIssueResource({
+      issue_id: "LIN-3",
+      kind: "cycle",
+      status_id: workflow.cycle_states.succeeded,
+      status: "Succeeded",
+      title: "LIN-3",
+      description_markdown: "## LIN-3\n\nFixture facts.",
+      parent_issue_id: rootId,
+      label_ids: [workflow.labels.cycle],
+      delegate_id: null,
+      priority: null,
+    }),
+    taskIssueResource({
+      issue_id: "LIN-4",
+      kind: "cycle",
+      status_id: workflow.cycle_states.rejected,
+      status: "Rejected",
+      title: "LIN-4",
+      description_markdown: "## LIN-4\n\nFixture facts.",
+      parent_issue_id: rootId,
+      label_ids: [workflow.labels.cycle],
+      delegate_id: null,
+      priority: null,
+    }),
+  ];
   return parseTaskSnapshot({
     root_id: rootId,
-    issues: includeCycle
-      ? [
-        issue("LIN-1", null, canonicalRootRevision, "state:root-in-progress", workflow.labels.root),
-        issue(cycleTaskId, "LIN-1", canonicalDraftRevision, workflow.cycle_states.draft, workflow.labels.cycle),
-        issue("LIN-3", "LIN-1", "revision:other:1", workflow.cycle_states.succeeded, workflow.labels.cycle),
-        issue("LIN-4", "LIN-1", "revision:other:2", workflow.cycle_states.rejected, workflow.labels.cycle),
-      ]
-      : [issue("LIN-1", null, canonicalRootRevision, "state:root-in-progress", workflow.labels.root)],
+    workflow_state_map: {
+      ...workflowStateFields,
+      revision: canonicalTaskRevision(workflowStateFields),
+    },
+    issues: includeCycle ? issues : [issues[0]],
     relations: includeCycle ? relations : [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
 }
 
@@ -629,17 +787,18 @@ test("Root tools reject a get_issue result for a different identity as a fatal c
     correlation_id: call.correlation_id,
     capability: call.capability,
     output: {
-      issue: {
+      issue: taskIssueResource({
         issue_id: "LIN-3",
-        revision: "revision:issue:3",
+        kind: "cycle",
+        status_id: workflowStateFields.todo_state_id,
         status: "Todo",
         title: "Foreign issue",
-        description: null,
-        parent_id: null,
-        labels: [],
+        description_markdown: "## Foreign\n\nFixture facts.",
+        parent_issue_id: null,
+        label_ids: [],
         delegate_id: null,
         priority: null,
-      },
+      }),
     },
   }, call);
   const tools = new RootTools({
@@ -673,17 +832,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
         outcome: "applied",
         effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: call.input.issue_id },
-        fresh_resource: {
-          issue_id: call.input.issue_id,
-          revision: "revision:issue:2",
-          status: workflow.cycle_states.draft,
-          title: cycleTaskId,
-          description: correctedCycleDescription,
-          parent_id: "LIN-1",
-          labels: [workflow.labels.cycle],
-          delegate_id: null,
-          priority: null,
-        },
+        fresh_resource: correctedDraftResource,
         concrete_diff: [{
           kind: "field_changed",
           issue_id: call.input.issue_id,
@@ -722,17 +871,7 @@ test("Root tools return a typed mutation result with fresh resource and concrete
 
   assert.deepEqual(calls, ["get_issue", "update_issue"]);
   assert.equal((result as { output?: { outcome?: unknown } }).output?.outcome, "applied");
-  assert.deepEqual((result as { output?: { fresh_resource?: unknown } }).output?.fresh_resource, {
-    issue_id: cycleTaskId,
-    revision: "revision:issue:2",
-    status: workflow.cycle_states.draft,
-    title: cycleTaskId,
-    description: correctedCycleDescription,
-    parent_id: "LIN-1",
-    labels: [workflow.labels.cycle],
-    delegate_id: null,
-    priority: null,
-  });
+  assert.deepEqual((result as { output?: { fresh_resource?: unknown } }).output?.fresh_resource, correctedDraftResource);
   assert.deepEqual((result as { output?: { concrete_diff?: unknown } }).output?.concrete_diff, [{
     kind: "field_changed",
     issue_id: cycleTaskId,
@@ -749,17 +888,7 @@ test("Root tools return a seal digest only from an applied approval fresh read-b
   const manager = taskManager([]);
   serveSnapshotIssues(manager, () => currentTask);
   manager.update_issue = async (call) => {
-    const approved = {
-      issue_id: call.input.issue_id,
-      revision: "revision:issue:sealed",
-      status: workflow.cycle_states.in_progress,
-      title: cycleTaskId,
-      description: cycleDescription,
-      parent_id: "LIN-1",
-      labels: [workflow.labels.cycle],
-      delegate_id: null,
-      priority: null,
-    };
+    const approved = sealedDraftResource;
     currentTask = parseTaskSnapshot({
       ...currentTask,
       issues: currentTask.issues.map((issue) => issue.issue_id === approved.issue_id ? approved : issue),
@@ -819,7 +948,7 @@ test("Root tools return a seal digest only from an applied approval fresh read-b
   );
   assert.equal(
     (result as { output?: { fresh_resource?: { revision?: unknown } } }).output?.fresh_resource?.revision,
-    "revision:issue:sealed",
+    sealedDraftResource.revision,
   );
 });
 
@@ -837,17 +966,7 @@ test("Root tools do not return a seal for a stale approval precondition", async 
       outcome: "stale_before_effect",
       effect_may_have_occurred: false,
       target: { kind: "issue", issue_id: call.input.issue_id },
-      fresh_resource: {
-        issue_id: call.input.issue_id,
-        revision: "revision:issue:concurrent",
-        status: workflow.cycle_states.draft,
-        title: cycleTaskId,
-        description: correctedCycleDescription,
-        parent_id: "LIN-1",
-        labels: [workflow.labels.cycle],
-        delegate_id: null,
-        priority: null,
-      },
+      fresh_resource: correctedDraftResource,
       concrete_diff: [{
         kind: "field_changed",
         issue_id: call.input.issue_id,
@@ -890,15 +1009,16 @@ test("Root tools do not return a seal for a stale approval precondition", async 
 
 test("an exact read resolves an unknown applied approval with the sealed fresh revision", async () => {
   let currentTask = rootTaskSnapshot([], true);
+  let approvedRevision: string | undefined;
   const manager = taskManager([]);
   manager.update_issue = async (call) => {
     const before = currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id);
     assert.ok(before);
-    const approved = {
-      ...before,
-      revision: "revision:issue:sealed-after-unknown",
-      status: workflow.cycle_states.in_progress,
-    };
+    const approved = changedTaskIssueResource(before, {
+      status_id: workflow.cycle_states.in_progress,
+      status: "In Progress",
+    }, "2026-08-01T00:00:03.000Z");
+    approvedRevision = approved.revision;
     currentTask = parseTaskSnapshot({
       ...currentTask,
       issues: currentTask.issues.map((issue) => issue.issue_id === call.input.issue_id ? approved : issue),
@@ -963,7 +1083,7 @@ test("an exact read resolves an unknown applied approval with the sealed fresh r
   const resolved = await read.execute(getIssueCall(), { assertActive: () => undefined });
   assert.equal(
     (resolved as { output?: { issue?: { revision?: unknown } } }).output?.issue?.revision,
-    "revision:issue:sealed-after-unknown",
+    approvedRevision,
   );
   assert.equal(
     (resolved as { seal_digest?: unknown }).seal_digest,
@@ -1227,21 +1347,19 @@ test("Root relation mutations are denied before provider effects", async () => {
     ],
     task_manager: bindTaskManager(manager, async () => rootTaskSnapshot(
       creations === 1
-        ? [{
+        ? [taskRelationResource({
           relation_id: "REL-1",
-          revision: "revision:relation:1",
           type: "blocks",
           source_issue_id: cycleTaskId,
           target_issue_id: "LIN-3",
-        }]
+        })]
         : creations >= 2
-          ? [{
+          ? [taskRelationResource({
             relation_id: "REL-OTHER",
-            revision: "revision:other:1",
             type: "blocks",
             source_issue_id: cycleTaskId,
             target_issue_id: "LIN-4",
-          }]
+          })]
           : [],
     )),
   });
@@ -1333,20 +1451,18 @@ test("Root tools fail composition closed for raw or differently bound Task manag
   }), /unbound_root_task_manager/u);
 
   const otherRootId = parseRootIssueId("ROOT-B");
+  const otherIssue = rootIssueResource(otherRootId);
   const otherSnapshot = parseTaskSnapshot({
     root_id: otherRootId,
-    issues: [{
-      issue_id: otherRootId,
-      revision: "revision:root-b",
-      status: "Todo",
-      title: "Root B",
-      description: null,
-      parent_id: null,
-      labels: [],
-      delegate_id: null,
-      priority: null,
-    }],
+    workflow_state_map: {
+      ...workflowStateFields,
+      revision: canonicalTaskRevision(workflowStateFields),
+    },
+    issues: [otherIssue],
     relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
   const otherBinding = bindRootTaskManageCommand({
     target: { root_id: otherRootId, runtime_generation: generation },

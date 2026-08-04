@@ -378,6 +378,9 @@ export class PlanCompletionRecordWriter {
     if (stage === undefined || stage.status !== "in_progress") {
       throw new Error("stage_failure_source_invalid");
     }
+    const stageReasonMarkdown = reasonCode === "lost_execution_context"
+      ? "lost_execution_context"
+      : reasonMarkdown;
     if (stage.kind === "plan") {
       const comments = await this.options.record_reader.readIssueRecordComments(stageId);
       const projected = readExactTaskIssueRecord(
@@ -391,7 +394,7 @@ export class PlanCompletionRecordWriter {
         snapshot,
         basis,
         terminalOutcome,
-        reasonMarkdown,
+        stageReasonMarkdown,
         execution,
       );
     }
@@ -417,20 +420,21 @@ export class PlanCompletionRecordWriter {
         workspace_parent_revision: digest(snapshot.git.head_revision ?? "unborn"),
         workspace_diff_digest: digest(snapshot.git.diff_digest),
         checks_markdown: "## Checks\n\n- not_run: live Work context was lost",
-        normalized_handoff_markdown: reasonMarkdown,
+        normalized_handoff_markdown: stageReasonMarkdown,
         reason_code: reasonCode,
-        reason_markdown: reasonMarkdown,
+        reason_markdown: stageReasonMarkdown,
       },
     } : {
       ...common,
       projection: {
-        conclusion: "inconclusive",
+        conclusion: reasonCode === "lost_execution_context" ? "failed" : "inconclusive",
         instruction_digest: node.instruction_digest,
         exact_revision: digest(snapshot.git.head_revision ?? "unborn"),
         checks_markdown: "## Checks\n\n- not_run: live Verify context was lost",
-        evidence_markdown: reasonMarkdown,
-        reason_code: reasonCode,
-        reason_markdown: reasonMarkdown,
+        evidence_markdown: stageReasonMarkdown,
+        ...(reasonCode === "lost_execution_context"
+          ? { reason_markdown: stageReasonMarkdown }
+          : { reason_code: reasonCode, reason_markdown: stageReasonMarkdown }),
       },
     });
   }
@@ -586,10 +590,9 @@ export class PlanCompletionRecordWriter {
       || parseTaskIssueId(stage.issue_id) !== node.issue_id
       || digest(stage.description_markdown) !== node.instruction_digest
     ) throw new Error("verify_completion_source_invalid");
-    const reason = result.conclusion === "passed" || result.conclusion === "failed" ? {} : {
-      reason_code: `verify_${result.conclusion}`,
-      reason_markdown: result.sanitized_summary_markdown,
-    };
+    const reason = result.conclusion === "passed" ? {} : result.conclusion === "failed"
+      ? { reason_markdown: result.reason_markdown }
+      : { reason_code: result.reason_code, reason_markdown: result.reason_markdown };
     return this.#persistStage(snapshot, basis, execution, {
       record_id: node.completion_record_id,
       stage_id: parseTaskIssueId(stage.issue_id),

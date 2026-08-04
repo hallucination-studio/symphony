@@ -36,8 +36,8 @@ import {
 } from "../mcp/TaskMcpSchemas.js";
 import {
   assertLinearIssueIdentity,
+  linearCommandIssueFromSnapshot,
   linearIssueMatches,
-  parseLinearCommandIssue,
   parseLinearMutationReceipt,
   parseLinearRelationPage,
   type LinearCommandIssueRecord,
@@ -90,8 +90,6 @@ export interface LinearCreateIssueCommentInput {
 }
 
 export interface LinearCommandClient {
-  getIssue(issueId: string): Promise<unknown>;
-  readIssue(issueId: string): Promise<unknown>;
   listRelations(issueId: string, cursor: string | null, pageSize: number): Promise<unknown>;
   createIssue(input: LinearCreateIssueInput): Promise<unknown>;
   createIssueComment(input: LinearCreateIssueCommentInput): Promise<unknown>;
@@ -107,6 +105,7 @@ export interface LinearCommandOptions {
 }
 
 export interface LinearMutationEvidenceReader {
+  readIssueSnapshot(issueId: TaskIssueId): Promise<TaskIssueSnapshot | null>;
   readIssueHistory(issueId: TaskIssueId): Promise<readonly LinearIssueHistoryEvidence[]>;
   readIssueComments(issueId: TaskIssueId): Promise<readonly LinearIssueCommentEvidence[]>;
 }
@@ -516,16 +515,20 @@ export class LinearCommands {
   }
 
   async #readIssue(issueId: TaskIssueId): Promise<LinearCommandIssueRecord> {
+    const snapshot = await this.evidenceReader.readIssueSnapshot(issueId);
+    if (snapshot === null) throw new Error("linear_issue_missing");
     return assertLinearIssueIdentity(
-      parseLinearCommandIssue(await this.client.readIssue(issueId)),
+      linearCommandIssueFromSnapshot(snapshot, this.#teamId),
       issueId,
       this.#teamId,
     );
   }
 
   async #readOptionalIssue(issueId: TaskIssueId): Promise<LinearCommandIssueRecord | null> {
-    const value = await this.client.getIssue(issueId);
-    return value === null ? null : assertLinearIssueIdentity(parseLinearCommandIssue(value), issueId, this.#teamId);
+    const snapshot = await this.evidenceReader.readIssueSnapshot(issueId);
+    return snapshot === null
+      ? null
+      : assertLinearIssueIdentity(linearCommandIssueFromSnapshot(snapshot, this.#teamId), issueId, this.#teamId);
   }
 
   async #readEvidence(issueId: TaskIssueId): Promise<LinearMutationEvidence> {
@@ -620,6 +623,7 @@ export class LinearCommands {
       const page: LinearCommandPage<TaskRelationSnapshot> = parseLinearRelationPage(
         await this.client.listRelations(issueId, cursor, PAGE_SIZE),
         PAGE_SIZE,
+        this.#serviceActorId,
       );
       count += page.nodes.length;
       if (count > MAX_NODES) throw new Error("linear_node_limit_exceeded");

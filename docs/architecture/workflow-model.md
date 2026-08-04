@@ -212,9 +212,9 @@ flowchart LR
 | Rule | Observed facts | Owner | Required write | Projection | Resolution |
 |---|---|---|---|---|---|
 | `WF-FAIL-001` | `record_slot_missing_not_required` | `CurrentPhaseOwner` | none | none | expected absence |
-| `WF-FAIL-002` | `stage_in_progress_live_context_lost` | `CycleMachine` | original-slot `lost_execution_context` Stage completion | Stage `Failed` then Cycle `Failed` | closed failure |
+| `WF-FAIL-002` | `stage_in_progress_live_context_lost` | `CycleMachine` | original-slot failed Stage completion<br>Plan/Verify reason_markdown: lost_execution_context | Stage `Failed` then Cycle `Failed` | typed phase/live-context facts route the failure; Markdown is durable explanation only |
 | `WF-FAIL-003` | `lost_context_slot_unresolvable_after_exact_create_read` | `CycleMachine` | `unresolvable_record_slot` Stage invalidation, then `unresolvable_record_slot` Cycle invalidation | Stage `Failed` then Cycle `Failed` if each projection remains possible | permanent quarantine |
-| `WF-FAIL-004` | `external_stage_terminal_without_record_for_observed_outcome` | `CycleMachine` | free invalidation slot -> `invalid_terminal` Stage invalidation<br>selected invalidation conflict -> no replacement | preserve external terminal<br>fail Cycle where possible | selected invalidation conflict -> `WF-ROUTE-016` |
+| `WF-FAIL-004` | `external_stage_terminal_without_record_for_observed_outcome` | `CycleMachine` | fresh validated basis -> free slot -> `invalid_terminal` Stage invalidation<br>selected invalidation conflict -> no replacement | preserve external terminal<br>fail Cycle where possible | selected invalidation conflict -> `WF-ROUTE-016` |
 | `WF-FAIL-005` | `external_cycle_terminal_without_record_for_observed_outcome` | `CycleMachine` through `WF-ROUTE-018` | close dispatched Stage<br>free slot -> `invalid_terminal` Cycle invalidation<br>occupied selected invalidation -> no replacement | preserve external terminal | new intact record may allow successor<br>selected invalidation conflict -> `WF-ROUTE-016`<br>otherwise permanent quarantine |
 | `WF-FAIL-006` | `selected_terminal_record_at_wrong_nonterminal_source` | `CycleMachine` | selected completion -> Stage-first `invalid_status_transition` invalidations<br>selected invalidation -> never replace it | only exact source projects<br>conflicting status is preserved | selected invalidation conflict -> `WF-ROUTE-016` |
 | `WF-FAIL-007` | `partial_graph_materialization` | `CycleMachine` | `partial_graph_materialization` Cycle invalidation | Cycle `Failed` | permanent quarantine |
@@ -236,12 +236,12 @@ flowchart LR
 |---|---|---|---|---|
 | `WF-RESTART-001` | approval record present, Cycle `Draft` | none required | projection-only `In Progress` | editable Draft review |
 | `WF-RESTART-002` | selected terminal record present, non-terminal status | none required | exact source -> project target<br>wrong source -> `WF-FAIL-006`<br>selected invalidation conflict -> `WF-ROUTE-016` | rerun role、project over wrong source、prefer completion、replace invalidation |
-| `WF-RESTART-003` | Stage `In Progress`, completion absent | live context lost | apply `WF-FAIL-002`, then `WF-FAIL-003` if needed | repeat dispatch |
+| `WF-RESTART-003` | Stage `In Progress`, completion absent | live context lost | apply `WF-FAIL-002`<br>Plan/Verify use Markdown-only `lost_execution_context`<br>then `WF-FAIL-003` if needed | repeat dispatch |
 | `WF-RESTART-004` | next Work `Todo`, prior Work complete | typed live Work-thread loss | apply `WF-FAIL-018`, then `WF-TR-008` | dispatch next Work<br>reconstruct from any durable source |
 | `WF-RESTART-005` | Plan manifest complete, graph absent | none required | materialize exact manifest identities | rerun Plan or derive new graph |
 | `WF-RESTART-006` | Plan manifest complete, graph partial | none required | apply `WF-FAIL-007` | fill missing resources |
 | `WF-RESTART-007` | all Work complete and exact commit proof matches | Verify `Todo` | dispatch fresh Verify once | change revision |
-| `WF-RESTART-008` | Verify `In Progress`, completion absent | Verify context lost | apply `WF-FAIL-002` | repeat Verify |
+| `WF-RESTART-008` | Verify `In Progress`, completion absent | Verify context lost | apply `WF-FAIL-002` with Markdown-only `lost_execution_context` reason | repeat Verify |
 | `WF-RESTART-009` | valid delivery completion | none required | park delivered Root | infer from memory receipt |
 | `WF-RESTART-010` | accepted Cycle, Root `In Progress`, delivery terminal record absent | none required | delivery finalizer resolves exact effects and applies `WF-TR-002` or `WF-FAIL-011` | blind or unconditional redelivery |
 | `WF-RESTART-011` | Root `Done` with `intact_active_cycle` or delivery gap | none required | apply `WF-ROUTE-011` or `WF-ROUTE-012` | cleanup before `WF-RESTART-002`<br>generic closure masking a specific failure fact |

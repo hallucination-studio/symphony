@@ -222,6 +222,7 @@ test("TaskSnapshot contains only a complete normalized issue and relation graph"
     () => parseTaskSnapshot({ ...task, issues: task.issues.map((issue, index) => index === 1
       ? (() => {
         const { revision: _revision, ...fields } = { ...issue, parent_issue_id: "LIN-99" };
+        void _revision;
         return { ...fields, revision: canonicalTaskRevision(fields) };
       })()
       : issue) }),

@@ -20,7 +20,13 @@ import {
   type CycleExecutionSnapshot,
   type CycleExecutionTarget,
 } from "../contracts/cycle.js";
-import type { TaskIssueSnapshot } from "../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  parseTaskRelationSnapshot,
+  type TaskIssueSnapshot,
+  type TaskRelationSnapshot,
+} from "../contracts/task-management.js";
 import { parseMarkdownText } from "../contracts/validation.js";
 import { parseTaskMcpResult, TASK_MCP_CAPABILITIES, type CreateIssueCall, type CreateIssueCommentCall, type CreateRelationCall, type DeleteRelationCall, type GetIssueCall, type ListIssuesCall, type ListRelationsCall, type UpdateIssueCall } from "../task-management/mcp/TaskMcpSchemas.js";
 import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../task-management/api/TaskManageCommandInterface.js";
@@ -67,6 +73,56 @@ const workflow = parseTaskWorkflowIdentities({
   },
 });
 
+function taskIssueResource(fields: {
+  readonly issue_id: TaskIssueSnapshot["issue_id"];
+  readonly kind: TaskIssueSnapshot["kind"];
+  readonly status_id: TaskIssueSnapshot["status_id"];
+  readonly status: TaskIssueSnapshot["status"];
+  readonly title: string;
+  readonly description_markdown: string | null;
+  readonly parent_issue_id: TaskIssueSnapshot["parent_issue_id"];
+  readonly label_ids: TaskIssueSnapshot["label_ids"];
+  readonly delegate_id: TaskIssueSnapshot["delegate_id"];
+  readonly priority: TaskIssueSnapshot["priority"];
+}): TaskIssueSnapshot {
+  if (fields.description_markdown === null) throw new Error("missing_test_description");
+  const normalized = {
+    ...fields,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    description_markdown: parseMarkdownText(fields.description_markdown),
+    archived: false,
+    trashed: false,
+  };
+  return parseTaskIssueSnapshotChange({
+    ...normalized,
+    revision: canonicalTaskRevision(normalized),
+  });
+}
+
+function taskRelationResource(fields: {
+  readonly relation_id: string;
+  readonly type: string;
+  readonly source_issue_id: string;
+  readonly target_issue_id: string;
+}): TaskRelationSnapshot {
+  const normalized = {
+    relation_id: parseTaskRelationId(fields.relation_id),
+    type: fields.type,
+    source_issue_id: parseTaskIssueId(fields.source_issue_id),
+    target_issue_id: parseTaskIssueId(fields.target_issue_id),
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:symphony",
+    creation_evidence_id: `evidence:${fields.relation_id}`,
+  };
+  return parseTaskRelationSnapshot({
+    ...normalized,
+    revision: canonicalTaskRevision(normalized),
+  });
+}
+
 function materializationIssue(fields: {
   readonly issue_id: TaskIssueSnapshot["issue_id"];
   readonly revision: TaskIssueSnapshot["revision"];
@@ -76,18 +132,14 @@ function materializationIssue(fields: {
   readonly description_markdown: string;
   readonly label_ids: TaskIssueSnapshot["label_ids"];
 }): TaskIssueSnapshot {
-  return Object.freeze({
-    ...fields,
-    provider_created_at: "2026-08-03T00:00:00.000Z",
-    provider_updated_at: "2026-08-03T00:00:00.000Z",
-    creation_actor_id: "actor:symphony",
+  const { revision: _revision, ...input } = fields;
+  void _revision;
+  return taskIssueResource({
+    ...input,
     status: "Todo",
-    description_markdown: parseMarkdownText(fields.description_markdown),
     parent_issue_id: parseTaskIssueId(cycleId),
     delegate_id: null,
     priority: null,
-    archived: false,
-    trashed: false,
   });
 }
 
@@ -183,6 +235,13 @@ const specification = sealCycleSpecification({
   status: "in_progress",
 }, rootDefinition, specificationTarget);
 
+const sealedRelationResource = taskRelationResource({
+  relation_id: "REL-A",
+  type: "blocks",
+  source_issue_id: "WORK-A",
+  target_issue_id: "VERIFY-A",
+});
+
 const graphSource = {
   plan_issue: {
     issue_id: "PLAN-A",
@@ -210,11 +269,25 @@ const graphSource = {
   },
   relations: [{
     relation_id: "REL-A",
-    revision: "revision:relation:1",
+    revision: sealedRelationResource.revision,
     prerequisite_issue_id: "WORK-A",
     dependent_issue_id: "VERIFY-A",
   }],
 };
+
+const currentWorkResource = taskIssueResource({
+  issue_id: parseTaskIssueId("WORK-A"),
+  kind: "work",
+  status_id: workflow.stage_states.in_progress,
+  status: "In Progress",
+  title: graphSource.work_issues[0]!.title,
+  description_markdown: graphSource.work_issues[0]!.description_markdown,
+  parent_issue_id: parseTaskIssueId(cycleId),
+  label_ids: [workflow.labels.work],
+  delegate_id: null,
+  priority: null,
+});
+const currentWorkRevision = currentWorkResource.revision;
 
 function stage(stage: typeof graphSource.plan_issue | typeof graphSource.work_issues[number] | typeof graphSource.verify_issue, revision: string, status: string) {
   return {
@@ -260,7 +333,7 @@ function snapshotWithGraph(graph = parseSealedExecutionGraph(graphSource, cycleI
     plan_issue: graph.plan_issue === null ? null : stage(graphSource.plan_issue, "revision:plan:current", "done"),
     sealed_work_issues: graph.work_issues.length === 0
       ? []
-      : [stage(graphSource.work_issues[0]!, "revision:work:current", "in_progress")],
+    : [stage(graphSource.work_issues[0]!, currentWorkRevision, "in_progress")],
     verify_issue: graph.verify_issue === null ? null : stage(graphSource.verify_issue, "revision:verify:current", "todo"),
     sealed_relations: graphSource.relations.slice(0, graph.relations.length),
     git,
@@ -319,14 +392,17 @@ function deleteRelation(): DeleteRelationCall {
       relation_id: parseTaskRelationId("REL-A"),
       expected_relation_revision: parseTaskRevision("revision:relation:1"),
       source_issue_id: parseTaskIssueId("WORK-A"),
-      expected_source_revision: parseTaskRevision("revision:work:current"),
+      expected_source_revision: currentWorkRevision,
       target_issue_id: parseTaskIssueId("VERIFY-A"),
       expected_target_revision: parseTaskRevision("revision:verify:current"),
     },
   };
 }
 
-function createMaterializedRelation(): CreateRelationCall {
+function createMaterializedRelation(
+  sourceRevision: TaskIssueSnapshot["revision"],
+  targetRevision: TaskIssueSnapshot["revision"],
+): CreateRelationCall {
   return {
     ...envelope("create_relation"),
     function: "create_relation",
@@ -334,14 +410,14 @@ function createMaterializedRelation(): CreateRelationCall {
       relation_id: parseTaskRelationId("22222222-2222-4222-8222-222222222222"),
       relation_type: "blocks",
       source_issue_id: parseTaskIssueId("WORK-NEW"),
-      expected_source_revision: parseTaskRevision("revision:work:new"),
+      expected_source_revision: sourceRevision,
       target_issue_id: parseTaskIssueId("VERIFY-NEW"),
-      expected_target_revision: parseTaskRevision("revision:verify:new"),
+      expected_target_revision: targetRevision,
     },
   };
 }
 
-function createStageComment(revision = "revision:work:current"): CreateIssueCommentCall {
+function createStageComment(revision: string = currentWorkRevision): CreateIssueCommentCall {
   return {
     ...envelope("create_issue_comment"),
     function: "create_issue_comment",
@@ -384,7 +460,7 @@ test("Cycle machine denies Root, Cycle specification, sealed Stage, successor, a
   const attempts = [
     update("ROOT-A", "revision:root:1", { description: "## Root ADR\n\nChanged." }),
     update("CYCLE-A", "revision:cycle:current", { description: "## Design\n\nChanged." }),
-    update("WORK-A", "revision:work:current", { title: "Changed sealed title" }),
+    update("WORK-A", currentWorkRevision, { title: "Changed sealed title" }),
     create("ROOT-A", "revision:root:1", "label:cycle"),
     deleteRelation(),
   ];
@@ -507,7 +583,7 @@ test("Cycle machine rejects duplicate or incomplete graph-materialization manife
 
 test("Cycle machine accepts one exact legal transition grant and binds issued caller provenance", async () => {
   const effects: string[] = [];
-  const call = update("WORK-A", "revision:work:current", {
+  const call = update("WORK-A", currentWorkRevision, {
     state_id: workflow.stage_states.done,
   });
   const manager = recordingManager(effects);
@@ -537,17 +613,18 @@ test("Cycle machine accepts one exact legal transition grant and binds issued ca
         outcome: "applied",
         effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: "WORK-A" },
-        fresh_resource: {
-          issue_id: "WORK-A",
-          revision: "revision:work:done",
-          status: workflow.stage_states.done,
+        fresh_resource: taskIssueResource({
+          issue_id: parseTaskIssueId("WORK-A"),
+          kind: "work",
+          status_id: workflow.stage_states.done,
+          status: "Done",
           title: graphSource.work_issues[0]!.title,
-          description: graphSource.work_issues[0]!.description_markdown,
-          parent_id: cycleId,
-          labels: [workflow.labels.work],
+          description_markdown: graphSource.work_issues[0]!.description_markdown,
+          parent_issue_id: parseTaskIssueId(cycleId),
+          label_ids: [workflow.labels.work],
           delegate_id: null,
           priority: null,
-        },
+        }),
         concrete_diff: [{
           kind: "field_changed",
           issue_id: "WORK-A",
@@ -584,8 +661,8 @@ test("Cycle machine accepts one exact legal transition grant and binds issued ca
   assert.deepEqual(substitutedEffects, []);
 });
 
-test("Cycle machine rejects an applied status read-back without a fresh revision", async () => {
-  const call = update("WORK-A", "revision:work:current", {
+test("Cycle machine rejects an applied status read-back that retains the old resource", async () => {
+  const call = update("WORK-A", currentWorkRevision, {
     state_id: workflow.stage_states.done,
   });
   const manager = recordingManager([]);
@@ -598,17 +675,7 @@ test("Cycle machine rejects an applied status read-back without a fresh revision
         outcome: "applied",
         effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: "WORK-A" },
-        fresh_resource: {
-          issue_id: "WORK-A",
-          revision: "revision:work:current",
-          status: workflow.stage_states.done,
-          title: graphSource.work_issues[0]!.title,
-          description: graphSource.work_issues[0]!.description_markdown,
-          parent_id: cycleId,
-          labels: [workflow.labels.work],
-          delegate_id: null,
-          priority: null,
-        },
+        fresh_resource: currentWorkResource,
         concrete_diff: [{
           kind: "field_changed",
           issue_id: "WORK-A",
@@ -656,7 +723,7 @@ test("Cycle machine rejects stale revisions, illegal edges, and Root-owned termi
 });
 
 test("Cycle machine returns fresh same-seal facts after a provider revision race", async () => {
-  const call = update("WORK-A", "revision:work:current", {
+  const call = update("WORK-A", currentWorkRevision, {
     state_id: workflow.stage_states.done,
   });
   const manager = recordingManager([]);
@@ -669,17 +736,18 @@ test("Cycle machine returns fresh same-seal facts after a provider revision race
         outcome: "stale_before_effect",
         effect_may_have_occurred: false,
         target: { kind: "issue", issue_id: "WORK-A" },
-        fresh_resource: {
-          issue_id: "WORK-A",
-          revision: "revision:work:raced",
-          status: workflow.stage_states.failed,
+        fresh_resource: taskIssueResource({
+          issue_id: parseTaskIssueId("WORK-A"),
+          kind: "work",
+          status_id: workflow.stage_states.failed,
+          status: "Failed",
           title: graphSource.work_issues[0]!.title,
-          description: graphSource.work_issues[0]!.description_markdown,
-          parent_id: cycleId,
-          labels: [workflow.labels.work],
+          description_markdown: graphSource.work_issues[0]!.description_markdown,
+          parent_issue_id: parseTaskIssueId(cycleId),
+          label_ids: [workflow.labels.work],
           delegate_id: null,
           priority: null,
-        },
+        }),
         concrete_diff: [{
           kind: "field_changed",
           issue_id: "WORK-A",
@@ -703,7 +771,7 @@ test("Cycle machine returns fresh same-seal facts after a provider revision race
 });
 
 test("Cycle machine maps provider failures to a closed boundary error", async () => {
-  const call = update("WORK-A", "revision:work:current", {
+  const call = update("WORK-A", currentWorkRevision, {
     state_id: workflow.stage_states.done,
   });
   const manager = recordingManager([]);
@@ -747,28 +815,44 @@ test("Cycle query egress rejects foreign issues and relations", async () => {
   manager.get_issue = async (call) => parseTaskMcpResult({
     ...envelope("get_issue"),
     function: "get_issue",
-    output: { issue: {
-      issue_id: "ROOT-A", revision: "revision:root:1", status: "state:root",
-      title: "Root", description: rootDescription, parent_id: null,
-      labels: [workflow.labels.root], delegate_id: null, priority: null,
-    } },
+    output: { issue: taskIssueResource({
+      issue_id: parseTaskIssueId("ROOT-A"),
+      kind: "root",
+      status_id: parseTaskStateId("state:root"),
+      status: "Todo",
+      title: "Root",
+      description_markdown: rootDescription,
+      parent_issue_id: null,
+      label_ids: [workflow.labels.root],
+      delegate_id: null,
+      priority: null,
+    }) },
   }, call);
   manager.list_issues = async (call) => parseTaskMcpResult({
     ...envelope("list_issues"),
     function: "list_issues",
-    output: { issues: [{
-      issue_id: "FOREIGN", revision: "revision:foreign:1", status: "state:foreign",
-      title: "Foreign", description: null, parent_id: null,
-      labels: [], delegate_id: null, priority: null,
-    }], next_cursor: null },
+    output: { issues: [taskIssueResource({
+      issue_id: parseTaskIssueId("FOREIGN"),
+      kind: "root",
+      status_id: parseTaskStateId("state:foreign"),
+      status: "Todo",
+      title: "Foreign",
+      description_markdown: "# Foreign",
+      parent_issue_id: null,
+      label_ids: [workflow.labels.root],
+      delegate_id: null,
+      priority: null,
+    })], next_cursor: null },
   }, call);
   manager.list_relations = async (call) => parseTaskMcpResult({
     ...envelope("list_relations"),
     function: "list_relations",
-    output: { relations: [{
-      relation_id: "REL-FOREIGN", revision: "revision:relation:foreign", type: "blocks",
-      source_issue_id: "WORK-A", target_issue_id: "FOREIGN",
-    }], next_cursor: null },
+    output: { relations: [taskRelationResource({
+      relation_id: "REL-FOREIGN",
+      type: "blocks",
+      source_issue_id: "WORK-A",
+      target_issue_id: "FOREIGN",
+    })], next_cursor: null },
   }, call);
   const bound = bindCycleTaskManageCommand({
     snapshot,
@@ -790,13 +874,12 @@ test("Cycle query egress rejects foreign issues and relations", async () => {
   changedTypeManager.list_relations = async (call) => parseTaskMcpResult({
     ...envelope("list_relations"),
     function: "list_relations",
-    output: { relations: [{
+    output: { relations: [taskRelationResource({
       relation_id: "REL-A",
-      revision: "revision:relation:1",
       type: "related",
       source_issue_id: "WORK-A",
       target_issue_id: "VERIFY-A",
-    }], next_cursor: null },
+    })], next_cursor: null },
   }, call);
   await assert.rejects(
     bindCycleTaskManageCommand({
@@ -822,11 +905,18 @@ test("Cycle machine can create one exact Plan under an approved Cycle and cannot
   manager.create_issue = async (received, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, received);
     effects.push("create_issue");
-    const created = {
-      issue_id: received.input.issue_id, revision: "revision:plan:new", status: workflow.stage_states.todo,
-      title: received.input.desired.title, description: received.input.desired.description,
-      parent_id: cycleId, labels: [workflow.labels.plan], delegate_id: null, priority: null,
-    };
+    const created = taskIssueResource({
+      issue_id: received.input.issue_id,
+      kind: "plan",
+      status_id: received.input.desired.state_id,
+      status: "Todo",
+      title: received.input.desired.title,
+      description_markdown: received.input.desired.description,
+      parent_issue_id: received.input.parent_issue_id,
+      label_ids: [workflow.labels.plan],
+      delegate_id: null,
+      priority: null,
+    });
     return parseTaskMcpResult({
       ...envelope("create_issue"),
       function: "create_issue",
@@ -869,17 +959,18 @@ test("Cycle machine preserves a scoped create readback_mismatch outcome", async 
         outcome: "conflict_observed",
         effect_may_have_occurred: true,
         target: { kind: "issue", issue_id: received.input.issue_id },
-        fresh_resource: {
+        fresh_resource: taskIssueResource({
           issue_id: received.input.issue_id,
-          revision: "revision:plan:mismatch",
-          status: call.input.desired.state_id,
+          kind: "plan",
+          status_id: call.input.desired.state_id,
+          status: "Todo",
           title: "Provider returned a different title",
-          description: call.input.desired.description,
-          parent_id: cycleId,
-          labels: call.input.desired.label_ids,
+          description_markdown: call.input.desired.description,
+          parent_issue_id: received.input.parent_issue_id,
+          label_ids: call.input.desired.label_ids,
           delegate_id: call.input.desired.delegate_id,
           priority: call.input.desired.priority,
-        },
+        }),
         concrete_diff: [],
         sanitized_reason: "fresh_postcondition_mismatch",
       },
@@ -931,17 +1022,18 @@ test("Cycle machine permits one exact read after unknown Issue creation acceptan
     return parseTaskMcpResult({
       ...envelope("get_issue"),
       function: "get_issue",
-      output: { issue: {
+      output: { issue: taskIssueResource({
         issue_id: received.input.issue_id,
-        revision: "revision:plan:pending",
-        status: call.input.desired.state_id,
+        kind: "plan",
+        status_id: call.input.desired.state_id,
+        status: "Todo",
         title: call.input.desired.title,
-        description: call.input.desired.description,
-        parent_id: cycleId,
-        labels: call.input.desired.label_ids,
+        description_markdown: call.input.desired.description,
+        parent_issue_id: call.input.parent_issue_id,
+        label_ids: call.input.desired.label_ids,
         delegate_id: call.input.desired.delegate_id,
         priority: call.input.desired.priority,
-      } },
+      }) },
     }, received);
   };
   const bound = bindCycleTaskManageCommand({
@@ -963,7 +1055,7 @@ test("Cycle machine can materialize one exact relation between freshly read-back
     plan_issue: graphSource.plan_issue, work_issues: [], verify_issue: null, relations: [],
   }, cycleId);
   const planOnlySnapshot = snapshotWithGraph(planOnlyGraph);
-  const materializationIssues = [materializationIssue({
+  const materializedWork = materializationIssue({
     issue_id: parseTaskIssueId("WORK-NEW"),
     revision: parseTaskRevision("revision:work:new"),
     status_id: workflow.stage_states.todo,
@@ -971,7 +1063,8 @@ test("Cycle machine can materialize one exact relation between freshly read-back
     title: "Materialized work",
     description_markdown: "## Work\n\nPerform the approved work.",
     label_ids: [workflow.labels.work],
-  }), materializationIssue({
+  });
+  const materializedVerify = materializationIssue({
     issue_id: parseTaskIssueId("VERIFY-NEW"),
     revision: parseTaskRevision("revision:verify:new"),
     status_id: workflow.stage_states.todo,
@@ -979,8 +1072,9 @@ test("Cycle machine can materialize one exact relation between freshly read-back
     title: "Materialized verify",
     description_markdown: "## Verify\n\nVerify the approved work.",
     label_ids: [workflow.labels.verify],
-  })];
-  const call = createMaterializedRelation();
+  });
+  const materializationIssues = [materializedWork, materializedVerify];
+  const call = createMaterializedRelation(materializedWork.revision, materializedVerify.revision);
   const relationRead: ListRelationsCall = {
     ...envelope("list_relations"),
     function: "list_relations",
@@ -1016,13 +1110,12 @@ test("Cycle machine can materialize one exact relation between freshly read-back
     return parseTaskMcpResult({
       ...envelope("list_relations"),
       function: "list_relations",
-      output: { relations: [{
+      output: { relations: [taskRelationResource({
         relation_id: call.input.relation_id,
-        revision: "revision:relation:pending",
         type: call.input.relation_type,
         source_issue_id: call.input.source_issue_id,
         target_issue_id: call.input.target_issue_id,
-      }], next_cursor: null },
+      })], next_cursor: null },
     }, received);
   };
   const unknownBinding = bindCycleTaskManageCommand({
@@ -1073,13 +1166,12 @@ test("Cycle machine can materialize one exact relation between freshly read-back
   manager.create_relation = async (received, providerExecution) => {
     callerAuthority.verifier.assert(providerExecution.caller, received);
     effects.push("create_relation");
-    const relation = {
+    const relation = taskRelationResource({
       relation_id: received.input.relation_id,
-      revision: "revision:relation:new",
       type: received.input.relation_type,
       source_issue_id: received.input.source_issue_id,
       target_issue_id: received.input.target_issue_id,
-    };
+    });
     return parseTaskMcpResult({
       ...envelope("create_relation"),
       function: "create_relation",

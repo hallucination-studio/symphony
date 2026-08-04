@@ -29,6 +29,16 @@ import { WorkPerformer } from "./WorkPerformer.js";
 
 const execFileAsync = promisify(execFile);
 
+function isCodexSandboxSetupUnavailable(error: unknown): boolean {
+  const failure = error as {
+    readonly code?: unknown;
+    readonly stderr?: unknown;
+  };
+  return failure.code === 71
+    && typeof failure.stderr === "string"
+    && /^sandbox-exec: sandbox_apply: Operation not permitted\n?$/u.test(failure.stderr);
+}
+
 interface FakeAppServer extends SpawnedCodexProcess {
   readonly instance: number;
   readonly output: PassThrough;
@@ -504,6 +514,7 @@ test("installed Codex enforces the exact Work workspace-write profile", {
   ]);
   const scratchDirectory = runtime.scratchDirectory;
   assert.ok(scratchDirectory);
+  let sandboxUnavailable = false;
   try {
     const probeScript = String.raw`
       const fs = require("node:fs/promises");
@@ -523,58 +534,68 @@ test("installed Codex enforces the exact Work workspace-write profile", {
         process.stdout.write(JSON.stringify(results));
       })().catch(() => process.exit(2));
     `;
-    const executed = await execFileAsync("codex", [
-      "sandbox",
-      ...runtime.configArguments,
-      "--permission-profile",
-      runtime.writePermissionProfile,
-      "--cd",
-      canonicalWorktree,
-      "--",
-      process.execPath,
-      "--openssl-config=/dev/null",
-      "-e",
-      probeScript,
-      canonicalWorktree,
-      scratchDirectory,
-      canonicalOutside,
-    ], {
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      timeout: 20_000,
-      env: {
-        PATH: process.env.PATH,
-        LANG: process.env.LANG ?? "C.UTF-8",
-        CODEX_HOME: runtime.codexHome,
-        OPENSSL_CONF: "/dev/null",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_CONFIG_SYSTEM: "/dev/null",
-        GIT_TERMINAL_PROMPT: "0",
-        GCM_INTERACTIVE: "never",
-      },
-    });
-    const evidence = JSON.parse(executed.stdout) as Record<string, { readonly ok: boolean }>;
-    assert.deepEqual(Object.keys(evidence).sort(), [
-      "git_write",
-      "outside_write",
-      "scratch_create",
-      "workspace_create",
-      "workspace_update",
-    ]);
-    assert.equal(evidence.workspace_create?.ok, true);
-    assert.equal(evidence.workspace_update?.ok, true);
-    assert.equal(evidence.scratch_create?.ok, true);
-    assert.equal(evidence.git_write?.ok, false);
-    assert.equal(evidence.outside_write?.ok, false);
-    assert.equal(await readFile(path.join(canonicalWorktree, "source.txt"), "utf8"), "before\nafter\n");
-    assert.equal(await readFile(path.join(canonicalWorktree, "created.txt"), "utf8"), "created\n");
-    assert.equal(await readFile(path.join(scratchDirectory, "turn-state.txt"), "utf8"), "retained\n");
-    assert.equal(await readFile(path.join(canonicalWorktree, ".git", "config"), "utf8"), "protected\n");
-    await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
+    let executed: { readonly stdout: string; readonly stderr: string } | undefined;
+    try {
+      executed = await execFileAsync("codex", [
+        "sandbox",
+        ...runtime.configArguments,
+        "--permission-profile",
+        runtime.writePermissionProfile,
+        "--cd",
+        canonicalWorktree,
+        "--",
+        process.execPath,
+        "--openssl-config=/dev/null",
+        "-e",
+        probeScript,
+        canonicalWorktree,
+        scratchDirectory,
+        canonicalOutside,
+      ], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: 20_000,
+        env: {
+          PATH: process.env.PATH,
+          LANG: process.env.LANG ?? "C.UTF-8",
+          CODEX_HOME: runtime.codexHome,
+          OPENSSL_CONF: "/dev/null",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_TERMINAL_PROMPT: "0",
+          GCM_INTERACTIVE: "never",
+        },
+      });
+    } catch (error) {
+      if (!isCodexSandboxSetupUnavailable(error)) throw error;
+      sandboxUnavailable = true;
+    }
+    if (!sandboxUnavailable) {
+      assert.ok(executed);
+      const evidence = JSON.parse(executed.stdout) as Record<string, { readonly ok: boolean }>;
+      assert.deepEqual(Object.keys(evidence).sort(), [
+        "git_write",
+        "outside_write",
+        "scratch_create",
+        "workspace_create",
+        "workspace_update",
+      ]);
+      assert.equal(evidence.workspace_create?.ok, true);
+      assert.equal(evidence.workspace_update?.ok, true);
+      assert.equal(evidence.scratch_create?.ok, true);
+      assert.equal(evidence.git_write?.ok, false);
+      assert.equal(evidence.outside_write?.ok, false);
+      assert.equal(await readFile(path.join(canonicalWorktree, "source.txt"), "utf8"), "before\nafter\n");
+      assert.equal(await readFile(path.join(canonicalWorktree, "created.txt"), "utf8"), "created\n");
+      assert.equal(await readFile(path.join(scratchDirectory, "turn-state.txt"), "utf8"), "retained\n");
+      assert.equal(await readFile(path.join(canonicalWorktree, ".git", "config"), "utf8"), "protected\n");
+      await assert.rejects(readFile(path.join(canonicalOutside, "created.txt"), "utf8"), { code: "ENOENT" });
+    }
   } finally {
     await performer.close();
   }
   await assert.rejects(lstat(scratchDirectory), { code: "ENOENT" });
+  if (sandboxUnavailable) context.skip("codex_sandbox_unavailable: sandbox_apply_operation_not_permitted");
 });
 
 test("same-Cycle Work items reuse one thread across serialized turns", async () => {

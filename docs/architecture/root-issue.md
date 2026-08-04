@@ -32,7 +32,7 @@ flowchart TD
 | Rule | Document | Required closed content | Mutable window | Forbidden content |
 |---|---|---|---|---|
 | `RI-DOC-001` | Root description | Requirement、Domain Knowledge、Root ADR、Acceptance | Define and explicit external user semantic edits | transcript、provider payload、runtime state |
-| `RI-DOC-002` | Cycle description | Root requirement/ADR snapshot<br>functional/architecture/code design<br>acceptance map and sealed groups | Draft before approval record | newer Root content after approval、hidden JSON |
+| `RI-DOC-002` | Cycle description | Root requirement/ADR snapshot<br>functional/architecture/code design<br>acceptance map and sealed groups | Draft before approval record | newer Root content after approval、hidden JSON<br>newer content is future successor input, not current acceptance input |
 | `RI-DOC-003` | Stage description | one closed immutable Instruction | never after Issue create | Result/Handoff、runtime metadata、sibling content |
 | `RI-DOC-004` | attached record | one closed typed approval/completion/invalidation projection | absent to present only by contract | raw performer output、receipt、credential、correlation |
 | `RI-DOC-005` | all managed Markdown | bounded text parsed through the standard Markdown AST and named sections | only as listed above | ad-hoc string parsing as authority |
@@ -40,7 +40,7 @@ flowchart TD
 | Root knowledge boundary | Required | Forbidden |
 |---|---|---|
 | Root ADR | named section in Root Markdown | second provider field |
-| Cycle snapshot | copy exact applicable Root knowledge before review | active Cycle re-read of newer Root content |
+| Cycle snapshot | copy exact applicable Root knowledge before review<br>current acceptance compares only this sealed snapshot | active Cycle re-read of newer Root content<br>treating it as an acceptance rejection |
 
 ## Identity table
 

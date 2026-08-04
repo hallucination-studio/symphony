@@ -11,7 +11,11 @@ import {
   parseGitSnapshot,
   parseTaskObservationEvent,
 } from "../contracts/observation.js";
-import { parseTaskSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskSnapshot,
+  type TaskSnapshot,
+} from "../contracts/task-management.js";
 import type { RootTurnOutcome } from "../contracts/runtime.js";
 import { createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type { CycleMachineHostInterface } from "../cycle/internal/CycleMachine.js";
@@ -22,21 +26,61 @@ import { RootRuntime, type RootRuntimeBinding } from "./RootRuntime.js";
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(1);
 
+const workflowStateFields = {
+  team_id: "team:runtime",
+  todo_state_id: "state:todo",
+  draft_state_id: "state:draft",
+  in_progress_state_id: "state:in-progress",
+  awaiting_acceptance_state_id: "state:awaiting-acceptance",
+  in_review_state_id: "state:in-review",
+  done_state_id: "state:done",
+  succeeded_state_id: "state:succeeded",
+  rejected_state_id: "state:rejected",
+  failed_state_id: "state:failed",
+  canceled_state_id: "state:canceled",
+} as const;
+const workflowStateMap = Object.freeze({
+  ...workflowStateFields,
+  revision: canonicalTaskRevision(workflowStateFields),
+});
+
 function task(revision: string, title: string): TaskSnapshot {
+  const fields = {
+    issue_id: rootId,
+    provider_created_at: "2026-07-30T10:00:00.000Z",
+    provider_updated_at: "2026-07-30T10:00:00.000Z",
+    creation_actor_id: "actor:agent",
+    kind: "root" as const,
+    status_id: "state:todo",
+    status: "Todo" as const,
+    title,
+    description_markdown: `# ${title}`,
+    parent_issue_id: null,
+    label_ids: ["symphony:kind:root"],
+    delegate_id: "actor:agent",
+    priority: 1,
+    archived: false,
+    trashed: false,
+  };
   return parseTaskSnapshot({
     root_id: rootId,
+    workflow_state_map: workflowStateMap,
     issues: [{
-      issue_id: rootId,
-      revision,
-      status: "Todo",
-      title,
-      description: null,
-      parent_id: null,
-      labels: ["symphony:kind/root"],
-      delegate_id: "actor:agent",
-      priority: 1,
+      ...fields,
+      provider_updated_at: revision.endsWith(":2")
+        ? "2026-07-30T10:00:01.000Z"
+        : "2026-07-30T10:00:00.000Z",
+      revision: canonicalTaskRevision({
+        ...fields,
+        provider_updated_at: revision.endsWith(":2")
+          ? "2026-07-30T10:00:01.000Z"
+          : "2026-07-30T10:00:00.000Z",
+      }),
     }],
     relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
 }
 

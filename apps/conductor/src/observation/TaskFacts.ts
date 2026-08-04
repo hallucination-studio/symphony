@@ -6,6 +6,7 @@ import type {
 } from "../contracts/observation.js";
 import type {
   TaskIssueSnapshot,
+  TaskIssueHistoryEntry,
   TaskRelationSnapshot,
   TaskSnapshot,
 } from "../contracts/task-management.js";
@@ -59,6 +60,35 @@ export function taskSnapshotDigest(snapshot: TaskSnapshot): TaskDigest {
     .update(JSON.stringify(canonicalTaskSnapshot(snapshot)))
     .digest("hex");
   return parseTaskDigest(`sha256:${digest}`);
+}
+
+export type LastValidStageBasisStatus = "Todo" | "In Progress";
+
+/**
+ * Grouped provider history cannot establish mutation order. For an externally
+ * terminal Stage, accept only one status transition that identifies its legal
+ * nonterminal predecessor; every other shape is ambiguous and fails closed.
+ */
+export function deriveLastValidStageBasisStatus(
+  snapshot: Pick<TaskSnapshot, "issues" | "issue_history">,
+  issueId: TaskIssueSnapshot["issue_id"],
+): LastValidStageBasisStatus | null {
+  const issue = snapshot.issues.find(({ issue_id }) => issue_id === issueId);
+  if (issue === undefined) return null;
+  if (issue.status === "Todo" || issue.status === "In Progress") return issue.status;
+  if (issue.status !== "Done" && issue.status !== "Failed" && issue.status !== "Canceled") return null;
+
+  const candidates = new Set<LastValidStageBasisStatus>();
+  for (const entry of snapshot.issue_history as readonly TaskIssueHistoryEntry[]) {
+    if (
+      entry.issue_id !== issueId
+      || !entry.changed_fields.includes("status")
+      || entry.to_status !== issue.status
+      || (entry.from_status !== "Todo" && entry.from_status !== "In Progress")
+    ) continue;
+    candidates.add(entry.from_status);
+  }
+  return candidates.size === 1 ? [...candidates][0]! : null;
 }
 
 export function taskStringSetsEqual(left: readonly string[], right: readonly string[]): boolean {

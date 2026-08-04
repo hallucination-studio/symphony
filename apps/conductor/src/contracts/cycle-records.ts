@@ -629,7 +629,8 @@ export type VerifyCompletion = {
   readonly checks_markdown: MarkdownText;
   readonly evidence_markdown: MarkdownText;
 } & (
-  { readonly conclusion: "passed" | "failed" }
+  { readonly conclusion: "passed" }
+  | { readonly conclusion: "failed"; readonly reason_markdown: MarkdownText }
   | {
     readonly conclusion: "inconclusive" | "canceled";
     readonly reason_code: string;
@@ -675,7 +676,8 @@ function parseWorkCompletion(value: unknown): WorkCompletion {
 function parseVerifyCompletion(value: unknown): VerifyCompletion {
   const record = asRecord(value);
   const conclusion = parseEnum(record.conclusion, ["passed", "failed", "inconclusive", "canceled"] as const);
-  const reasonKeys = conclusion === "passed" || conclusion === "failed" ? [] : ["reason_code", "reason_markdown"];
+  const reasonKeys = conclusion === "passed" ? [] : conclusion === "failed"
+    ? ["reason_markdown"] : ["reason_code", "reason_markdown"];
   assertExactKeys(record, [
     "conclusion", "instruction_digest", "exact_revision", "checks_markdown", "evidence_markdown",
     ...reasonKeys,
@@ -686,8 +688,15 @@ function parseVerifyCompletion(value: unknown): VerifyCompletion {
     checks_markdown: parseCheckMarkdown(record.checks_markdown),
     evidence_markdown: parseMarkdownText(record.evidence_markdown, "invalid_verify_evidence"),
   };
-  if (conclusion === "passed" || conclusion === "failed") {
+  if (conclusion === "passed") {
     return Object.freeze({ ...evidence, conclusion });
+  }
+  if (conclusion === "failed") {
+    return Object.freeze({
+      ...evidence,
+      conclusion,
+      reason_markdown: parseMarkdownText(record.reason_markdown, "invalid_completion_reason"),
+    });
   }
   return Object.freeze({
     ...evidence, conclusion,

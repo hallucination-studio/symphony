@@ -131,7 +131,9 @@ interface VerifyResultEvidence extends RoleResultCommon {
 }
 
 export type VerifyResult = VerifyResultEvidence & (
-  { readonly conclusion: "passed" | "failed" | "inconclusive" }
+  { readonly conclusion: "passed" }
+  | { readonly conclusion: "failed"; readonly reason_markdown: MarkdownText }
+  | { readonly conclusion: "inconclusive"; readonly reason_code: string; readonly reason_markdown: MarkdownText }
   | { readonly conclusion: "canceled"; readonly reason_markdown: MarkdownText }
 );
 
@@ -363,12 +365,12 @@ export function parseVerifyRequest(value: unknown): VerifyRequest {
 export function parseVerifyResult(value: unknown, request: VerifyRequest): VerifyResult {
   const record = asRecord(value);
   const conclusion = parseEnum(record.conclusion, ["passed", "failed", "inconclusive", "canceled"] as const);
-  assertExactKeys(record, conclusion === "canceled" ? [
+  const reasonKeys = conclusion === "passed" ? [] : conclusion === "failed"
+    ? ["reason_markdown"] : conclusion === "inconclusive"
+      ? ["reason_code", "reason_markdown"] : ["reason_markdown"];
+  assertExactKeys(record, [
     ...COMMON_RESULT_KEYS, "verify_issue_id", "revision", "checks", "sanitized_summary_markdown",
-    "conclusion", "reason_markdown",
-  ] : [
-    ...COMMON_RESULT_KEYS, "verify_issue_id", "revision", "checks", "sanitized_summary_markdown",
-    "conclusion",
+    "conclusion", ...reasonKeys,
   ]);
   const envelope = assertResultEnvelope(record, request);
   const verifyIssueId = parseStageIssueId(record.verify_issue_id);
@@ -381,9 +383,25 @@ export function parseVerifyResult(value: unknown, request: VerifyRequest): Verif
     checks: parseChecks(record.checks),
     sanitized_summary_markdown: parseMarkdownText(record.sanitized_summary_markdown, "invalid_verify_summary"),
   };
-  if (conclusion !== "canceled") return Object.freeze({ ...evidence, conclusion });
+  if (conclusion === "passed") return Object.freeze({ ...evidence, conclusion });
+  if (conclusion === "failed") {
+    return Object.freeze({
+      ...evidence,
+      conclusion,
+      reason_markdown: parseMarkdownText(record.reason_markdown, "invalid_verify_reason"),
+    });
+  }
+  if (conclusion === "inconclusive") {
+    return Object.freeze({
+      ...evidence,
+      conclusion,
+      reason_code: parseBoundedString(record.reason_code, "invalid_verify_reason_code", 128),
+      reason_markdown: parseMarkdownText(record.reason_markdown, "invalid_verify_reason"),
+    });
+  }
   return Object.freeze({
-    ...evidence, conclusion,
+    ...evidence,
+    conclusion,
     reason_markdown: parseMarkdownText(record.reason_markdown, "invalid_verify_reason"),
   });
 }

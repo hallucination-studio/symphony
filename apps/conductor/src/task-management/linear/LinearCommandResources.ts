@@ -1,5 +1,6 @@
 import type { TaskIssueId } from "../../contracts/identity.js";
 import {
+  canonicalTaskRevision,
   parseTaskIssueSnapshotChange,
   parseTaskRelationSnapshot,
   type TaskIssueSnapshot,
@@ -26,6 +27,22 @@ export interface LinearCommandPage<T> {
 
 export type LinearProviderOutcome = "accepted" | "rejected" | "uncertain" | "malformed";
 
+export function linearCommandIssueFromSnapshot(
+  snapshot: TaskIssueSnapshot,
+  teamId: string,
+): LinearCommandIssueRecord {
+  const parsed = parseTaskIssueSnapshotChange(snapshot);
+  return Object.freeze({
+    snapshot: parsed,
+    teamId: parseBoundedString(teamId, "invalid_linear_team_id", 128),
+    createdAt: parsed.provider_created_at,
+    updatedAt: parsed.provider_updated_at,
+    creatorId: parsed.creation_actor_id,
+    archived: parsed.archived,
+    trashed: parsed.trashed,
+  });
+}
+
 function parseTimestamp(value: unknown): string {
   const timestamp = parseBoundedString(value, "invalid_linear_timestamp", 64);
   const parsed = new Date(timestamp);
@@ -35,56 +52,33 @@ function parseTimestamp(value: unknown): string {
   return timestamp;
 }
 
-export function parseLinearCommandIssue(value: unknown): LinearCommandIssueRecord {
-  const record = asRecord(value);
-  assertExactKeys(record, [
-    "id", "revision", "team_id", "parent_id", "status", "title", "description", "labels",
-    "delegate_id", "priority", "created_at", "updated_at", "creator_id", "archived", "trashed",
-  ]);
-  if (typeof record.archived !== "boolean" || typeof record.trashed !== "boolean") {
-    throw new Error("linear_invalid_payload");
-  }
-  return Object.freeze({
-    snapshot: parseTaskIssueSnapshotChange({
-      issue_id: record.id,
-      revision: record.revision,
-      status: record.status,
-      title: record.title,
-      description: record.description,
-      parent_id: record.parent_id,
-      labels: record.labels,
-      delegate_id: record.delegate_id,
-      priority: record.priority,
-    }),
-    teamId: parseBoundedString(record.team_id, "invalid_linear_team_id", 128),
-    createdAt: parseTimestamp(record.created_at),
-    updatedAt: parseTimestamp(record.updated_at),
-    creatorId: record.creator_id === null
-      ? null
-      : parseBoundedString(record.creator_id, "invalid_linear_creator_id", 128),
-    archived: record.archived,
-    trashed: record.trashed,
-  });
-}
-
-function parseRelation(value: unknown): TaskRelationSnapshot {
+function parseRelation(value: unknown, serviceActorId: string): TaskRelationSnapshot {
   const record = asRecord(value);
   assertExactKeys(record, [
     "id", "revision", "type", "source_issue_id", "target_issue_id", "created_at", "updated_at", "archived",
   ]);
-  parseTimestamp(record.created_at);
-  parseTimestamp(record.updated_at);
+  const providerCreatedAt = parseTimestamp(record.created_at);
+  const providerUpdatedAt = parseTimestamp(record.updated_at);
   if (typeof record.archived !== "boolean") throw new Error("linear_invalid_payload");
-  return parseTaskRelationSnapshot({
+  if (record.archived) throw new Error("linear_archived_relation");
+  const fields = {
     relation_id: record.id,
-    revision: record.revision,
+    provider_created_at: providerCreatedAt,
+    provider_updated_at: providerUpdatedAt,
+    creation_actor_id: serviceActorId,
+    creation_evidence_id: `linear:relation:${String(record.id)}`,
     type: record.type,
     source_issue_id: record.source_issue_id,
     target_issue_id: record.target_issue_id,
-  });
+  };
+  return parseTaskRelationSnapshot({ ...fields, revision: canonicalTaskRevision(fields) });
 }
 
-export function parseLinearRelationPage(value: unknown, limit: number): LinearCommandPage<TaskRelationSnapshot> {
+export function parseLinearRelationPage(
+  value: unknown,
+  limit: number,
+  serviceActorId: string,
+): LinearCommandPage<TaskRelationSnapshot> {
   const record = asRecord(value);
   assertExactKeys(record, ["nodes", "page_info"]);
   const pageInfo = asRecord(record.page_info);
@@ -95,7 +89,7 @@ export function parseLinearRelationPage(value: unknown, limit: number): LinearCo
     : parseBoundedString(pageInfo.end_cursor, "invalid_linear_cursor", 512);
   if (pageInfo.has_next_page && nextCursor === null) throw new Error("linear_incomplete_page");
   return Object.freeze({
-    nodes: parseArray(record.nodes, parseRelation, limit),
+    nodes: parseArray(record.nodes, (entry) => parseRelation(entry, serviceActorId), limit),
     nextCursor: pageInfo.has_next_page ? nextCursor : null,
   });
 }

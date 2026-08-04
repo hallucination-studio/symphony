@@ -384,3 +384,21 @@ test("delivery invalidation is Root-attached, Cycle-bound, and reason-discrimina
     },
   }), /invalid_delivery_effect_conflict/u);
 });
+
+test("failed Verify completion persists lost execution context as Markdown explanation", () => {
+  const parsed = parseStageCompletionRecord({
+    ...commonRecord("record:verify:completion:lost", "issue:verify:1"),
+    record_kind: "stage_completion",
+    stage_id: "issue:verify:1",
+    completion: {
+      conclusion: "failed",
+      instruction_digest: digest("1"),
+      exact_revision: digest("2"),
+      checks_markdown: "## Checks\n\n- not_run",
+      evidence_markdown: "Execution context was lost.",
+      reason_markdown: "lost_execution_context",
+    },
+  }, "verify");
+  assert.equal(parsed.completion.conclusion, "failed");
+  assert.equal(parsed.completion.reason_markdown, "lost_execution_context");
+});

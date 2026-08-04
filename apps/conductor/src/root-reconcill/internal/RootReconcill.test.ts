@@ -29,7 +29,13 @@ import {
   type RootBootstrap,
   type RootFactDiff,
 } from "../../contracts/observation.js";
-import { parseTaskSnapshot } from "../../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  parseTaskSnapshot,
+  type TaskIssueSnapshot,
+  type TaskWorkflowStatus,
+} from "../../contracts/task-management.js";
 import { parseMarkdownText } from "../../contracts/validation.js";
 import { rootObservationDigest } from "../../observation/RootObservationFacts.js";
 import { RootTools, type DeclaredRootTool } from "../../runtime/RootTools.js";
@@ -196,20 +202,47 @@ function bootstrap(
   correlation = "corr:bootstrap:1",
   runtimeGeneration = generation,
 ): RootBootstrap {
+  const fields = {
+    issue_id: rootId,
+    provider_created_at: "2026-07-30T10:00:00.000Z",
+    provider_updated_at: "2026-07-30T10:00:00.000Z",
+    creation_actor_id: "actor:agent",
+    kind: "root" as const,
+    status_id: "state:todo",
+    status: "Todo" as const,
+    title: "Build the Root runtime",
+    description_markdown: "# Build the Root runtime",
+    parent_issue_id: null,
+    label_ids: ["label:root"],
+    delegate_id: "actor:agent",
+    priority: 1,
+    archived: false,
+    trashed: false,
+  };
+  const workflowStateFields = {
+    team_id: "team:root-reconcill",
+    todo_state_id: "state:todo",
+    draft_state_id: "state:draft",
+    in_progress_state_id: "state:cycle-in-progress",
+    awaiting_acceptance_state_id: "state:awaiting-acceptance",
+    in_review_state_id: "state:in-review",
+    done_state_id: "state:done",
+    succeeded_state_id: "state:succeeded",
+    rejected_state_id: "state:rejected",
+    failed_state_id: "state:cycle-failed",
+    canceled_state_id: "state:cycle-canceled",
+  } as const;
   const task = parseTaskSnapshot({
     root_id: rootId,
-    issues: [{
-      issue_id: rootId,
-      revision: "revision:root:1",
-      status: "Todo",
-      title: "Build the Root runtime",
-      description: null,
-      parent_id: null,
-      labels: ["label:root"],
-      delegate_id: "actor:agent",
-      priority: 1,
-    }],
+    workflow_state_map: {
+      ...workflowStateFields,
+      revision: canonicalTaskRevision(workflowStateFields),
+    },
+    issues: [{ ...fields, revision: canonicalTaskRevision(fields) }],
     relations: [],
+    resource_creation_evidence: [],
+    issue_history: [],
+    issue_record_observations: [],
   });
   const git = parseGitSnapshot({
     repository_id: parseRepositoryId("repo:1"),
@@ -233,12 +266,89 @@ function bootstrap(
 
 function taskAtRootRevision(revision: string, description: string | null) {
   const task = bootstrap().task;
+  const current = task.issues[0];
+  if (current === undefined) throw new Error("missing_root_fixture");
+  const fields = {
+    ...current,
+    provider_updated_at: revision.endsWith(":3")
+      ? "2026-07-30T10:00:02.000Z"
+      : "2026-07-30T10:00:01.000Z",
+    description_markdown: description ?? "# Empty",
+  };
+  const { revision: _revision, ...revisionFields } = fields;
+  void _revision;
   return parseTaskSnapshot({
     ...task,
     issues: task.issues.map((issue) => issue.issue_id === parseTaskIssueId(rootId)
-      ? { ...issue, revision, description }
+      ? { ...revisionFields, revision: canonicalTaskRevision(revisionFields) }
       : issue),
   });
+}
+
+function issueResource(input: {
+  readonly issue_id: string;
+  readonly kind: TaskIssueSnapshot["kind"];
+  readonly status_id: string;
+  readonly status: TaskWorkflowStatus;
+  readonly title: string;
+  readonly description_markdown: string;
+  readonly parent_issue_id: string | null;
+  readonly label_ids: readonly string[];
+  readonly delegate_id: string | null;
+  readonly priority: number | null;
+  readonly provider_updated_at?: string;
+}): TaskIssueSnapshot {
+  const fields = {
+    ...input,
+    provider_created_at: "2026-07-30T10:00:00.000Z",
+    provider_updated_at: input.provider_updated_at ?? "2026-07-30T10:00:00.000Z",
+    creation_actor_id: "actor:agent",
+    archived: false,
+    trashed: false,
+  };
+  return parseTaskIssueSnapshotChange({
+    ...fields,
+    revision: canonicalTaskRevision(fields),
+  });
+}
+
+function changedIssueResource(
+  current: TaskIssueSnapshot,
+  changes: Partial<Omit<TaskIssueSnapshot, "revision" | "provider_updated_at">>,
+  providerUpdatedAt: string,
+): TaskIssueSnapshot {
+  const { revision: _revision, provider_updated_at: _previousUpdatedAt, ...unchanged } = current;
+  void _revision;
+  void _previousUpdatedAt;
+  const fields = { ...unchanged, ...changes, provider_updated_at: providerUpdatedAt };
+  return parseTaskIssueSnapshotChange({
+    ...fields,
+    revision: canonicalTaskRevision(fields),
+  });
+}
+
+const rootTaskId = parseTaskIssueId(rootId);
+function rootRevisionOf(task: ReturnType<typeof parseTaskSnapshot>): TaskIssueSnapshot["revision"] {
+  const issue = task.issues.find(({ issue_id }) => issue_id === rootTaskId);
+  if (issue === undefined) throw new Error("missing_root_revision_fixture");
+  return issue.revision;
+}
+
+const initialRootRevision = rootRevisionOf(bootstrap().task);
+const concurrentRootRevision = rootRevisionOf(taskAtRootRevision(
+  "revision:root:2",
+  concurrentRootDescription,
+));
+const finalRootRevision = rootRevisionOf(taskAtRootRevision(
+  "revision:root:3",
+  reconciledRootDescription,
+));
+
+function normalizeRootRevision(value: string): string {
+  if (value === "revision:root:1") return initialRootRevision;
+  if (value === "revision:root:2") return concurrentRootRevision;
+  if (value === "revision:root:3") return finalRootRevision;
+  return value;
 }
 
 function completeRootBootstrap(): RootBootstrap {
@@ -248,6 +358,12 @@ function completeRootBootstrap(): RootBootstrap {
     task: taskAtRootRevision("revision:root:2", reconciledRootDescription),
   }, { root_id: rootId, runtime_generation: generation });
 }
+
+const completeRootRevision = rootRevisionOf(completeRootBootstrap().task);
+const resumedCycleDraftDescription = cycleDraftDescription.replace(
+  "`revision:root:2`",
+  `\`${completeRootRevision}\``,
+);
 
 function diff(
   from: string,
@@ -454,7 +570,7 @@ function updateIssueToolCall(
 ): Record<string, unknown> {
   return taskToolCall(requestId, turnId, "update_issue", {
     issue_id: rootId,
-    expected_revision: expectedRevision,
+    expected_revision: normalizeRootRevision(expectedRevision),
     desired: { description: reconciledRootDescription },
   }, runtimeGeneration);
 }
@@ -506,6 +622,26 @@ function updateResult(
   outcome: "applied" | "stale_before_effect",
   revision: string,
 ): UpdateIssueResult {
+  const providerUpdatedAt = revision.endsWith(":3")
+    ? "2026-07-30T10:00:02.000Z"
+    : revision.endsWith(":2")
+      ? "2026-07-30T10:00:01.000Z"
+      : "2026-07-30T10:00:00.000Z";
+  const fresh = issueResource({
+    issue_id: call.input.issue_id,
+    kind: "root",
+    status_id: "state:todo",
+    status: "Todo",
+    title: "Build the Root runtime",
+    description_markdown: outcome === "applied"
+      ? reconciledRootDescription
+      : concurrentRootDescription,
+    parent_issue_id: null,
+    label_ids: ["label:root"],
+    delegate_id: "actor:agent",
+    priority: 1,
+    provider_updated_at: providerUpdatedAt,
+  });
   return parseTaskMcpResult({
     schema_version: 1,
     function: call.function,
@@ -517,25 +653,13 @@ function updateResult(
       outcome,
       effect_may_have_occurred: outcome === "applied",
       target: { kind: "issue", issue_id: call.input.issue_id },
-      fresh_resource: {
-        issue_id: call.input.issue_id,
-        revision,
-        status: "Todo",
-        title: "Build the Root runtime",
-        description: outcome === "applied"
-          ? reconciledRootDescription
-          : concurrentRootDescription,
-        parent_id: null,
-        labels: ["label:root"],
-        delegate_id: "actor:agent",
-        priority: 1,
-      },
+      fresh_resource: fresh,
       concrete_diff: [{
         kind: "field_changed",
         issue_id: call.input.issue_id,
         field: "description",
-        before: call.input.expected_revision === "revision:root:1"
-          ? null
+        before: call.input.expected_revision === initialRootRevision
+          ? bootstrap().task.issues[0]?.description_markdown ?? "# Empty"
           : concurrentRootDescription,
         after: outcome === "applied"
           ? reconciledRootDescription
@@ -1426,28 +1550,27 @@ test("malformed runtime input fails through the sanitized contract path", async 
 test("an oversized Root prompt is rejected before aggregate JSON serialization", async () => {
   const source = bootstrap();
   const description = "x".repeat(100_000);
+  const sourceIssue = source.task.issues[0];
+  if (sourceIssue === undefined) throw new Error("missing_oversized_root_fixture");
+  const oversizedIssues = Array.from({ length: 3 }, (_, index) => {
+    const fields = {
+      ...sourceIssue,
+      issue_id: index === 0 ? sourceIssue.issue_id : `LIN-${index + 1}`,
+      kind: index === 0 ? sourceIssue.kind : "cycle" as const,
+      parent_issue_id: index === 0 ? null : rootId,
+      label_ids: index === 0 ? sourceIssue.label_ids : ["label:cycle"],
+      description_markdown: description,
+      provider_updated_at: `2026-07-30T10:00:0${index}.000Z`,
+    };
+    const { revision: _revision, ...revisionFields } = fields;
+    void _revision;
+    return { ...revisionFields, revision: canonicalTaskRevision(revisionFields) };
+  });
   const oversized = parseRootBootstrap({
     ...source,
     task: {
-      root_id: rootId,
-      issues: [
-        { ...source.task.issues[0], description },
-        {
-          ...source.task.issues[0],
-          issue_id: "LIN-2",
-          revision: "revision:child:2",
-          parent_id: rootId,
-          description,
-        },
-        {
-          ...source.task.issues[0],
-          issue_id: "LIN-3",
-          revision: "revision:child:3",
-          parent_id: rootId,
-          description,
-        },
-      ],
-      relations: [],
+      ...source.task,
+      issues: oversizedIssues,
     },
   }, { root_id: rootId, runtime_generation: generation });
   const f = await fixture([]);
@@ -2098,10 +2221,10 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
         taskToolCall("tool:create-resumed-draft", "turn-root", "create_issue", {
           issue_id: cycleId,
           parent_issue_id: rootId,
-          expected_parent_revision: "revision:root:2",
+          expected_parent_revision: completeRootRevision,
           desired: {
             title: "Implement the Root runtime",
-            description: cycleDraftDescription,
+            description: resumedCycleDraftDescription,
             state_id: workflow.cycle_states.draft,
             label_ids: [workflow.labels.cycle],
             delegate_id: null,
@@ -2128,17 +2251,18 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
     const parent = currentTask.issues.find(({ issue_id }) => issue_id === call.input.parent_issue_id);
     assert.ok(parent);
     assert.equal(call.input.expected_parent_revision, parent.revision);
-    const fresh = {
+    const fresh = issueResource({
       issue_id: call.input.issue_id,
-      revision: "revision:cycle:1",
-      status: call.input.desired.state_id,
+      kind: "cycle",
+      status_id: call.input.desired.state_id,
+      status: "Draft",
       title: call.input.desired.title,
-      description: call.input.desired.description,
-      parent_id: call.input.parent_issue_id,
-      labels: call.input.desired.label_ids,
+      description_markdown: call.input.desired.description ?? "# Empty",
+      parent_issue_id: call.input.parent_issue_id,
+      label_ids: call.input.desired.label_ids,
       delegate_id: call.input.desired.delegate_id,
       priority: call.input.desired.priority,
-    };
+    });
     currentTask = parseTaskSnapshot({
       ...currentTask,
       issues: [...currentTask.issues, fresh],
@@ -2164,7 +2288,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
   const f = await controlledFixture(
     appServer,
     manager,
-    [TASK_MCP_CAPABILITIES.create_issue, TASK_MCP_CAPABILITIES.update_issue],
+    [TASK_MCP_CAPABILITIES.get_issue, TASK_MCP_CAPABILITIES.create_issue, TASK_MCP_CAPABILITIES.update_issue],
     1,
     2_000,
     async () => currentTask,
@@ -2172,7 +2296,7 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
 
   try {
     assert.equal((await f.root.run(completeRootBootstrap())).outcome, "quiescent");
-    assert.deepEqual(managerCalls, [`create:${rootId}:revision:root:2`]);
+    assert.deepEqual(managerCalls, [`create:${rootId}:${completeRootRevision}`]);
     assert.equal(responses.length, 1);
     assert.equal(responses[0]?.success, true);
     assert.equal(currentTask.issues.some(({ issue_id }) => issue_id === cycleId), true);
@@ -2195,10 +2319,10 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     "first_cycle",
     "first_cycle",
   ));
-  const rootRevision = `symphony:v1:${"a".repeat(64)}`;
-  const cycleCreatedRevision = `symphony:v1:${"b".repeat(64)}`;
-  const cycleCorrectedRevision = `symphony:v1:${"c".repeat(64)}`;
-  const cycleApprovedRevision = `symphony:v1:${"d".repeat(64)}`;
+  const rootRevision = rootRevisionOf(taskAtRootRevision("revision:root:2", reconciledRootDescription));
+  let cycleCreatedRevision: string | undefined;
+  let cycleCorrectedRevision: string | undefined;
+  let cycleApprovedRevision: string | undefined;
   const executionDesign = [
     "### Execution Anchors", "",
     `- Cycle ID: \`${cycleId}\``,
@@ -2241,8 +2365,8 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
         readonly issue?: {
           readonly issue_id?: unknown;
           readonly revision?: unknown;
-          readonly status?: unknown;
-          readonly description?: unknown;
+          readonly status_id?: unknown;
+          readonly description_markdown?: unknown;
         } | null;
       };
     }).output?.issue;
@@ -2250,8 +2374,8 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     return {
       issue_id: String(issue.issue_id),
       revision: String(issue.revision),
-      status: String(issue.status),
-      description: typeof issue.description === "string" ? issue.description : null,
+      status: String(issue.status_id),
+      description: typeof issue.description_markdown === "string" ? issue.description_markdown : null,
     };
   };
   const createdIssue = (response: ReturnType<typeof toolResponse>) => {
@@ -2371,21 +2495,27 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     const descriptionUpdate = call.input.desired.description !== undefined;
     const statusUpdate = call.input.desired.state_id !== undefined;
     assert.notEqual(descriptionUpdate, statusUpdate);
-    const revision = before.issue_id === rootTaskIssueId
-      ? rootRevision
-      : descriptionUpdate ? cycleCorrectedRevision : cycleApprovedRevision;
     const field = descriptionUpdate ? "description" : "status";
     const beforeValue = descriptionUpdate ? before.description_markdown : before.status_id;
     const afterValue = descriptionUpdate ? call.input.desired.description : call.input.desired.state_id;
-    const fresh = {
-      ...before,
-      revision,
+    const fresh = changedIssueResource(before, {
       description_markdown: descriptionUpdate
         ? parseMarkdownText(call.input.desired.description ?? "# Empty")
         : before.description_markdown,
       status_id: statusUpdate ? call.input.desired.state_id ?? before.status_id : before.status_id,
       status: statusUpdate ? "In Progress" as const : before.status,
-    };
+    }, before.issue_id === rootTaskIssueId
+      ? "2026-07-30T10:00:01.000Z"
+      : descriptionUpdate
+        ? "2026-07-30T10:00:02.000Z"
+        : "2026-07-30T10:00:03.000Z");
+    if (before.issue_id === rootTaskIssueId) {
+      assert.equal(fresh.description_markdown, reconciledRootDescription);
+    } else if (descriptionUpdate) {
+      cycleCorrectedRevision = fresh.revision;
+    } else {
+      cycleApprovedRevision = fresh.revision;
+    }
     currentTask = parseTaskSnapshot({
       ...currentTask,
       issues: currentTask.issues.map((issue) => issue.issue_id === fresh.issue_id ? fresh : issue),
@@ -2419,17 +2549,19 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
     const parent = currentTask.issues.find(({ issue_id }) => issue_id === call.input.parent_issue_id);
     assert.ok(parent);
     assert.equal(call.input.expected_parent_revision, parent.revision);
-    const fresh = {
+    const fresh = issueResource({
       issue_id: call.input.issue_id,
-      revision: cycleCreatedRevision,
-      status: call.input.desired.state_id,
+      kind: "cycle",
+      status_id: call.input.desired.state_id,
+      status: "Draft",
       title: call.input.desired.title,
-      description: call.input.desired.description,
-      parent_id: call.input.parent_issue_id,
-      labels: call.input.desired.label_ids,
+      description_markdown: call.input.desired.description ?? "# Empty",
+      parent_issue_id: call.input.parent_issue_id,
+      label_ids: call.input.desired.label_ids,
       delegate_id: call.input.desired.delegate_id,
       priority: call.input.desired.priority,
-    };
+    });
+    cycleCreatedRevision = fresh.revision;
     currentTask = parseTaskSnapshot({
       ...currentTask,
       issues: [...currentTask.issues, fresh],
@@ -2524,7 +2656,7 @@ test("controlled app-server completes fresh Define, Draft review, correction, an
   try {
     assert.equal((await f.root.run(bootstrap())).outcome, "quiescent");
     assert.deepEqual(managerCalls, [
-      `update:${rootId}:revision:root:1`,
+      `update:${rootId}:${initialRootRevision}`,
       `get:${rootId}`,
       `create:${rootId}:${rootRevision}`,
       `get:${cycleId}`,
@@ -2622,7 +2754,7 @@ test("a precondition conflict is re-observed in the same process, thread, and tu
   );
 
   assert.equal((await f.root.run(bootstrap())).outcome, "quiescent");
-  assert.deepEqual(revisions, ["revision:root:1", "revision:root:2"]);
+  assert.deepEqual(revisions, [initialRootRevision, concurrentRootRevision]);
   assert.equal(responses.length, 2);
   assert.equal(responses[0]?.success, true);
   assert.equal((responses[0]?.body as { output?: { outcome?: unknown } }).output?.outcome, "stale_before_effect");
@@ -2723,17 +2855,7 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
       correlation_id: call.correlation_id,
       capability: call.capability,
       output: {
-        issue: {
-          issue_id: call.input.issue_id,
-          revision: "revision:root:2",
-          status: "Todo",
-          title: "Build the Root runtime",
-          description: concurrentRootDescription,
-          parent_id: null,
-          labels: ["label:root"],
-          delegate_id: "actor:agent",
-          priority: 1,
-        },
+        issue: currentTask.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null,
       },
     }, call);
   };
@@ -2749,9 +2871,9 @@ test("acceptance_unknown denial stays in-turn until an exact read unlocks a retr
 
   assert.equal((await f.root.run(bootstrap())).outcome, "quiescent");
   assert.deepEqual(managerCalls, [
-    "update:revision:root:1",
+    `update:${initialRootRevision}`,
     `read:${rootId}`,
-    "update:revision:root:2",
+    `update:${concurrentRootRevision}`,
   ]);
   assert.deepEqual(responses.map(([id, response]) => [
     id,

@@ -639,6 +639,7 @@ test("failed and inconclusive VerifyResult variants remain non-mutating evidence
       },
     ],
     sanitized_summary_markdown: "## Failure\n\nA requested verification check failed.",
+    reason_markdown: "Verification reported a failed check.",
   };
   assert.deepEqual(parseVerifyResult(failed, parsedVerifyRequest()), failed);
 
@@ -647,6 +648,8 @@ test("failed and inconclusive VerifyResult variants remain non-mutating evidence
     conclusion: "inconclusive",
     checks: [],
     sanitized_summary_markdown: "## Inconclusive\n\nVerification boundary was unavailable.",
+    reason_code: "verification_boundary_unavailable",
+    reason_markdown: "Verification boundary was unavailable.",
   };
   assert.deepEqual(parseVerifyResult(inconclusive, parsedVerifyRequest()), inconclusive);
 

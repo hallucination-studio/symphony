@@ -30,7 +30,7 @@ sequenceDiagram
 | `RR-LOOP-002` | Draft review | exact Cycle Draft and Root snapshot copied into it | sealed directives、fixed Work groups、approval or Draft terminal record | Plan dispatch、mutable post-approval design |
 | `RR-LOOP-003` | Acceptance | sealed Cycle, every Stage record/revision, exact Git facts and convergence basis | accepted/rejected/canceled Cycle record | implementation repair、status-only accept |
 | `RR-LOOP-004` | Successor | terminal predecessor and complete known graph/history proof | deterministic new Cycle Draft if policy allows | reopen predecessor、reuse thread/worktree |
-| `RR-LOOP-005` | external Root semantic edit during active Cycle | fresh Root edit plus frozen active Cycle | observe future requirement and quiesce | change active Cycle or inject edit into Stage context |
+| `RR-LOOP-005` | external Root semantic edit during active Cycle | fresh Root edit plus frozen active Cycle | observe as a future requirement<br>keep current acceptance bound to the sealed snapshot<br>quiesce | change active Cycle<br>reject current acceptance for the newer edit<br>inject edit into Stage context |
 
 ## Define table
 
@@ -78,7 +78,7 @@ flowchart TD
 | Rule | Decision | Evidence required | Durable write | Status projection |
 |---|---|---|---|---|
 | `RR-ACCEPT-001` | satisfies sealed design | specification/graph seals and acceptance basis<br>all Stage revisions/record digests<br>exact revision and convergence proof | accepted Cycle Result/Handoff with `successor_policy: not_applicable` | `WF-ROUTE-003` then `WF-TR-009` |
-| `RR-ACCEPT-002` | does not satisfy design or approved requirement changed | same complete evidence plus bounded reason | rejected Cycle Result/Handoff with `successor_policy: allowed` | `WF-ROUTE-003` then `WF-TR-010` |
+| `RR-ACCEPT-002` | does not satisfy sealed design or the approved requirement in the sealed Cycle snapshot | same complete evidence plus bounded reason | rejected Cycle Result/Handoff with `successor_policy: allowed` | `WF-ROUTE-003` then `WF-TR-010`; a newer external Root edit is future-only under `RR-LOOP-005` |
 | `RR-ACCEPT-003` | cancellation | same complete evidence and cancel reason | canceled Cycle Result/Handoff with `successor_policy: allowed` | `WF-ROUTE-003` then `WF-TR-010` |
 | `RR-ACCEPT-004` | evidence incomplete or changes between rounds | observed conflict | no semantic terminal record | fresh router selects mechanical invalidation; never accept |
 
@@ -92,7 +92,7 @@ flowchart TD
 |---|---|---|---|
 | `RR-SUCC-001` | Root freshly delegated<br>predecessor record and identity closure intact<br>`successor_policy: allowed` | create one `RI-SUCC-001` Cycle | admission absent、delivery effect、partial graph、lost authoritative record、family quarantine |
 | `RR-SUCC-002` | predecessor ended through external terminal invalidation | allow only if Stage-first closure and intact proof explicitly permit | `WF-FAIL-005` remains incomplete |
-| `RR-SUCC-003` | new Root requirement/ADR must apply | wait until current Cycle terminal, then copy into new Draft | active Cycle still non-terminal |
+| `RR-SUCC-003` | newer Root requirement/ADR observed under `RR-LOOP-005` must apply | wait until current Cycle terminal<br>copy into one new Draft<br>never apply to current acceptance | active Cycle still non-terminal |
 
 ## Permission table
 

@@ -4,6 +4,11 @@ import test from "node:test";
 
 import { parseRootIssueId, parseRuntimeGeneration } from "../../contracts/identity.js";
 import {
+  canonicalTaskRevision,
+  parseTaskIssueSnapshotChange,
+  type TaskIssueSnapshot,
+} from "../../contracts/task-management.js";
+import {
   parseTaskMcpCall,
   parseTaskMcpResult,
   type CreateIssueCommentCall,
@@ -21,31 +26,47 @@ const RELATION_UUID = "22222222-2222-4222-8222-222222222222";
 const target = { root_id: parseRootIssueId("root-1"), runtime_generation: parseRuntimeGeneration(1) };
 const ACTIVE_EXECUTION = Object.freeze({ assertActive: () => undefined });
 
-function issue(id: string, revision: string, overrides: Record<string, unknown> = {}) {
-  return {
-    id,
-    revision,
-    team_id: TEAM_ID,
-    parent_id: id === "root-1" ? null : "root-1",
-    status: "state:todo",
-    title: `Issue ${id}`,
-    description: null,
-    labels: ["label:work"],
-    delegate_id: "actor:1",
-    priority: 2,
-    created_at: "2026-07-30T00:00:00.000Z",
-    updated_at: "2026-07-30T00:00:00.000Z",
-    creator_id: "actor:1",
-    archived: false,
-    trashed: false,
-    ...overrides,
-  };
+function issueTimestamp(token: string): string {
+  const offset = Number.parseInt(createHash("sha256").update(token, "utf8").digest("hex").slice(0, 8), 16);
+  return new Date(Date.parse("2026-07-30T00:00:00.000Z") + (offset % 86_400_000)).toISOString();
 }
 
-function relation(id: string, revision: string) {
+function issue(id: string, revisionToken: string, overrides: Record<string, unknown> = {}): TaskIssueSnapshot {
+  const kind = (overrides.kind ?? (id === "root-1" ? "root" : "work")) as TaskIssueSnapshot["kind"];
+  const statusId = String(overrides.status_id ?? overrides.status ?? "state:todo");
+  const statusById: Record<string, TaskIssueSnapshot["status"]> = {
+    "state:todo": "Todo",
+    "state:done": "Done",
+    "state:in-progress": "In Progress",
+  };
+  const fields = {
+    issue_id: id,
+    provider_created_at: "2026-07-30T00:00:00.000Z",
+    provider_updated_at: String(overrides.provider_updated_at ?? issueTimestamp(revisionToken)),
+    creation_actor_id: String(overrides.creator_id ?? "actor:1"),
+    kind,
+    status_id: statusId,
+    status: statusById[statusId] ?? "Todo",
+    title: String(overrides.title ?? `Issue ${id}`),
+    description_markdown: overrides.description === null || overrides.description === undefined
+      ? "# Empty"
+      : String(overrides.description),
+    parent_issue_id: (overrides.parent_id === undefined
+      ? (id === "root-1" ? null : "root-1")
+      : overrides.parent_id) as string | null,
+    label_ids: (overrides.labels ?? [`label:${kind}`]) as readonly string[],
+    delegate_id: (overrides.delegate_id === undefined ? "actor:1" : overrides.delegate_id) as string | null,
+    priority: (overrides.priority === undefined ? 2 : overrides.priority) as number | null,
+    archived: Boolean(overrides.archived ?? false),
+    trashed: Boolean(overrides.trashed ?? false),
+  };
+  return parseTaskIssueSnapshotChange({ ...fields, revision: canonicalTaskRevision(fields) });
+}
+
+function relation(id: string, _revisionToken: string) {
   return {
     id,
-    revision,
+    revision: _revisionToken,
     type: "blocks",
     source_issue_id: "source-1",
     target_issue_id: "target-1",
@@ -54,6 +75,22 @@ function relation(id: string, revision: string) {
     archived: false,
   };
 }
+
+const ISSUE_REVISION_1 = issue("issue-1", "revision:issue:1").revision;
+const ISSUE_REVISION_2 = issue("issue-1", "revision:issue:2", { title: "Updated" }).revision;
+const ROOT_REVISION = issue("root-1", "revision:parent:1").revision;
+const SOURCE_REVISION = issue("source-1", "revision:source:1").revision;
+const TARGET_REVISION = issue("target-1", "revision:target:1").revision;
+const RELATION_REVISION = canonicalTaskRevision({
+  relation_id: "relation-1",
+  provider_created_at: "2026-07-30T00:00:00.000Z",
+  provider_updated_at: "2026-07-30T00:00:00.000Z",
+  creation_actor_id: "actor:1",
+  creation_evidence_id: "linear:relation:relation-1",
+  type: "blocks",
+  source_issue_id: "source-1",
+  target_issue_id: "target-1",
+});
 
 function page(nodes: readonly unknown[], endCursor: string | null = null) {
   return { nodes, page_info: { has_next_page: endCursor !== null, end_cursor: endCursor } };
@@ -74,6 +111,14 @@ class FakeCommandClient implements LinearCommandClient {
     if (value instanceof Error) throw value;
     if (value === undefined) throw new Error("missing_issue_fixture");
     return value;
+  }
+
+  async readIssueSnapshot(issueId: string): Promise<TaskIssueSnapshot | null> {
+    const value = this.issueReads.get(issueId)?.shift();
+    const resolved = await value;
+    if (resolved instanceof Error) throw resolved;
+    if (resolved === undefined) throw new Error("missing_issue_fixture");
+    return resolved === null ? null : resolved as TaskIssueSnapshot;
   }
 
   async getIssue(issueId: string) {
@@ -103,6 +148,7 @@ class FakeCommandClient implements LinearCommandClient {
 }
 
 class FakeEvidenceReader {
+  #issueSource: ((issueId: string) => Promise<TaskIssueSnapshot | null>) | null = null;
   readonly historyReads = new Map<string, Array<readonly LinearIssueHistoryEvidence[]>>();
   readonly commentReads = new Map<string, Array<readonly LinearIssueCommentEvidence[]>>();
 
@@ -112,6 +158,15 @@ class FakeEvidenceReader {
 
   enqueueComments(issueId: string, ...values: Array<readonly LinearIssueCommentEvidence[]>) {
     this.commentReads.set(issueId, values);
+  }
+
+  attachIssueSource(source: (issueId: string) => Promise<TaskIssueSnapshot | null>) {
+    this.#issueSource = source;
+  }
+
+  readIssueSnapshot(issueId: string): Promise<TaskIssueSnapshot | null> {
+    if (this.#issueSource === null) throw new Error("missing_issue_reader");
+    return this.#issueSource(issueId);
   }
 
   async readIssueHistory(issueId: string) {
@@ -145,7 +200,7 @@ const calls = {
   createIssue: mutationCall("create_issue", {
     issue_id: ISSUE_UUID,
     parent_issue_id: "root-1",
-    expected_parent_revision: "revision:parent:1",
+    expected_parent_revision: ROOT_REVISION,
     desired: {
       title: "New issue",
       description: "Body",
@@ -157,28 +212,28 @@ const calls = {
   }),
   updateIssue: mutationCall("update_issue", {
     issue_id: "issue-1",
-    expected_revision: "revision:issue:1",
+    expected_revision: ISSUE_REVISION_1,
     desired: { title: "Updated" },
   }),
   archiveIssue: mutationCall("archive_issue", {
     issue_id: "issue-1",
-    expected_revision: "revision:issue:1",
+    expected_revision: ISSUE_REVISION_1,
   }),
   createRelation: mutationCall("create_relation", {
     relation_id: RELATION_UUID,
     relation_type: "blocks",
     source_issue_id: "source-1",
-    expected_source_revision: "revision:source:1",
+    expected_source_revision: SOURCE_REVISION,
     target_issue_id: "target-1",
-    expected_target_revision: "revision:target:1",
+    expected_target_revision: TARGET_REVISION,
   }),
   deleteRelation: mutationCall("delete_relation", {
     relation_id: "relation-1",
-    expected_relation_revision: "revision:relation:1",
+    expected_relation_revision: RELATION_REVISION,
     source_issue_id: "source-1",
-    expected_source_revision: "revision:source:1",
+    expected_source_revision: SOURCE_REVISION,
     target_issue_id: "target-1",
-    expected_target_revision: "revision:target:1",
+    expected_target_revision: TARGET_REVISION,
   }),
 } as const;
 
@@ -195,12 +250,13 @@ const createCommentCall = parseTaskMcpCall({
   input: {
     comment_id: "33333333-3333-4333-8333-333333333333",
     issue_id: "issue-1",
-    expected_issue_revision: "revision:issue:1",
+    expected_issue_revision: ISSUE_REVISION_1,
     body_markdown: COMMENT_BODY,
   },
 }, target) as CreateIssueCommentCall;
 
 function commands(client: FakeCommandClient, evidence = new FakeEvidenceReader()) {
+  evidence.attachIssueSource((issueId) => client.readIssueSnapshot(issueId));
   return new LinearCommands(client, evidence, { team_id: TEAM_ID, service_actor_id: "actor:1" });
 }
 
@@ -341,15 +397,15 @@ test("comment creation closes stale, uncertain, and mismatched read-back without
     body_digest: COMMENT_DIGEST,
   };
   const cases = [
-    { name: "stale issue", revision: "revision:issue:2", before: [], after: [], outcome: "stale_before_effect", effects: 0 },
-    { name: "identity present", revision: "revision:issue:1", before: [exactComment], after: [], outcome: "stale_before_effect", effects: 0 },
-    { name: "external actor", revision: "revision:issue:1", before: [], after: [{ ...exactComment, actor_id: "actor:other" }], outcome: "conflict_observed", effects: 1 },
-    { name: "edited timestamp", revision: "revision:issue:1", before: [], after: [{ ...exactComment, provider_updated_at: "2026-07-30T00:00:02.000Z" }], outcome: "conflict_observed", effects: 1 },
+    { name: "stale issue", revision: ISSUE_REVISION_2, revisionToken: "revision:issue:2", before: [], after: [], outcome: "stale_before_effect", effects: 0 },
+    { name: "identity present", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [exactComment], after: [], outcome: "stale_before_effect", effects: 0 },
+    { name: "external actor", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [], after: [{ ...exactComment, actor_id: "actor:other" }], outcome: "conflict_observed", effects: 1 },
+    { name: "edited timestamp", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [], after: [{ ...exactComment, provider_updated_at: "2026-07-30T00:00:02.000Z" }], outcome: "conflict_observed", effects: 1 },
   ] as const;
   for (const entry of cases) {
     const client = new FakeCommandClient();
     client.failure = entry.effects === 1 ? new Error("provider_timeout") : null;
-    client.enqueueIssue("issue-1", issue("issue-1", entry.revision));
+    client.enqueueIssue("issue-1", issue("issue-1", entry.revisionToken));
     const evidence = new FakeEvidenceReader();
     evidence.enqueueComments("issue-1", entry.before, entry.after);
 
@@ -533,7 +589,7 @@ test("relation preconditions scan every bounded page and reject duplicate or for
 test("update read-back reports concurrent non-desired field changes in the concrete diff", async () => {
   const call = mutationCall("update_issue", {
     issue_id: "issue-1",
-    expected_revision: "revision:issue:1",
+    expected_revision: ISSUE_REVISION_1,
     desired: { title: "Updated" },
   });
   const client = new FakeCommandClient();
@@ -600,7 +656,7 @@ test("update read-back rejects external history and concurrent attached-record e
 test("Linear no-priority normalization and malformed receipts remain closed", async () => {
   const noPriorityCall = mutationCall("update_issue", {
     issue_id: "issue-1",
-    expected_revision: "revision:issue:1",
+    expected_revision: ISSUE_REVISION_1,
     desired: { priority: 0 },
   });
   const noPriority = new FakeCommandClient();

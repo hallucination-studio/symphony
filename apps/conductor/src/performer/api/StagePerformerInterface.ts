@@ -168,11 +168,20 @@ interface VerifyResultEnvelope extends VerifyTarget {
   readonly correlation_id: CorrelationId;
 }
 
-export interface VerifyResult extends VerifyResultEnvelope {
-  readonly conclusion: typeof VERIFY_CONCLUSIONS[number];
+interface VerifyResultEvidence extends VerifyResultEnvelope {
   readonly checks: readonly VerifyCheckEvidence[];
   readonly sanitized_summary_markdown: MarkdownText;
 }
+
+export type VerifyResult = VerifyResultEvidence & (
+  { readonly conclusion: "passed" }
+  | { readonly conclusion: "failed"; readonly reason_markdown: MarkdownText }
+  | {
+    readonly conclusion: "inconclusive";
+    readonly reason_code: string;
+    readonly reason_markdown: MarkdownText;
+  }
+);
 
 export interface VerifyPerformerInterface extends StagePerformerLifecycle {
   readonly role: "verify";
@@ -357,7 +366,7 @@ const WORK_RESULT_KEYS = [
   "sanitized_summary_markdown",
 ] as const;
 
-const VERIFY_RESULT_KEYS = [
+const VERIFY_RESULT_BASE_KEYS = [
   "schema_version",
   "root_id",
   "runtime_generation",
@@ -622,10 +631,21 @@ function parseVerifyResultEnvelope(
 
 export function parseVerifyResult(value: unknown, request: VerifyRequest): VerifyResult {
   const record = asRecord(value);
-  assertExactKeys(record, VERIFY_RESULT_KEYS);
-  const envelope = parseVerifyResultEnvelope(record, request);
   const conclusion = parseEnum(record.conclusion, VERIFY_CONCLUSIONS);
+  const reasonKeys = conclusion === "passed" ? [] : conclusion === "failed"
+    ? ["reason_markdown"] : ["reason_code", "reason_markdown"];
+  assertExactKeys(record, [...VERIFY_RESULT_BASE_KEYS, ...reasonKeys]);
+  const envelope = parseVerifyResultEnvelope(record, request);
   const checks = parseVerifyChecks(record.checks);
+  const evidence = {
+    ...envelope,
+    checks,
+    sanitized_summary_markdown: parseMarkdownText(
+      record.sanitized_summary_markdown,
+      "invalid_verify_summary_markdown",
+      MAX_PERFORMER_SUMMARY_LENGTH,
+    ),
+  };
 
   if (conclusion === "passed") {
     if (checks.length === 0) throw new Error("passed_verify_checks_required");
@@ -640,14 +660,18 @@ export function parseVerifyResult(value: unknown, request: VerifyRequest): Verif
     throw new Error("inconclusive_verify_failed_check");
   }
 
+  if (conclusion === "passed") return Object.freeze({ ...evidence, conclusion });
+  if (conclusion === "failed") {
+    return Object.freeze({
+      ...evidence,
+      conclusion,
+      reason_markdown: parseMarkdownText(record.reason_markdown, "invalid_verify_reason_markdown"),
+    });
+  }
   return Object.freeze({
-    ...envelope,
+    ...evidence,
     conclusion,
-    checks,
-    sanitized_summary_markdown: parseMarkdownText(
-      record.sanitized_summary_markdown,
-      "invalid_verify_summary_markdown",
-      MAX_PERFORMER_SUMMARY_LENGTH,
-    ),
+    reason_code: parseBoundedString(record.reason_code, "invalid_verify_reason_code", 128),
+    reason_markdown: parseMarkdownText(record.reason_markdown, "invalid_verify_reason_markdown"),
   });
 }

@@ -446,6 +446,17 @@ export class LinearQueries {
     });
   }
 
+  readIssueSnapshot(issueId: TaskIssueId): Promise<TaskIssueSnapshot | null> {
+    return this.#boundary(async () => {
+      const parsedIssueId = parseTaskIssueId(issueId);
+      const issue = await this.#optionalIssue(parsedIssueId);
+      if (issue === null) return null;
+      this.#assertTeam([issue]);
+      if (issue.issueId !== parsedIssueId) fail("linear_issue_identity_mismatch");
+      return normalizedIssue(issue, await this.#stateNames(), await this.#labelNames());
+    });
+  }
+
   readIssueCreationEvidence(issueId: TaskIssueId): Promise<LinearIssueCreationEvidence> {
     return this.#boundary(async () => {
       const issue = await this.#issue(parseTaskIssueId(issueId));

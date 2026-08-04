@@ -288,6 +288,8 @@ function changedIssue(
   token: string,
 ): TaskIssueSnapshot {
   const { revision: _revision, provider_updated_at: _updatedAt, ...unchanged } = current;
+  void _revision;
+  void _updatedAt;
   const fields = { ...unchanged, ...changes, provider_updated_at: issueTimestamp(token) };
   return parseTaskIssueSnapshotChange({ ...fields, revision: canonicalTaskRevision(fields) });
 }
