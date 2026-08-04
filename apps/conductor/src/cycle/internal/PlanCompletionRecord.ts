@@ -14,9 +14,10 @@ import {
   type StageCompletionRecord,
   type StageInvalidationRecord,
 } from "../../contracts/cycle-records.js";
-import { parseTaskIssueId, type TaskIssueId } from "../../contracts/identity.js";
+import { parseTaskIssueId, type TaskIssueId, type TaskStateId } from "../../contracts/identity.js";
 import type { CycleAdvanceRequest } from "../../contracts/cycle.js";
 import type { StageExecutionSnapshot } from "../../contracts/cycle.js";
+import { canonicalTaskRevision, type TaskIssueSnapshot } from "../../contracts/task-management.js";
 import type { GitCommitProofBasis } from "../../git/api/GitWorkspaceInterface.js";
 import {
   deriveLastValidCycleBasisStatus,
@@ -29,14 +30,23 @@ import type { TaskManageCallerIssuer } from "../../task-management/api/TaskManag
 import type { TaskWorkflowIdentities } from "../../task-management/api/TaskManageCapability.js";
 import type { TaskIssueRecordObservation } from "../../contracts/task-management.js";
 import type { TaskManageBoundaryExecution, TaskManageCommandInterface } from "../../task-management/api/TaskManageCommandInterface.js";
+import { TASK_MCP_CAPABILITIES, type UpdateIssueCall } from "../../task-management/mcp/TaskMcpSchemas.js";
 import type { LinearIssueRecordComment } from "../../task-management/linear/LinearQueries.js";
-import { bindCycleTaskManageCommand } from "../../runtime/CycleTaskManageCommand.js";
+import {
+  bindCycleTaskManageCommand,
+  type StageInvalidationProjectionProof,
+} from "../../runtime/CycleTaskManageCommand.js";
 import { appliedTaskIssueRecord, createTaskIssueRecordCall, readExactTaskIssueRecord } from "./CycleRecords.js";
 import {
   assertExactPlanGraph,
   buildPlanGraphManifest,
+  materializePersistedPlanGraphManifest,
   type BuiltPlanGraphManifest,
 } from "./PlanGraphManifest.js";
+import {
+  parseSealedFactMutationObservation,
+  type SealedFactMutationObservation,
+} from "../api/CycleMachineInterface.js";
 
 export interface FreshIssueRecordReader {
   readIssueRecordComments(issueId: TaskIssueId): Promise<readonly LinearIssueRecordComment[]>;
@@ -65,8 +75,12 @@ function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function canonicalDigest(value: unknown): string {
+  return canonicalTaskRevision(value).slice("symphony:v1:".length);
+}
+
 function graphSeal(built: BuiltPlanGraphManifest): string {
-  return digest(JSON.stringify(built.manifest));
+  return canonicalDigest(built.manifest);
 }
 
 function stageListForDigest(snapshot: CycleAdvanceRequest): unknown {
@@ -255,6 +269,77 @@ function stageHistoryDigest(snapshot: CycleAdvanceRequest, stageId: TaskIssueId)
     .sort((left, right) => left.history_id.localeCompare(right.history_id))));
 }
 
+function assertSealedFactStageInvalidationRecord(
+  record: StageInvalidationRecord,
+  expected: Readonly<{
+    readonly record_id: string;
+    readonly stage_id: TaskIssueId;
+    readonly cycle_id: TaskIssueId;
+    readonly stage_revision: CycleAdvanceRequest["cycle_revision"];
+    readonly basis_status: "Todo" | "In Progress";
+    readonly basis_document_digest: string;
+    readonly observed_status: "Todo" | "In Progress" | "Done" | "Failed" | "Canceled";
+    readonly instruction_digest: string;
+    readonly completion_record_digest: string | null;
+    readonly history_digest: string;
+  }>,
+): void {
+  if (
+    record.record_id !== expected.record_id
+    || record.issue_id !== expected.stage_id
+    || record.cycle_id !== expected.cycle_id
+    || record.stage_id !== expected.stage_id
+    || record.basis_issue_revision !== expected.stage_revision
+    || record.basis_status !== expected.basis_status
+    || record.basis_document_digest !== expected.basis_document_digest
+    || record.observed_status !== expected.observed_status
+    || record.observed_instruction_digest !== expected.instruction_digest
+    || record.observed_completion_record_digest !== expected.completion_record_digest
+    || record.observed_history_digest !== expected.history_digest
+    || record.reason_code !== "sealed_fact_mutated"
+    || record.reason_markdown !== "The sealed Stage fact was mutated; the original content was not repaired."
+    || record.invalidation_kind !== "sealed_fact_mutated"
+    || record.terminal_status !== "Failed"
+  ) throw new Error("sealed_fact_invalidation_anchor_mismatch");
+}
+
+function assertSealedFactCycleInvalidationRecord(
+  record: CycleInvalidationRecord,
+  expected: Readonly<{
+    readonly record_id: string;
+    readonly cycle_id: TaskIssueId;
+    readonly basis_issue_revision: CycleAdvanceRequest["cycle_revision"];
+    readonly basis_status: LastValidCycleBasisStatus;
+    readonly document_digest: string;
+    readonly observed_execution_graph_digest: string;
+    readonly offending_resources_digest: string;
+    readonly observed_history_digest: string;
+    readonly observed_record_set_digest: string;
+  }>,
+): void {
+  if (
+    record.record_id !== expected.record_id
+    || record.issue_id !== expected.cycle_id
+    || record.cycle_id !== expected.cycle_id
+    || record.basis_issue_revision !== expected.basis_issue_revision
+    || record.basis_status !== expected.basis_status
+    || record.last_valid_phase !== cyclePhase(expected.basis_status)
+    || record.expected_status !== expected.basis_status
+    || record.observed_status !== expected.basis_status
+    || record.basis_document_digest !== expected.document_digest
+    || record.observed_cycle_document_digest !== expected.document_digest
+    || record.observed_execution_graph_digest !== expected.observed_execution_graph_digest
+    || digest(JSON.stringify(record.offending_resources)) !== expected.offending_resources_digest
+    || record.observed_history_digest !== expected.observed_history_digest
+    || record.observed_record_set_digest !== expected.observed_record_set_digest
+    || record.reason_code !== "sealed_fact_mutated"
+    || record.invalidation_kind !== "sealed_fact_mutated"
+    || record.terminal_status !== "Failed"
+    || record.successor_policy !== "permanently_quarantined"
+    || record.successor_evidence !== null
+  ) throw new Error("sealed_fact_cycle_record_anchor_mismatch");
+}
+
 function assertExternalTerminalRecord(
   record: StageInvalidationRecord,
   input: {
@@ -315,6 +400,61 @@ function occupiesRecordSlot(
     observation.record_id === recordId
     && (!("observation_kind" in observation) || observation.observation_kind !== "missing")
   ));
+}
+
+function sealedStatusCall(
+  snapshot: CycleAdvanceRequest,
+  issueId: TaskIssueId,
+  expectedRevision: CycleAdvanceRequest["cycle_revision"],
+  stateId: TaskStateId,
+): UpdateIssueCall {
+  return Object.freeze({
+    schema_version: 1,
+    function: "update_issue",
+    root_id: snapshot.root_id,
+    runtime_generation: snapshot.runtime_generation,
+    correlation_id: snapshot.correlation_id,
+    capability: TASK_MCP_CAPABILITIES.update_issue,
+    input: Object.freeze({
+      issue_id: issueId,
+      expected_revision: expectedRevision,
+      desired: Object.freeze({ state_id: stateId }),
+    }),
+  });
+}
+
+function appliedIssueMutation(result: Awaited<ReturnType<TaskManageCommandInterface["update_issue"]>>): TaskIssueSnapshot {
+  const fresh = result.output.fresh_resource;
+  if (result.output.outcome !== "applied" || fresh === null || !("issue_id" in fresh)) {
+    throw new Error("sealed_fact_status_projection_not_applied");
+  }
+  return fresh;
+}
+
+function invalidationBasisStatus(stage: StageExecutionSnapshot): "Todo" | "In Progress" {
+  if (stage.status === "todo") return "Todo";
+  if (stage.status === "in_progress") return "In Progress";
+  throw new Error("sealed_fact_stage_not_active");
+}
+
+function stageNodeFor(
+  built: BuiltPlanGraphManifest,
+  stage: StageExecutionSnapshot,
+): BuiltPlanGraphManifest["manifest"]["plan"]
+  | BuiltPlanGraphManifest["manifest"]["ordered_work_nodes"][number]
+  | BuiltPlanGraphManifest["manifest"]["verify_node"] {
+  const stageId = parseTaskIssueId(stage.issue_id);
+  if (stage.kind === "plan") {
+    if (built.manifest.plan.issue_id !== stageId) throw new Error("sealed_fact_stage_manifest_mismatch");
+    return built.manifest.plan;
+  }
+  if (stage.kind === "work") {
+    const node = built.manifest.ordered_work_nodes.find(({ issue_id }) => issue_id === stageId);
+    if (node === undefined) throw new Error("sealed_fact_stage_manifest_mismatch");
+    return node;
+  }
+  if (built.manifest.verify_node.issue_id !== stageId) throw new Error("sealed_fact_stage_manifest_mismatch");
+  return built.manifest.verify_node;
 }
 
 export class PlanCompletionRecordWriter {
@@ -414,6 +554,328 @@ export class PlanCompletionRecordWriter {
         reason_markdown: reasonMarkdown,
       },
     });
+  }
+
+  async persistSealedFactMutation(
+    snapshot: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    execution: TaskManageBoundaryExecution,
+    observationValue?: SealedFactMutationObservation,
+  ): Promise<CycleAdvanceRequest> {
+    const observation = observationValue === undefined
+      ? undefined
+      : parseSealedFactMutationObservation(observationValue);
+    if (
+      observation === undefined
+      || (snapshot.cycle_status !== "in_progress" && snapshot.cycle_status !== "awaiting_acceptance")
+    ) throw new Error("sealed_fact_mutation_source_invalid");
+
+    const stable = await this.#readStablePlanManifest(basis);
+    if (stable === null) throw new Error("sealed_fact_manifest_missing");
+    const stageIds = new Set<TaskIssueId>([
+      ...(snapshot.plan_issue === null ? [] : [parseTaskIssueId(snapshot.plan_issue.issue_id)]),
+      ...snapshot.sealed_work_issues.map(({ issue_id }) => parseTaskIssueId(issue_id)),
+      ...(snapshot.verify_issue === null ? [] : [parseTaskIssueId(snapshot.verify_issue.issue_id)]),
+    ]);
+    if (observation.affected_stage_ids.some((stageId) => !stageIds.has(stageId))) {
+      throw new Error("sealed_fact_stage_identity_invalid");
+    }
+    const activeStages = [
+      ...(snapshot.plan_issue === null ? [] : [snapshot.plan_issue]),
+      ...snapshot.sealed_work_issues,
+      ...(snapshot.verify_issue === null ? [] : [snapshot.verify_issue]),
+    ].filter((stage) => (
+      observation.affected_stage_ids.includes(parseTaskIssueId(stage.issue_id))
+      && (stage.status === "todo" || stage.status === "in_progress")
+    ));
+
+    const stageInvalidationProofs = new Map<TaskIssueId, StageInvalidationProjectionProof>();
+    for (const stage of activeStages) {
+      const node = stageNodeFor(stable.built, stage);
+      const stageId = parseTaskIssueId(stage.issue_id);
+      const recordId = node.invalidation_record_id;
+      const completionRecordId = node.completion_record_id;
+      const completionObservation = snapshot.issue_record_observations.find(({ record_id }) => (
+        record_id === completionRecordId
+      ));
+      const observedCompletionDigest = completionObservation === undefined
+        || ("observation_kind" in completionObservation && completionObservation.observation_kind === "missing")
+        ? null
+        : digest(JSON.stringify(completionObservation));
+      const instruction = stable.built.instructions_by_issue_id[stageId];
+      if (instruction === undefined) throw new Error("sealed_fact_instruction_missing");
+      const expectedStageRecord = {
+        record_id: recordId,
+        stage_id: stageId,
+        cycle_id: basis.specification.cycle_id,
+        stage_revision: stage.revision,
+        basis_status: invalidationBasisStatus(stage),
+        basis_document_digest: digest(instruction),
+        observed_status: taskStatus(stage),
+        instruction_digest: node.instruction_digest,
+        completion_record_digest: observedCompletionDigest,
+        history_digest: stageHistoryDigest(snapshot, stageId),
+      } as const;
+      const comments = await this.options.record_reader.readIssueRecordComments(stageId);
+      execution.assertActive();
+      const existing = readExactTaskIssueRecord(
+        comments,
+        stageId,
+        recordId,
+        this.options.service_actor_id,
+      );
+      if (existing !== null) {
+        if (existing.record_kind !== "stage_invalidation") {
+          throw new Error("sealed_fact_invalidation_slot_occupied");
+        }
+        const parsed = parseStageInvalidationRecord(existing);
+        if (parsed.invalidation_kind !== "sealed_fact_mutated") {
+          throw new Error("sealed_fact_invalidation_slot_occupied");
+        }
+        assertSealedFactStageInvalidationRecord(parsed, expectedStageRecord);
+        stageInvalidationProofs.set(stageId, parsed);
+        continue;
+      }
+      if (occupiesRecordSlot(snapshot.issue_record_observations, recordId)) {
+        throw new Error("sealed_fact_invalidation_slot_occupied");
+      }
+      const projection = {
+        issue_id: stageId,
+        cycle_id: basis.specification.cycle_id,
+        basis_issue_revision: stage.revision,
+        basis_status: invalidationBasisStatus(stage),
+        basis_document_digest: digest(instruction),
+        record_kind: "stage_invalidation" as const,
+        stage_id: stageId,
+        observed_status: taskStatus(stage),
+        observed_instruction_digest: node.instruction_digest,
+        observed_completion_record_digest: observedCompletionDigest,
+        observed_history_digest: stageHistoryDigest(snapshot, stageId),
+        reason_code: "sealed_fact_mutated",
+        reason_markdown: "The sealed Stage fact was mutated; the original content was not repaired.",
+        invalidation_kind: "sealed_fact_mutated" as const,
+        terminal_status: "Failed" as const,
+      };
+      const call = createTaskIssueRecordCall(snapshot, {
+        record_id: recordId,
+        issue_id: stageId,
+        expected_issue_revision: stage.revision,
+        projection,
+      });
+      const command = bindCycleTaskManageCommand({
+        snapshot,
+        workflow: this.options.workflow,
+        caller_issuer: this.options.caller_issuer,
+        task_manager: this.options.task_manager,
+        mutation_manifest: [call],
+      });
+      const result = await command.create_issue_comment(call, execution);
+      execution.assertActive();
+      const applied = parseStageInvalidationRecord(
+        appliedTaskIssueRecord(call, result, this.options.service_actor_id),
+      );
+      assertSealedFactStageInvalidationRecord(applied, expectedStageRecord);
+      const commentsAfterWrite = await this.options.record_reader.readIssueRecordComments(stageId);
+      execution.assertActive();
+      const fresh = readExactTaskIssueRecord(
+        commentsAfterWrite,
+        stageId,
+        recordId,
+        this.options.service_actor_id,
+      );
+      if (fresh === null) throw new Error("sealed_fact_stage_record_missing");
+      const readback = parseStageInvalidationRecord(fresh);
+      assertSealedFactStageInvalidationRecord(readback, expectedStageRecord);
+      if (readback.revision !== applied.revision) throw new Error("sealed_fact_stage_record_readback_mismatch");
+      stageInvalidationProofs.set(stageId, readback);
+    }
+
+    let projected = snapshot;
+    for (const stage of activeStages) {
+      const current = [
+        ...(projected.plan_issue === null ? [] : [projected.plan_issue]),
+        ...projected.sealed_work_issues,
+        ...(projected.verify_issue === null ? [] : [projected.verify_issue]),
+      ].find(({ issue_id }) => parseTaskIssueId(issue_id) === parseTaskIssueId(stage.issue_id));
+      if (current === undefined || (current.status !== "todo" && current.status !== "in_progress")) continue;
+      const stageId = parseTaskIssueId(current.issue_id);
+      const call = sealedStatusCall(projected, stageId, current.revision, this.options.workflow.stage_states.failed);
+      const proof = stageInvalidationProofs.get(stageId);
+      if (proof === undefined) throw new Error("sealed_fact_stage_record_proof_missing");
+      const command = bindCycleTaskManageCommand({
+        snapshot: projected,
+        workflow: this.options.workflow,
+        caller_issuer: this.options.caller_issuer,
+        task_manager: this.options.task_manager,
+        mutation_manifest: [call],
+        preconfirmed_stage_invalidations: [proof],
+      });
+      const fresh = appliedIssueMutation(await command.update_issue(call, execution));
+      execution.assertActive();
+      const replacement = { ...current, revision: fresh.revision, status: "failed" as const };
+      projected = {
+        ...projected,
+        plan_issue: projected.plan_issue?.issue_id === current.issue_id ? replacement : projected.plan_issue,
+        sealed_work_issues: projected.sealed_work_issues.map((entry) => (
+          entry.issue_id === current.issue_id ? replacement : entry
+        )),
+        verify_issue: projected.verify_issue?.issue_id === current.issue_id ? replacement : projected.verify_issue,
+      };
+    }
+
+    const phase = projected.cycle_status === "awaiting_acceptance" ? "awaiting_acceptance" : "in_progress";
+    const basisStatus = phase === "awaiting_acceptance" ? "Awaiting Acceptance" : "In Progress";
+    const cycleId = parseTaskIssueId(projected.cycle_id);
+    const cycleRecordId = basis.specification.cycle_invalidation_record_id;
+    const cycleComments = await this.options.record_reader.readIssueRecordComments(cycleId);
+    execution.assertActive();
+    const existingCycle = readExactTaskIssueRecord(
+      cycleComments,
+      cycleId,
+      cycleRecordId,
+      this.options.service_actor_id,
+    );
+    if (existingCycle !== null) {
+      if (existingCycle.record_kind !== "cycle_invalidation") {
+        throw new Error("sealed_fact_cycle_slot_occupied");
+      }
+      const parsed = parseCycleInvalidationRecord(existingCycle);
+      if (
+        parsed.record_id !== cycleRecordId
+        || parsed.issue_id !== cycleId
+        || parsed.cycle_id !== basis.specification.cycle_id
+      ) throw new Error("sealed_fact_cycle_record_anchor_mismatch");
+      if (parsed.invalidation_kind !== "sealed_fact_mutated") {
+        throw new Error("sealed_fact_cycle_slot_occupied");
+      }
+      if (
+        parsed.terminal_status !== "Failed"
+        || parsed.successor_policy !== "permanently_quarantined"
+        || parsed.successor_evidence !== null
+        || parsed.reason_code !== "sealed_fact_mutated"
+        || digest(JSON.stringify(parsed.offending_resources))
+          !== digest(JSON.stringify(observation.offending_resources))
+        || parsed.basis_issue_revision !== snapshot.cycle_revision
+        || parsed.basis_status !== basisStatus
+        || parsed.last_valid_phase !== phase
+        || parsed.expected_status !== basisStatus
+        || parsed.observed_status !== basisStatus
+        || parsed.basis_document_digest !== digest(snapshot.specification.cycle_description_markdown)
+        || parsed.observed_cycle_document_digest !== digest(snapshot.specification.cycle_description_markdown)
+        || parsed.reason_markdown !== "A sealed instruction, relation, or record was mutated; sealed content was not repaired."
+      ) throw new Error("sealed_fact_cycle_record_anchor_mismatch");
+    } else {
+      if (occupiesRecordSlot(snapshot.issue_record_observations, cycleRecordId)) {
+        throw new Error("sealed_fact_cycle_slot_occupied");
+      }
+      const projection = {
+        issue_id: cycleId,
+        cycle_id: basis.specification.cycle_id,
+        basis_issue_revision: snapshot.cycle_revision,
+        basis_status: basisStatus,
+        basis_document_digest: digest(projected.specification.cycle_description_markdown),
+        record_kind: "cycle_invalidation" as const,
+        last_valid_phase: phase,
+        expected_status: basisStatus,
+        observed_status: basisStatus,
+        observed_cycle_document_digest: digest(projected.specification.cycle_description_markdown),
+        observed_execution_graph_digest: digest(JSON.stringify({
+          graph: stageListForDigest(snapshot),
+          offending_resources: observation.offending_resources,
+        })),
+        offending_resources: observation.offending_resources,
+        observed_history_digest: cycleHistoryDigest(snapshot),
+        observed_record_set_digest: digest(JSON.stringify({
+          observations: snapshot.issue_record_observations,
+          offending_resources: observation.offending_resources,
+        })),
+        reason_code: "sealed_fact_mutated",
+        reason_markdown: "A sealed instruction, relation, or record was mutated; sealed content was not repaired.",
+        invalidation_kind: "sealed_fact_mutated" as const,
+        terminal_status: "Failed" as const,
+        successor_policy: "permanently_quarantined" as const,
+        successor_evidence: null,
+      };
+      const call = createTaskIssueRecordCall(projected, {
+        record_id: cycleRecordId,
+        issue_id: cycleId,
+        expected_issue_revision: projected.cycle_revision,
+        projection,
+      });
+      const command = bindCycleTaskManageCommand({
+        snapshot: projected,
+        workflow: this.options.workflow,
+        caller_issuer: this.options.caller_issuer,
+        task_manager: this.options.task_manager,
+        mutation_manifest: [call],
+      });
+      const result = await command.create_issue_comment(call, execution);
+      execution.assertActive();
+      const applied = parseCycleInvalidationRecord(
+        appliedTaskIssueRecord(call, result, this.options.service_actor_id),
+      );
+      const documentDigest = digest(snapshot.specification.cycle_description_markdown);
+      const observedGraphDigest = digest(JSON.stringify({
+        graph: stageListForDigest(snapshot),
+        offending_resources: observation.offending_resources,
+      }));
+      const offendingResourcesDigest = digest(JSON.stringify(observation.offending_resources));
+      const observedHistoryDigest = cycleHistoryDigest(snapshot);
+      const observedRecordSetDigest = digest(JSON.stringify({
+        observations: snapshot.issue_record_observations,
+        offending_resources: observation.offending_resources,
+      }));
+      assertSealedFactCycleInvalidationRecord(applied, {
+        record_id: cycleRecordId,
+        cycle_id: cycleId,
+        basis_issue_revision: snapshot.cycle_revision,
+        basis_status: basisStatus,
+        document_digest: documentDigest,
+        observed_execution_graph_digest: observedGraphDigest,
+        offending_resources_digest: offendingResourcesDigest,
+        observed_history_digest: observedHistoryDigest,
+        observed_record_set_digest: observedRecordSetDigest,
+      });
+      const commentsAfterWrite = await this.options.record_reader.readIssueRecordComments(cycleId);
+      execution.assertActive();
+      const fresh = readExactTaskIssueRecord(
+        commentsAfterWrite,
+        cycleId,
+        cycleRecordId,
+        this.options.service_actor_id,
+      );
+      if (fresh === null) throw new Error("sealed_fact_cycle_record_missing");
+      const readback = parseCycleInvalidationRecord(fresh);
+      assertSealedFactCycleInvalidationRecord(readback, {
+        record_id: cycleRecordId,
+        cycle_id: cycleId,
+        basis_issue_revision: snapshot.cycle_revision,
+        basis_status: basisStatus,
+        document_digest: documentDigest,
+        observed_execution_graph_digest: observedGraphDigest,
+        offending_resources_digest: offendingResourcesDigest,
+        observed_history_digest: observedHistoryDigest,
+        observed_record_set_digest: observedRecordSetDigest,
+      });
+      if (readback.revision !== applied.revision) throw new Error("sealed_fact_cycle_record_readback_mismatch");
+    }
+
+    const cycleCall = sealedStatusCall(
+      projected,
+      cycleId,
+      projected.cycle_revision,
+      this.options.workflow.cycle_states.failed,
+    );
+    const cycleCommand = bindCycleTaskManageCommand({
+      snapshot: projected,
+      workflow: this.options.workflow,
+      caller_issuer: this.options.caller_issuer,
+      task_manager: this.options.task_manager,
+      mutation_manifest: [cycleCall],
+    });
+    const failedCycle = appliedIssueMutation(await cycleCommand.update_issue(cycleCall, execution));
+    execution.assertActive();
+    return Object.freeze({ ...projected, cycle_revision: failedCycle.revision, cycle_status: "failed" });
   }
 
   async persistExternalTerminalInvalidation(
@@ -1342,6 +1804,28 @@ export class PlanCompletionRecordWriter {
       throw new Error("stage_completion_record_order_invalid");
     }
     return readback;
+  }
+
+  async #readStablePlanManifest(
+    basis: SealedCycleBasis,
+  ): Promise<{ readonly record: StageCompletionRecord; readonly built: BuiltPlanGraphManifest } | null> {
+    const planId = basis.specification.plan_issue_id;
+    const comments = await this.options.record_reader.readIssueRecordComments(planId);
+    const projected = readExactTaskIssueRecord(
+      comments,
+      planId,
+      basis.specification.plan_completion_record_id,
+      this.options.service_actor_id,
+    );
+    if (projected === null) return null;
+    const record = parseStageCompletionRecord(projected, "plan", basis);
+    if (record.completion.outcome !== "completed") return null;
+    const built = materializePersistedPlanGraphManifest(record.completion.manifest, basis);
+    if (
+      record.completion.instruction_digest !== built.manifest.plan.instruction_digest
+      || graphSeal(built) !== record.completion.graph_seal_digest
+    ) throw new Error("sealed_fact_manifest_mismatch");
+    return Object.freeze({ record, built });
   }
 
   async #readServiceIssueCreation(issueId: TaskIssueId): Promise<{

@@ -19,11 +19,19 @@ import {
 } from "../contracts/identity.js";
 import { deriveCycleUuid } from "../contracts/cycle-identities.js";
 import { renderTaskIssueRecordProjectionMarkdown } from "../contracts/cycle-record-markdown.js";
+import { parseCycleApprovalRecord } from "../contracts/cycle-records.js";
 import type { CycleAdvanceRequest } from "../contracts/cycle.js";
 import { parseRootDefinition } from "../contracts/cycle.js";
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
+import { readExactTaskIssueRecord } from "../cycle/internal/CycleRecords.js";
+import { buildPlanGraphManifest } from "../cycle/internal/PlanGraphManifest.js";
 import { parseGitSnapshot } from "../contracts/observation.js";
-import { canonicalTaskRevision, parseTaskSnapshot } from "../contracts/task-management.js";
+import {
+  canonicalTaskRevision,
+  parseTaskIssueRecordObservation,
+  parseTaskSnapshot,
+} from "../contracts/task-management.js";
+import { parseMarkdownText } from "../contracts/validation.js";
 import { createCycleHeadBranch, createRootHeadBranch } from "../delivery/api/DeliveryInterface.js";
 import type {
   CycleWorkspaceIdentity,
@@ -32,6 +40,7 @@ import type {
 import { createAcceptedRevisionAuthority } from "../runtime/RootAcceptedRevision.js";
 import type { FreshRouteMatch } from "../runtime/FreshTaskRouter.js";
 import { parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
+import type { LinearIssueRecordComment } from "../task-management/linear/LinearQueries.js";
 import { ExactGitDiffReader, ProductionCycleReader } from "./ProductionRuntime.js";
 import { ProductionDeliveryFinalizer } from "./ProductionRuntime.js";
 
@@ -349,6 +358,7 @@ function persistedApprovalFixture(
   return {
     cycle_id: deterministicCycleId,
     task,
+    prepared,
     comment: {
       comment_id: prepared.specification.approval_record_id,
       issue_id: deterministicCycleId,
@@ -362,6 +372,328 @@ function persistedApprovalFixture(
     },
   } as const;
 }
+
+type FixtureStageStatus = "todo" | "in_progress" | "done" | "failed" | "canceled";
+
+interface PersistedManifestFixtureOptions {
+  readonly plan_status?: FixtureStageStatus;
+  readonly work_statuses?: readonly FixtureStageStatus[];
+  readonly verify_status?: FixtureStageStatus;
+  readonly observed_plan_title?: string;
+  readonly observed_plan_description?: string;
+}
+
+function persistedManifestFixture(options: PersistedManifestFixtureOptions = {}) {
+  const base = persistedApprovalFixture("actor:symphony", {
+    revision: "revision:plan:manifest",
+    status: workflow.stage_states.in_progress,
+  });
+  const approvalProjection = readExactTaskIssueRecord(
+    [base.comment],
+    base.cycle_id,
+    base.prepared.specification.approval_record_id,
+    "actor:symphony",
+  );
+  if (approvalProjection === null) throw new Error("test_approval_record_missing");
+  const approvalRecord = parseCycleApprovalRecord(approvalProjection, base.prepared.specification);
+  const planTitle = "Plan approved Cycle";
+  const planDescription = "## Plan\n\nCompile the approved Cycle into one sealed Work and Verify graph.";
+  const built = buildPlanGraphManifest({
+    basis: { specification: base.prepared.specification, approval_record: approvalRecord },
+    ordered_work_group_ids: base.prepared.specification.approved_work_groups.map(({ work_group_id }) => work_group_id),
+    plan_title: planTitle,
+    plan_instruction_markdown: planDescription,
+  });
+  const digest = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+  const statusValue = (status: FixtureStageStatus) => {
+    switch (status) {
+      case "todo": return { status_id: workflow.stage_states.todo, status: "Todo" as const };
+      case "in_progress": return { status_id: workflow.stage_states.in_progress, status: "In Progress" as const };
+      case "done": return { status_id: workflow.stage_states.done, status: "Done" as const };
+      case "failed": return { status_id: workflow.stage_states.failed, status: "Failed" as const };
+      case "canceled": return { status_id: workflow.stage_states.canceled, status: "Canceled" as const };
+    }
+  };
+  const stageStatus = (node: (typeof built.manifest)["plan"] | (typeof built.manifest)["ordered_work_nodes"][number] | (typeof built.manifest)["verify_node"], index: number) => (
+    node.kind === "plan"
+      ? options.plan_status ?? "in_progress"
+      : node.kind === "work"
+        ? options.work_statuses?.[index] ?? "todo"
+        : options.verify_status ?? "todo"
+  );
+  const issue = (node: (typeof built.manifest)["plan"] | (typeof built.manifest)["ordered_work_nodes"][number] | (typeof built.manifest)["verify_node"], index: number) => {
+    const status = statusValue(stageStatus(node, index));
+    const fields = {
+      issue_id: node.issue_id,
+      provider_created_at: "2026-08-02T01:01:00.000Z",
+      provider_updated_at: "2026-08-02T01:01:00.000Z",
+      creation_actor_id: "actor:symphony",
+      kind: node.kind,
+      status_id: status.status_id,
+      status: status.status,
+      title: node.kind === "plan" ? options.observed_plan_title ?? node.title : node.title,
+      description_markdown: node.kind === "plan"
+        ? options.observed_plan_description ?? built.instructions_by_issue_id[node.issue_id]
+        : built.instructions_by_issue_id[node.issue_id],
+      parent_issue_id: node.parent_issue_id,
+      label_ids: [workflow.labels[node.kind]],
+      delegate_id: null,
+      priority: null,
+      archived: false,
+      trashed: false,
+    } as const;
+    return { ...fields, revision: canonicalTaskRevision(fields) };
+  };
+  const nodes = [built.manifest.plan, ...built.manifest.ordered_work_nodes, built.manifest.verify_node];
+  const stageIssues = nodes.map(issue);
+  const relations = built.manifest.relations.map((relation) => {
+    const fields = {
+      relation_id: relation.relation_id,
+      provider_created_at: "2026-08-02T01:01:01.000Z",
+      provider_updated_at: "2026-08-02T01:01:01.000Z",
+      creation_actor_id: "actor:symphony",
+      creation_evidence_id: `evidence:${relation.relation_id}`,
+      type: "blocks",
+      source_issue_id: relation.source_issue_id,
+      target_issue_id: relation.target_issue_id,
+    } as const;
+    return { ...fields, revision: canonicalTaskRevision(fields) };
+  });
+  const plan = stageIssues[0]!;
+  const planProjection = {
+    issue_id: plan.issue_id,
+    cycle_id: base.prepared.specification.cycle_id,
+    basis_issue_revision: plan.revision,
+    basis_status: "In Progress" as const,
+    basis_document_digest: digest(String(plan.description_markdown)),
+    record_kind: "stage_completion" as const,
+    stage_id: plan.issue_id,
+    completion: {
+      outcome: "completed" as const,
+      instruction_digest: built.manifest.plan.instruction_digest,
+      manifest: built.manifest,
+      graph_seal_digest: canonicalTaskRevision(built.manifest).slice("symphony:v1:".length),
+      traceability_by_issue_id_markdown: "## Traceability\n\nPersisted test manifest.",
+    },
+  };
+  const planBody = renderTaskIssueRecordProjectionMarkdown(planProjection);
+  const planComment = {
+    comment_id: base.prepared.specification.plan_completion_record_id,
+    issue_id: plan.issue_id,
+    provider_created_at: "2026-08-02T01:02:00.000Z",
+    provider_updated_at: "2026-08-02T01:02:00.000Z",
+    provider_edited_at: null,
+    provider_archived_at: null,
+    actor_id: "actor:symphony",
+    body_digest: digest(planBody),
+    body_markdown: planBody,
+  } as const;
+  const planRecord = readExactTaskIssueRecord(
+    [planComment],
+    plan.issue_id,
+    base.prepared.specification.plan_completion_record_id,
+    "actor:symphony",
+  );
+  if (planRecord === null) throw new Error("test_plan_completion_record_missing");
+  const task = parseTaskSnapshot({
+    ...base.task,
+    issues: [base.task.issues[0]!, base.task.issues[1]!, ...stageIssues],
+    relations,
+    issue_record_observations: [parseTaskIssueRecordObservation(planRecord)],
+  });
+  return {
+    ...base,
+    task,
+    built,
+    comments: { cycle: [base.comment], plan: [planComment] },
+    stageIssues,
+  } as const;
+}
+
+function productionReader(
+  fixture: ReturnType<typeof persistedManifestFixture>,
+  planComments: readonly LinearIssueRecordComment[] = fixture.comments.plan,
+  extraComments: ReadonlyMap<string, readonly LinearIssueRecordComment[]> = new Map(),
+): ProductionCycleReader {
+  return new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => fixture.task,
+      readIssueRecordComments: async (issueId) => extraComments.get(String(issueId))
+        ?? (issueId === fixture.cycle_id ? fixture.comments.cycle : planComments),
+    },
+    cycleGit(),
+    workspace,
+    "actor:symphony",
+  );
+}
+
+function cycleReadRequest(fixture: ReturnType<typeof persistedManifestFixture>, suffix: string) {
+  return {
+    root_id: rootId,
+    cycle_id: parseCycleIssueId(fixture.cycle_id),
+    runtime_generation: generation,
+    correlation_id: parseCorrelationId(`corr:${suffix}`),
+  } as const;
+}
+
+test("production Cycle reader compares mutable Stage facts with the persisted Plan manifest", async () => {
+  const baselineFixture = persistedManifestFixture();
+  const baseline = await productionReader(baselineFixture).read(
+    cycleReadRequest(baselineFixture, "manifest-baseline"),
+  );
+  assert.ok(baseline?.plan_issue);
+
+  const changedFixture = persistedManifestFixture({
+    observed_plan_title: "Externally edited Plan",
+    observed_plan_description: "## Plan\n\nExternally edited sealed instruction.",
+  });
+  assert.deepEqual(changedFixture.built.manifest, baselineFixture.built.manifest);
+  const changedReader = productionReader(changedFixture);
+  const changed = await changedReader.read(cycleReadRequest(changedFixture, "manifest-changed"));
+  assert.ok(changed?.plan_issue);
+  assert.notEqual(changed?.plan_issue?.revision, baseline?.plan_issue?.revision);
+  assert.equal(changed?.plan_issue?.sealed_revision, baseline?.plan_issue?.sealed_revision);
+  assert.equal(changed?.plan_issue?.title, baselineFixture.built.manifest.plan.title);
+  assert.equal(
+    changed?.plan_issue?.description_markdown,
+    changedFixture.built.instructions_by_issue_id[changedFixture.built.manifest.plan.issue_id],
+  );
+
+  const mutation = await changedReader.readSealedFactMutation(
+    cycleReadRequest(changedFixture, "manifest-observation"),
+    changedFixture.task,
+  );
+  assert.ok(mutation);
+  assert.deepEqual(mutation.affected_stage_ids, [changedFixture.built.manifest.plan.issue_id]);
+  assert.equal(
+    mutation.offending_resources.some((entry) => (
+      entry.resource_kind === "stage"
+      && entry.resource_id === changedFixture.built.manifest.plan.issue_id
+      && entry.evidence_kind === "present_digest_mismatch"
+    )),
+    true,
+  );
+});
+
+test("production Cycle reader marks both relation endpoints affected without resealing the graph", async () => {
+  const fixture = persistedManifestFixture();
+  const relation = fixture.task.relations[0];
+  assert.ok(relation);
+  const { revision, ...relationFields } = relation;
+  void revision;
+  const changedFields = { ...relationFields, type: "relates_to" };
+  const changedTask = parseTaskSnapshot({
+    ...fixture.task,
+    relations: [{ ...changedFields, revision: canonicalTaskRevision(changedFields) }],
+  });
+  const reader = new ProductionCycleReader(
+    { root_id: rootId, runtime_generation: generation },
+    workflow,
+    {
+      readRootSnapshot: async () => changedTask,
+      readIssueRecordComments: async (issueId) => (
+        issueId === fixture.cycle_id ? fixture.comments.cycle : fixture.comments.plan
+      ),
+    },
+    cycleGit(),
+    workspace,
+    "actor:symphony",
+  );
+
+  const mutation = await reader.readSealedFactMutation(
+    cycleReadRequest(fixture, "relation-observation"),
+    changedTask,
+  );
+
+  assert.ok(mutation);
+  assert.deepEqual(
+    [...mutation.affected_stage_ids].sort(),
+    [relation.source_issue_id, relation.target_issue_id].sort(),
+  );
+  assert.equal(
+    mutation.offending_resources.some((entry) => (
+      entry.evidence_kind === "present_relation_mismatch"
+      && entry.resource_id === relation.relation_id
+    )),
+    true,
+  );
+});
+
+test("production Cycle reader turns a malformed non-Plan record comment into typed sealed-fact evidence", async () => {
+  const fixture = persistedManifestFixture();
+  const node = fixture.built.manifest.ordered_work_nodes[0];
+  assert.ok(node);
+  const malformed = {
+    ...fixture.comments.plan[0]!,
+    comment_id: node.completion_record_id,
+    issue_id: node.issue_id,
+    body_markdown: parseMarkdownText("## Symphony Record\n\nmalformed", "test_malformed_record"),
+  };
+  const reader = productionReader(
+    fixture,
+    fixture.comments.plan,
+    new Map([[String(node.issue_id), [malformed]]]),
+  );
+
+  const mutation = await reader.readSealedFactMutation(
+    cycleReadRequest(fixture, "work-record-observation"),
+    fixture.task,
+  );
+
+  assert.ok(mutation);
+  assert.equal(
+    mutation.offending_resources.some((entry) => (
+      entry.evidence_kind === "authoritative_body_lost"
+      && entry.resource_kind === "stage_record"
+      && entry.resource_id === node.completion_record_id
+    )),
+    true,
+  );
+});
+
+test("production Cycle reader fails closed instead of falling back when a materialized manifest is missing", async () => {
+  const fixture = persistedManifestFixture();
+  const reader = productionReader(fixture, []);
+
+  await assert.rejects(
+    reader.read(cycleReadRequest(fixture, "manifest-missing")),
+    /cycle_reader_persisted_manifest_missing/u,
+  );
+
+  const mutation = await reader.readSealedFactMutation(
+    cycleReadRequest(fixture, "manifest-missing-observation"),
+    fixture.task,
+  );
+  assert.ok(mutation);
+  assert.equal(mutation.offending_resources[0]?.evidence_kind, "present_digest_mismatch");
+  assert.equal(mutation.offending_resources[0]?.resource_kind, "record");
+  assert.equal(mutation.offending_resources[0]?.resource_id, fixture.built.manifest.plan.completion_record_id);
+});
+
+test("production Cycle reader exposes malformed materialized manifest facts as typed evidence", async () => {
+  const fixture = persistedManifestFixture();
+  const malformed = {
+    ...fixture.comments.plan[0]!,
+    body_markdown: parseMarkdownText("## Symphony Record\n\nmalformed", "test_malformed_record"),
+  };
+  const reader = productionReader(fixture, [malformed]);
+
+  await assert.rejects(
+    reader.read(cycleReadRequest(fixture, "manifest-malformed")),
+    /invalid_record_markdown/u,
+  );
+
+  const mutation = await reader.readSealedFactMutation(
+    cycleReadRequest(fixture, "manifest-malformed-observation"),
+    fixture.task,
+  );
+  assert.ok(mutation);
+  assert.equal(mutation.offending_resources[0]?.evidence_kind, "present_digest_mismatch");
+  assert.equal(mutation.offending_resources[0]?.resource_kind, "record");
+  assert.equal(mutation.offending_resources[0]?.resource_id, fixture.built.manifest.plan.completion_record_id);
+});
 
 test("production Cycle reader rebuilds stable seals without retained workflow state", async () => {
   const firstFixture = persistedApprovalFixture("actor:symphony", {

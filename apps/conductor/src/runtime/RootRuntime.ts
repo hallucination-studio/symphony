@@ -144,6 +144,17 @@ function selectedExternalTerminalCycleId(
   return parseCycleIssueId(selectedRoute.cycle_id);
 }
 
+function selectedCycleClosure(
+  selectedRoute: FreshRouteMatch | FreshRouteConsumer | "auto",
+): "admission_lost" | "sealed_fact_mutated" | undefined {
+  if (typeof selectedRoute !== "object") return undefined;
+  if (selectedRoute.route_id === "WF-ROUTE-015") return "admission_lost";
+  if (selectedRoute.route_id === "WF-ROUTE-006" || selectedRoute.route_id === "WF-ROUTE-017") {
+    return "sealed_fact_mutated";
+  }
+  return undefined;
+}
+
 function deliveryFinalizerRoute(route: FreshRouteMatch): Readonly<{
   readonly route_id: DeliveryFinalizerRouteId;
   readonly cycle_id: CycleIssueId;
@@ -276,9 +287,7 @@ export class RootRuntime implements RegisteredRootRuntime {
         observation.task,
         observation.correlation_id,
         null,
-        typeof selectedRoute === "object" && selectedRoute.route_id === "WF-ROUTE-015"
-          ? "admission_lost"
-          : undefined,
+        selectedCycleClosure(selectedRoute),
         selectedExternalTerminalCycleId(selectedRoute),
       );
       if (cycle.kind !== "root_available") return cycle;

@@ -1160,7 +1160,7 @@ export type CycleInvalidationEvidence =
     readonly observed_record_observation_digest: Digest;
   };
 
-function parseCycleInvalidationEvidence(value: unknown): CycleInvalidationEvidence {
+export function parseCycleInvalidationEvidence(value: unknown): CycleInvalidationEvidence {
   const record = asRecord(value);
   const kind = parseEnum(record.evidence_kind, [
     "present_digest_mismatch", "present_relation_mismatch", "unexpected_resource",

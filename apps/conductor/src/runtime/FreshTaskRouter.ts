@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   parseCycleIssueId,
   parseTaskIssueId,
@@ -17,6 +19,7 @@ import type {
   TaskIssueSnapshot,
   TaskSnapshot,
 } from "../contracts/task-management.js";
+import type { PlanGraphManifest } from "../contracts/cycle-records.js";
 import type { TaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
 
 export type FreshRouteId =
@@ -146,6 +149,165 @@ function sealedMutation(
       || change.field === "description"
       || change.field === "parent"
       || change.field === "labels";
+  });
+}
+
+function digest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function cycleApprovalRecord(
+  task: TaskSnapshot,
+  cycle: TaskIssueSnapshot,
+): CycleApprovalRecord | null {
+  const approvals = task.issue_record_observations.filter((observation): observation is CycleApprovalRecord => (
+    validRecord(observation)
+    && observation.record_kind === "cycle_approval"
+    && observation.issue_id === cycle.issue_id
+    && observation.cycle_id === cycle.issue_id
+  ));
+  if (approvals.length > 1) throw new Error("cycle_approval_ambiguous");
+  return approvals[0] ?? null;
+}
+
+function expectedPlanManifest(task: TaskSnapshot, cycle: TaskIssueSnapshot): PlanGraphManifest | null {
+  const approval = cycleApprovalRecord(task, cycle);
+  if (approval === null) return null;
+  const record = task.issue_record_observations.find((observation) => (
+    validRecord(observation)
+    && observation.record_id === approval.plan_completion_record_id
+    && observation.record_kind === "stage_completion"
+    && observation.issue_id === approval.plan_issue_id
+    && observation.cycle_id === cycle.issue_id
+    && observation.stage_id === approval.plan_issue_id
+    && "manifest" in observation.completion
+  ));
+  if (
+    record === undefined
+    || !validRecord(record)
+    || record.record_kind !== "stage_completion"
+    || !("manifest" in record.completion)
+  ) return null;
+  const plan = task.issues.find(({ issue_id }) => issue_id === record.issue_id);
+  if (
+    plan === undefined
+    || plan.parent_issue_id !== cycle.issue_id
+    || plan.kind !== "plan"
+    || record.completion.manifest.cycle_id !== cycle.issue_id
+    || record.completion.manifest.approval_record_id !== approval.record_id
+    || record.completion.manifest.specification_seal_digest !== approval.specification_seal_digest
+    || record.completion.manifest.plan_issue_id !== approval.plan_issue_id
+    || record.completion.manifest.plan.issue_id !== approval.plan_issue_id
+    || record.completion.manifest.plan.completion_record_id !== approval.plan_completion_record_id
+    || record.completion.manifest.plan.invalidation_record_id !== approval.plan_invalidation_record_id
+  ) return null;
+  return record.completion.manifest;
+}
+
+function hasOnlyExpectedLabel(issue: TaskIssueSnapshot, labelId: string): boolean {
+  return issue.label_ids.length === 1 && issue.label_ids[0] === labelId;
+}
+
+function persistedManifestMutation(
+  task: TaskSnapshot,
+  cycle: TaskIssueSnapshot,
+  workflow: TaskWorkflowIdentities,
+): boolean {
+  const manifest = expectedPlanManifest(task, cycle);
+  if (manifest === null) return false;
+  const nodes = [manifest.plan, ...manifest.ordered_work_nodes, manifest.verify_node];
+  const nodeIds = new Set(nodes.map(({ issue_id }) => issue_id));
+  for (const node of nodes) {
+    const issue = task.issues.find(({ issue_id }) => issue_id === node.issue_id);
+    const expectedLabel = workflow.labels[node.kind];
+    if (
+      issue === undefined
+      || issue.kind !== node.kind
+      || issue.title !== node.title
+      || digest(issue.description_markdown) !== node.instruction_digest
+      || issue.parent_issue_id !== node.parent_issue_id
+      || !hasOnlyExpectedLabel(issue, expectedLabel)
+      || issue.delegate_id !== null
+      || issue.priority !== null
+      || issue.archived
+      || issue.trashed
+    ) return true;
+  }
+  if (task.issues.some((issue) => (
+    issue.parent_issue_id === cycle.issue_id
+    && (issue.kind === "plan" || issue.kind === "work" || issue.kind === "verify")
+    && !nodeIds.has(issue.issue_id)
+  ))) return true;
+
+  const relations = new Map(task.relations.map((relation) => [String(relation.relation_id), relation]));
+  for (const expected of manifest.relations) {
+    const relation = relations.get(String(expected.relation_id));
+    if (
+      relation === undefined
+      || relation.type !== "blocks"
+      || relation.source_issue_id !== expected.source_issue_id
+      || relation.target_issue_id !== expected.target_issue_id
+    ) return true;
+  }
+  const relationIds = new Set(manifest.relations.map(({ relation_id }) => String(relation_id)));
+  if (task.relations.some((relation) => (
+    !relationIds.has(String(relation.relation_id))
+    && (nodeIds.has(relation.source_issue_id) || nodeIds.has(relation.target_issue_id))
+  ))) return true;
+  return false;
+}
+
+function managedRecordMutation(
+  task: TaskSnapshot,
+  cycle: TaskIssueSnapshot,
+  stageIds: ReadonlySet<TaskIssueId>,
+): boolean {
+  return task.issue_record_observations.some((observation) => (
+    "observation_kind" in observation
+    && (observation.observation_kind === "malformed"
+      || observation.observation_kind === "updated"
+      || observation.observation_kind === "archived")
+    && (observation.issue_id === cycle.issue_id || stageIds.has(observation.issue_id))
+  ));
+}
+
+function invalidationSlotConflict(
+  task: TaskSnapshot,
+  cycle: TaskIssueSnapshot,
+  stageIds: ReadonlySet<TaskIssueId>,
+): boolean {
+  const invalidObservationConflict = task.issue_record_observations.some((observation) => (
+    "observation_kind" in observation
+    && (observation.observation_kind === "malformed"
+      || observation.observation_kind === "updated"
+      || observation.observation_kind === "archived")
+    && (observation.expected_record_kind === "stage_invalidation"
+      || observation.expected_record_kind === "cycle_invalidation")
+    && (observation.issue_id === cycle.issue_id || stageIds.has(observation.issue_id))
+  ));
+  if (invalidObservationConflict) return true;
+
+  const expectedInvalidationKinds = new Map<string, "stage_invalidation" | "cycle_invalidation">();
+  const approval = cycleApprovalRecord(task, cycle);
+  if (approval !== null) {
+    expectedInvalidationKinds.set(approval.cycle_invalidation_record_id, "cycle_invalidation");
+    if (stageIds.has(approval.plan_issue_id)) {
+      expectedInvalidationKinds.set(approval.plan_invalidation_record_id, "stage_invalidation");
+    }
+  }
+  const manifest = expectedPlanManifest(task, cycle);
+  if (manifest !== null) {
+    for (const node of [manifest.plan, ...manifest.ordered_work_nodes, manifest.verify_node]) {
+      if (stageIds.has(node.issue_id)) {
+        expectedInvalidationKinds.set(node.invalidation_record_id, "stage_invalidation");
+      }
+    }
+  }
+
+  return task.issue_record_observations.some((observation) => {
+    if (!validRecord(observation)) return false;
+    const expectedKind = expectedInvalidationKinds.get(observation.record_id);
+    return expectedKind !== undefined && observation.record_kind !== expectedKind;
   });
 }
 
@@ -304,7 +466,12 @@ export function routeFreshTask(input: FreshTaskRouterInput): FreshTaskRouting {
     const stageIds = new Set(input.task.issues
       .filter(({ parent_issue_id }) => parent_issue_id === active.issue.issue_id)
       .map(({ issue_id }) => issue_id));
-    const mutated = sealedMutation(input.task_changes, active.issue, stageIds, origins);
+    const mutated = sealedMutation(input.task_changes, active.issue, stageIds, origins)
+      || managedRecordMutation(input.task, active.issue, stageIds)
+      || persistedManifestMutation(input.task, active.issue, input.workflow);
+    if (invalidationSlotConflict(input.task, active.issue, stageIds)) {
+      matches.push(match("WF-ROUTE-016", activeCycleId));
+    }
     if (externallyTerminalized(input.task, input.task_changes, active.issue, input.task_change_origins)) {
       matches.push(match("WF-ROUTE-018", activeCycleId));
     }

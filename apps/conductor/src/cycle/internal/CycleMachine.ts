@@ -37,7 +37,9 @@ import {
 import type {
   CycleMachineExecution,
   CycleMachineInterface,
+  SealedFactMutationObservation,
 } from "../api/CycleMachineInterface.js";
+import { parseSealedFactMutationObservation } from "../api/CycleMachineInterface.js";
 
 export interface CycleMachineReadRequest extends RuntimeTarget {
   readonly cycle_id: CycleIssueId;
@@ -46,6 +48,10 @@ export interface CycleMachineReadRequest extends RuntimeTarget {
 
 export interface FreshCycleExecutionReader {
   read(request: CycleMachineReadRequest): Promise<CycleAdvanceRequest | null>;
+  readSealedFactMutation?(
+    request: CycleMachineReadRequest,
+    task: TaskSnapshot | null,
+  ): Promise<SealedFactMutationObservation | null>;
 }
 
 export interface PreparedCycleAction {
@@ -422,6 +428,34 @@ export class CycleMachineHost implements CycleMachineHostInterface {
       || snapshot.cycle_id !== cycleId
       || snapshot.correlation_id !== correlationId
     ) return this.#paused("invalid_contract", "cycle_snapshot_target_mismatch", correlationId);
+    let sealedFactMutation: SealedFactMutationObservation | null = null;
+    if (closure === "sealed_fact_mutated") {
+      if (this.#reader.readSealedFactMutation === undefined) {
+        return this.#paused("boundary_unavailable", "sealed_fact_observation_unavailable", correlationId);
+      }
+      let observed: SealedFactMutationObservation | null;
+      try {
+        observed = await this.#reader.readSealedFactMutation(
+          Object.freeze({
+            root_id: this.#target.root_id,
+            cycle_id: cycleId,
+            runtime_generation: this.#target.runtime_generation,
+            correlation_id: correlationId,
+          }),
+          task,
+        );
+      } catch {
+        return this.#paused("boundary_unavailable", "sealed_fact_observation_unavailable", correlationId);
+      }
+      if (observed === null) {
+        return this.#paused("invalid_contract", "sealed_fact_observation_missing", correlationId);
+      }
+      try {
+        sealedFactMutation = parseSealedFactMutationObservation(observed);
+      } catch {
+        return this.#paused("invalid_contract", "sealed_fact_observation_invalid", correlationId);
+      }
+    }
     let ownership = requestedOwnership;
     if (this.#active !== null && snapshot.specification.seal_digest !== this.#active.seal_digest) {
       ownership = "lost";
@@ -472,7 +506,13 @@ export class CycleMachineHost implements CycleMachineHostInterface {
     }
     const prepared = Object.freeze({ kind: "cycle_action" as const, request: snapshot });
     this.#prepared.add(prepared);
-    this.#executions.set(prepared, Object.freeze({ ownership, ...(closure === undefined ? {} : { closure }) }));
+    this.#executions.set(prepared, Object.freeze({
+      ownership,
+      ...(closure === undefined ? {} : { closure }),
+      ...(sealedFactMutation === null || sealedFactMutation === undefined
+        ? {}
+        : { sealed_fact_mutation: sealedFactMutation }),
+    }));
     this.#ready = prepared;
     return prepared;
   }

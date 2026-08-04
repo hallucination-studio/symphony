@@ -684,6 +684,36 @@ test("Cycle host refreshes every continuation and rejects stale generation or ch
   assert.equal((await changedSeal.run(changed)).outcome, "terminal_failed");
 });
 
+test("Cycle host rejects an untyped sealed-fact observation before dispatch", async () => {
+  const host = new CycleMachineHost({
+    target: { root_id: rootId, runtime_generation: generation },
+    workflow,
+    reader: {
+      read: async (request) => snapshot(request.correlation_id),
+      readSealedFactMutation: async () => ({
+        affected_stage_ids: [],
+        offending_resources: [],
+      } as never),
+    },
+    machine: {
+      advance: async (request) => result(request, "no_action", request.cycle_revision),
+    },
+  });
+
+  const prepared = await host.prepare(
+    taskSnapshot("in_progress"),
+    parseCorrelationId("corr:invalid-sealed-fact"),
+    null,
+    "sealed_fact_mutated",
+  );
+
+  assert.equal(prepared.kind, "paused");
+  if (prepared.kind === "paused") {
+    assert.equal(prepared.error.code, "invalid_contract");
+    assert.equal(prepared.error.reason, "sealed_fact_observation_invalid");
+  }
+});
+
 test("Cycle host rejects a fresh Stage whose configured kind label does not match the seal", async () => {
   const base = taskSnapshot("in_progress");
   const taskWithWrongStageKind = parseTaskSnapshot({

@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseTaskIssueId } from "../contracts/identity.js";
+import { parseCycleIssueId, parseTaskIssueId } from "../contracts/identity.js";
 import type { ConcreteTaskChange } from "../contracts/observation.js";
 import { canonicalTaskRevision, parseTaskSnapshot, type TaskIssueSnapshot } from "../contracts/task-management.js";
 import { parseTaskWorkflowIdentities } from "../task-management/api/TaskManageCapability.js";
@@ -277,6 +278,112 @@ function routeWithRecords(
   return route(cycles, { ...options, records });
 }
 
+function persistedManifestTask(options: {
+  readonly changed_stage_title?: string;
+  readonly extra_relation?: boolean;
+} = {}) {
+  const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+  const instruction = (kind: "plan" | "work" | "verify") => `# ${kind}`;
+  const manifest = {
+    cycle_id: "cycle-1",
+    approval_record_id: "record:cycle:approval:manifest",
+    specification_seal_digest: hash("specification"),
+    plan_issue_id: "plan-1",
+    plan: {
+      kind: "plan", issue_id: "plan-1", parent_issue_id: "cycle-1",
+      completion_record_id: "record:plan:completion:manifest",
+      invalidation_record_id: "record:plan:invalidation:manifest",
+      title: "Plan", instruction_digest: hash(instruction("plan")),
+    },
+    ordered_work_nodes: [{
+      kind: "work", issue_id: "work-1", parent_issue_id: "cycle-1",
+      completion_record_id: "record:work:completion:manifest",
+      invalidation_record_id: "record:work:invalidation:manifest",
+      title: "Work", instruction_digest: hash(instruction("work")),
+      approved_work_group_id: "group-1", directive_ids: ["directive-1"],
+    }],
+    ordered_work_issue_ids: ["work-1"],
+    verify_node: {
+      kind: "verify", issue_id: "verify-1", parent_issue_id: "cycle-1",
+      completion_record_id: "record:verify:completion:manifest",
+      invalidation_record_id: "record:verify:invalidation:manifest",
+      title: "Verify", instruction_digest: hash(instruction("verify")),
+      directive_ids: ["verify-1"],
+    },
+    verify_issue_id: "verify-1",
+    relations: [],
+  } as const;
+  const stage = (kind: "plan" | "work" | "verify", issueId: string, title = kind === "plan" ? "Plan" : kind === "work" ? "Work" : "Verify") => (
+    canonicalIssue({
+      issue_id: issueId,
+      kind,
+      status_id: kind === "plan" ? states.in_progress_state_id : states.todo_state_id,
+      status: kind === "plan" ? "In Progress" : "Todo",
+      title,
+      description_markdown: instruction(kind),
+      parent_issue_id: "cycle-1",
+      label_ids: [workflow.labels[kind]],
+      delegate_id: null,
+      priority: null,
+    })
+  );
+  const approval = {
+    ...acceptedDeliveryRecords()[0] as Record<string, unknown>,
+    record_id: manifest.approval_record_id,
+    cycle_id: "cycle-1",
+    issue_id: "cycle-1",
+    plan_issue_id: "plan-1",
+    plan_completion_record_id: manifest.plan.completion_record_id,
+    plan_invalidation_record_id: manifest.plan.invalidation_record_id,
+    cycle_invalidation_record_id: "record:cycle:invalidation:manifest",
+    specification_seal_digest: manifest.specification_seal_digest,
+  };
+  const planRecord = {
+    record_id: manifest.plan.completion_record_id,
+    revision: `symphony:v1:${hash("plan-record")}`,
+    issue_id: "plan-1",
+    cycle_id: "cycle-1",
+    actor_id: "actor:agent",
+    created_at: "2026-08-03T00:00:01.000Z",
+    updated_at: "2026-08-03T00:00:01.000Z",
+    archived_at: null,
+    basis_issue_revision: `symphony:v1:${hash("plan-basis")}`,
+    basis_status: "In Progress",
+    basis_document_digest: hash(instruction("plan")),
+    record_kind: "stage_completion",
+    stage_id: "plan-1",
+    completion: {
+      outcome: "completed",
+      instruction_digest: manifest.plan.instruction_digest,
+      manifest,
+      graph_seal_digest: hash("graph"),
+      traceability_by_issue_id_markdown: "# Traceability",
+    },
+  };
+  const base = task(["in_progress"]);
+  const relations = options.extra_relation ? [canonicalRelation("relation:extra", "work-1", "verify-1")] : [];
+  return parseTaskSnapshot({
+    ...base,
+    issues: [...base.issues, stage("plan", "plan-1"), stage("work", "work-1", options.changed_stage_title), stage("verify", "verify-1")],
+    relations,
+    issue_record_observations: [approval, planRecord],
+  });
+}
+
+function canonicalRelation(relationId: string, sourceIssueId: string, targetIssueId: string) {
+  const fields = {
+    relation_id: relationId,
+    provider_created_at: "2026-08-03T00:00:00.000Z",
+    provider_updated_at: "2026-08-03T00:00:00.000Z",
+    creation_actor_id: "actor:agent",
+    creation_evidence_id: `evidence:${relationId}`,
+    type: "blocks",
+    source_issue_id: sourceIssueId,
+    target_issue_id: targetIssueId,
+  } as const;
+  return { ...fields, revision: canonicalTaskRevision(fields) };
+}
+
 test("bounded origin routes external Root edits at least once without treating service writes as external", () => {
   const external = route(["in_progress"], {}, [], [{
     issue_id: parseTaskIssueId("root-1"),
@@ -478,4 +585,111 @@ test("restart routes an externally terminal Cycle from fresh history without not
 
   assert.deepEqual(routing.matches.map(({ route_id }) => route_id), ["WF-ROUTE-018", "WF-ROUTE-008"]);
   assert.equal(routing.selected.route_id, "WF-ROUTE-018");
+});
+
+test("a valid record occupying the selected Cycle invalidation slot routes to permanent quarantine", () => {
+  const approval = acceptedDeliveryRecords()[0] as { readonly cycle_invalidation_record_id: string };
+  const occupyingRecord = {
+    ...acceptedDeliveryRecords()[1]!,
+    record_id: approval.cycle_invalidation_record_id,
+  };
+  const routing = routeWithRecords(["in_progress"], [approval, occupyingRecord]);
+
+  assert.deepEqual(routing.matches.map(({ route_id }) => route_id), ["WF-ROUTE-016", "WF-ROUTE-004"]);
+  assert.equal(routing.selected.route_id, "WF-ROUTE-016");
+  assert.equal(routing.selected.cycle_id, parseCycleIssueId("cycle-1"));
+});
+
+test("an invalidation slot observation routes to permanent quarantine, but a missing slot does not", () => {
+  const approval = acceptedDeliveryRecords()[0] as { readonly cycle_invalidation_record_id: string };
+  const invalid = {
+    record_id: approval.cycle_invalidation_record_id,
+    issue_id: "cycle-1",
+    expected_record_kind: "cycle_invalidation",
+    observation_kind: "updated",
+    provider_created_at: "2026-08-03T00:00:02.000Z",
+    provider_updated_at: "2026-08-03T00:00:03.000Z",
+    archived_at: null,
+    observed_body_digest: "a".repeat(64),
+    parse_error_code: "record_updated",
+  };
+  const invalidRouting = routeWithRecords(["in_progress"], [approval, invalid]);
+  assert.equal(invalidRouting.selected.route_id, "WF-ROUTE-016");
+
+  const missing = {
+    ...invalid,
+    observation_kind: "missing",
+    provider_created_at: null,
+    provider_updated_at: null,
+    observed_body_digest: null,
+    parse_error_code: "record_missing",
+  };
+  const missingRouting = routeWithRecords(["in_progress"], [approval, missing]);
+  assert.equal(missingRouting.selected.route_id, "WF-ROUTE-004");
+});
+
+test("malformed, updated, and archived managed record observations select sealed-fact routing", () => {
+  const base = {
+    record_id: "record:cycle:managed",
+    issue_id: "cycle-1",
+    expected_record_kind: "stage_completion",
+  } as const;
+  for (const observation of [
+    {
+      ...base,
+      observation_kind: "malformed" as const,
+      provider_created_at: null,
+      provider_updated_at: null,
+      archived_at: null,
+      observed_body_digest: null,
+      parse_error_code: "record_malformed",
+    },
+    {
+      ...base,
+      observation_kind: "updated" as const,
+      provider_created_at: "2026-08-03T00:00:01.000Z",
+      provider_updated_at: "2026-08-03T00:00:02.000Z",
+      archived_at: null,
+      observed_body_digest: "a".repeat(64),
+      parse_error_code: "record_updated",
+    },
+    {
+      ...base,
+      observation_kind: "archived" as const,
+      provider_created_at: "2026-08-03T00:00:01.000Z",
+      provider_updated_at: "2026-08-03T00:00:01.000Z",
+      archived_at: "2026-08-03T00:00:02.000Z",
+      observed_body_digest: "b".repeat(64),
+      parse_error_code: "record_archived",
+    },
+  ]) {
+    assert.equal(routeWithRecords(["in_progress"], [observation]).selected.route_id, "WF-ROUTE-006");
+  }
+});
+
+test("router compares current Stage and relation facts with the exact persisted Plan manifest", () => {
+  assert.equal(routeFreshTask({
+    task: persistedManifestTask(),
+    task_changes: [],
+    task_change_origins: [],
+    agent_actor_id: "actor:agent",
+    root_states: rootStates,
+    workflow,
+  }).selected.route_id, "WF-ROUTE-004");
+  assert.equal(routeFreshTask({
+    task: persistedManifestTask({ changed_stage_title: "Externally edited Work" }),
+    task_changes: [],
+    task_change_origins: [],
+    agent_actor_id: "actor:agent",
+    root_states: rootStates,
+    workflow,
+  }).selected.route_id, "WF-ROUTE-006");
+  assert.equal(routeFreshTask({
+    task: persistedManifestTask({ extra_relation: true }),
+    task_changes: [],
+    task_change_origins: [],
+    agent_actor_id: "actor:agent",
+    root_states: rootStates,
+    workflow,
+  }).selected.route_id, "WF-ROUTE-006");
 });

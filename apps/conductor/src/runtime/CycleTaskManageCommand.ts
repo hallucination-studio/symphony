@@ -21,6 +21,7 @@ import {
   type TaskIssueSnapshot,
   type TaskRelationSnapshot,
 } from "../contracts/task-management.js";
+import type { StageInvalidationRecord } from "../contracts/cycle-records.js";
 import type {
   TaskManageBoundaryExecution,
   TaskManageCommandInterface,
@@ -74,7 +75,13 @@ export interface BindCycleTaskManageCommandOptions {
   readonly task_manager: TaskManageCommandInterface;
   readonly mutation_manifest: readonly TaskMcpWriteCall[];
   readonly materialization_issues?: readonly TaskIssueSnapshot[];
+  readonly preconfirmed_stage_invalidations?: readonly StageInvalidationProjectionProof[];
 }
+
+export type StageInvalidationProjectionProof = Readonly<Pick<
+  StageInvalidationRecord,
+  "record_id" | "revision" | "stage_id" | "invalidation_kind" | "terminal_status"
+>>;
 
 export class CycleTaskManageBindingError extends Error {
   constructor(
@@ -231,6 +238,7 @@ export class CycleTaskManageCommandBinding {
   readonly #taskManager: TaskManageCommandInterface;
   readonly #grants: Map<string, boolean>;
   readonly #stages: ReadonlyMap<TaskIssueId, StageExecutionSnapshot>;
+  readonly #preconfirmedStageInvalidations: ReadonlyMap<TaskIssueId, StageInvalidationProjectionProof>;
   readonly #materializationIssues: ReadonlyMap<TaskIssueId, TaskIssueSnapshot>;
   readonly #provisionalIssues = new Map<TaskIssueId, CreateIssueCall["input"]>();
   readonly #provisionalRelations = new Map<TaskRelationId, CreateRelationCall["input"]>();
@@ -250,6 +258,20 @@ export class CycleTaskManageCommandBinding {
       ...this.#snapshot.sealed_work_issues,
       ...(this.#snapshot.verify_issue === null ? [] : [this.#snapshot.verify_issue]),
     ].map((stage) => [parseTaskIssueId(stage.issue_id), stage]));
+    const preconfirmed = new Map<TaskIssueId, StageInvalidationProjectionProof>();
+    for (const proof of options.preconfirmed_stage_invalidations ?? []) {
+      const stageId = parseTaskIssueId(proof.stage_id);
+      parseTaskRevision(proof.revision);
+      if (
+        proof.record_id.length === 0
+        || proof.invalidation_kind === "invalid_terminal"
+        || proof.terminal_status !== "Failed"
+        || !this.#stages.has(stageId)
+        || preconfirmed.has(stageId)
+      ) invalidBoundary();
+      preconfirmed.set(stageId, proof);
+    }
+    this.#preconfirmedStageInvalidations = preconfirmed;
     try {
       this.#materializationIssues = this.#parseMaterializationIssues(
         options.materialization_issues ?? [],
@@ -547,6 +569,10 @@ export class CycleTaskManageCommandBinding {
     const target = call.input.desired.state_id;
     const legal = stage.status === "todo"
       ? target === this.#workflow.stage_states.in_progress
+        || (
+          target === this.#workflow.stage_states.failed
+          && this.#preconfirmedStageInvalidations.has(call.input.issue_id)
+        )
       : stage.status === "in_progress"
         && (
           target === this.#workflow.stage_states.done

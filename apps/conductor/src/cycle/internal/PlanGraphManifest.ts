@@ -23,6 +23,11 @@ export interface BuiltPlanGraphManifest {
   readonly instructions_by_issue_id: Readonly<Record<string, MarkdownText>>;
 }
 
+const PERSISTED_PLAN_INSTRUCTION = parseMarkdownText(
+  "## Plan\n\nCompile the approved Cycle into one sealed Work and Verify graph.",
+  "invalid_plan_instruction",
+);
+
 export function assertExactPlanGraph(
   snapshot: CycleAdvanceRequest,
   built: BuiltPlanGraphManifest,
@@ -210,6 +215,41 @@ export function buildPlanGraphManifest(input: BuildPlanGraphManifestInput): Buil
     verify_issue_id: verifyIssueId,
     relations,
   }, input.basis);
+  return Object.freeze({
+    manifest,
+    instructions_by_issue_id: Object.freeze(instructions),
+  });
+}
+
+export function materializePersistedPlanGraphManifest(
+  manifestValue: PlanGraphManifest,
+  basis: SealedCycleBasis,
+): BuiltPlanGraphManifest {
+  const manifest = parsePlanGraphManifest(manifestValue, basis);
+  const instructions: Record<string, MarkdownText> = {};
+  if (digest(PERSISTED_PLAN_INSTRUCTION) !== manifest.plan.instruction_digest) {
+    throw new Error("persisted_plan_instruction_mismatch");
+  }
+  instructions[manifest.plan.issue_id] = PERSISTED_PLAN_INSTRUCTION;
+
+  const groups = new Map(
+    basis.specification.approved_work_groups.map((group) => [group.work_group_id, group]),
+  );
+  for (const node of manifest.ordered_work_nodes) {
+    const group = groups.get(node.approved_work_group_id);
+    if (group === undefined) throw new Error("persisted_manifest_work_group_missing");
+    const instruction = workInstruction(group, basis);
+    if (digest(instruction) !== node.instruction_digest) {
+      throw new Error("persisted_work_instruction_mismatch");
+    }
+    instructions[node.issue_id] = instruction;
+  }
+
+  const verifyInstructionMarkdown = verifyInstruction(basis);
+  if (digest(verifyInstructionMarkdown) !== manifest.verify_node.instruction_digest) {
+    throw new Error("persisted_verify_instruction_mismatch");
+  }
+  instructions[manifest.verify_issue_id] = verifyInstructionMarkdown;
   return Object.freeze({
     manifest,
     instructions_by_issue_id: Object.freeze(instructions),

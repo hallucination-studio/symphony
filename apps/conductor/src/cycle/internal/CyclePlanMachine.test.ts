@@ -31,8 +31,10 @@ import {
 } from "../../contracts/cycle.js";
 import {
   parseCycleApprovalRecord,
+  parseCycleInvalidationRecord,
   parseCycleSpecification as parseRecordCycleSpecification,
   parseStageCompletionRecord,
+  parseStageInvalidationRecord,
   stageCompletionTerminalStatus,
   type StageCompletionRecord,
 } from "../../contracts/cycle-records.js";
@@ -84,6 +86,7 @@ import type { GitWorkspaceInterface } from "../../git/api/GitWorkspaceInterface.
 import { GitWorktree } from "../../git/internal/GitWorktree.js";
 import { bindCycleAdvanceRequest } from "./CycleMachine.js";
 import { CyclePlanMachine } from "./CyclePlanMachine.js";
+import { readExactTaskIssueRecord } from "./CycleRecords.js";
 import { buildPlanGraphManifest, type BuiltPlanGraphManifest } from "./PlanGraphManifest.js";
 import { PlanCompletionRecordWriter } from "./PlanCompletionRecord.js";
 
@@ -966,6 +969,205 @@ function occupiedInvalidationObservation(recordId: string, issueId = "WORK-ONLY"
     observed_body_digest: "1".repeat(64),
     parse_error_code: "record_updated",
   } as const;
+}
+
+function sealedFactMutationFixture() {
+  const basis = Object.freeze({ specification: recordSpecification, approval_record: recordApproval });
+  const built = buildPlanGraphManifest({
+    basis,
+    ordered_work_group_ids: ["contracts", "runtime"],
+    plan_title: planSource.title,
+    plan_instruction_markdown: planSource.description_markdown,
+  });
+  const stageIssue = (
+    node: BuiltPlanGraphManifest["manifest"]["plan"]
+      | BuiltPlanGraphManifest["manifest"]["ordered_work_nodes"][number]
+      | BuiltPlanGraphManifest["manifest"]["verify_node"],
+    status: "todo" | "in_progress" | "done",
+    revision: string,
+  ) => taskIssue({
+    issue_id: parseTaskIssueId(node.issue_id),
+    revision: parseTaskRevision(revision),
+    status_id: workflow.stage_states[status],
+    title: node.title,
+    description_markdown: node.kind === "plan"
+      ? planSource.description_markdown
+      : built.instructions_by_issue_id[node.issue_id]!,
+    parent_issue_id: parseTaskIssueId(cycleId),
+    label_ids: [workflow.labels[node.kind]],
+    delegate_id: null,
+    priority: null,
+  });
+  const plan = stageIssue(built.manifest.plan, "done", "revision:plan:sealed-mutation");
+  const work = built.manifest.ordered_work_nodes.map((node, index) => stageIssue(
+    node,
+    index === 0 ? "todo" : "done",
+    `revision:work:sealed-mutation:${index}`,
+  ));
+  const verify = stageIssue(built.manifest.verify_node, "done", "revision:verify:sealed-mutation");
+  const graph = parseSealedExecutionGraph({
+    plan_issue: {
+      issue_id: plan.issue_id,
+      sealed_revision: plan.revision,
+      kind: "plan",
+      title: plan.title,
+      description_markdown: plan.description_markdown,
+      parent_cycle_id: cycleId,
+    },
+    work_issues: work.map((issue) => ({
+      issue_id: parseStageIssueId(issue.issue_id),
+      sealed_revision: issue.revision,
+      kind: "work" as const,
+      title: issue.title,
+      description_markdown: issue.description_markdown,
+      parent_cycle_id: cycleId,
+    })),
+    verify_issue: {
+      issue_id: parseStageIssueId(verify.issue_id),
+      sealed_revision: verify.revision,
+      kind: "verify",
+      title: verify.title,
+      description_markdown: verify.description_markdown,
+      parent_cycle_id: cycleId,
+    },
+    relations: built.manifest.relations.map((relation, index) => ({
+      relation_id: parseTaskRelationId(relation.relation_id),
+      revision: parseTaskRevision(`revision:relation:sealed-mutation:${index}`),
+      prerequisite_issue_id: parseStageIssueId(relation.source_issue_id),
+      dependent_issue_id: parseStageIssueId(relation.target_issue_id),
+    })),
+  }, cycleId);
+  const request = requestWithGraph(graph, {
+    plan_status: "done",
+    plan_revision: plan.revision,
+    work_issues: work,
+    work_statuses: ["todo", "done"],
+    verify_issue: verify,
+    verify_status: "done",
+  });
+  const digest = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+  const planProjection = {
+    issue_id: plan.issue_id,
+    cycle_id: cycleId,
+    basis_issue_revision: plan.revision,
+    basis_status: "In Progress" as const,
+    basis_document_digest: digest(plan.description_markdown),
+    record_kind: "stage_completion" as const,
+    stage_id: plan.issue_id,
+    completion: {
+      outcome: "completed" as const,
+      instruction_digest: built.manifest.plan.instruction_digest,
+      manifest: built.manifest,
+      graph_seal_digest: canonicalTaskRevision(built.manifest).slice("symphony:v1:".length),
+      traceability_by_issue_id_markdown: "## Traceability\n\nPersisted test manifest.",
+    },
+  };
+  const planBody = renderTaskIssueRecordProjectionMarkdown(planProjection);
+  const comments = new Map<TaskIssueId, LinearIssueRecordComment[]>([
+    [plan.issue_id, [{
+      comment_id: recordSpecification.plan_completion_record_id,
+      issue_id: plan.issue_id,
+      provider_created_at: "2026-08-03T01:00:00.000Z",
+      provider_updated_at: "2026-08-03T01:00:00.000Z",
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: digest(planBody),
+      body_markdown: planBody,
+    }]],
+  ]);
+  const events: string[] = [];
+  const manager = unexpectedManager();
+  manager.create_issue_comment = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    const comment: LinearIssueRecordComment = {
+      comment_id: call.input.comment_id,
+      issue_id: call.input.issue_id,
+      provider_created_at: "2026-08-03T02:00:00.000Z",
+      provider_updated_at: "2026-08-03T02:00:00.000Z",
+      provider_edited_at: null,
+      provider_archived_at: null,
+      actor_id: "actor:symphony",
+      body_digest: digest(call.input.body_markdown),
+      body_markdown: call.input.body_markdown,
+    };
+    comments.set(call.input.issue_id, [...(comments.get(call.input.issue_id) ?? []), comment]);
+    events.push(`record:${call.input.issue_id}`);
+    return parseTaskMcpResult({
+      ...resultEnvelope(call),
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "comment", comment_id: comment.comment_id, issue_id: comment.issue_id },
+        fresh_comment: {
+          comment_id: comment.comment_id,
+          issue_id: comment.issue_id,
+          provider_created_at: comment.provider_created_at,
+          provider_updated_at: comment.provider_updated_at,
+          provider_edited_at: comment.provider_edited_at,
+          provider_archived_at: comment.provider_archived_at,
+          actor_id: comment.actor_id,
+          body_digest: comment.body_digest,
+        },
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+  manager.update_issue = async (call, execution) => {
+    callerAuthority.verifier.assert(execution.caller, call);
+    const current = call.input.issue_id === parseTaskIssueId(cycleId)
+      ? failedCycleIssue("revision:cycle:sealed-mutation:failed")
+      : [plan, ...work, verify].find(({ issue_id }) => issue_id === call.input.issue_id);
+    if (current === undefined) throw new Error("test_update_issue_missing");
+    const desired = call.input.desired.state_id;
+    if (desired === undefined) throw new Error("test_update_issue_state_missing");
+    const status = desired === workflow.cycle_states.failed || desired === workflow.stage_states.failed
+      ? "failed" as const
+      : desired === workflow.stage_states.done ? "done" as const : "in_progress" as const;
+    const updated = taskIssue({
+      issue_id: current.issue_id,
+      revision: parseTaskRevision(`revision:sealed-mutation:update:${events.length}`),
+      status_id: desired,
+      title: current.title,
+      description_markdown: current.description_markdown,
+      parent_issue_id: current.parent_issue_id,
+      label_ids: current.label_ids,
+      delegate_id: current.delegate_id,
+      priority: current.priority,
+    });
+    events.push(`status:${current.issue_id}:${status}`);
+    return appliedIssueResult(
+      call,
+      updated,
+      call.input.issue_id === parseTaskIssueId(cycleId) ? workflow.cycle_states.in_progress : current.status_id,
+    );
+  };
+  const writer = new PlanCompletionRecordWriter({
+    caller_issuer: callerAuthority.issuer,
+    workflow,
+    task_manager: manager,
+    record_reader: {
+      readIssueRecordComments: async (issueId) => comments.get(issueId) ?? [],
+      readIssueCreationEvidence: async (issueId) => ({
+        issue_id: issueId,
+        provider_created_at: "2026-08-03T00:30:00.000Z",
+        actor_id: "actor:symphony",
+      }),
+    },
+    service_actor_id: "actor:symphony",
+  });
+  return { basis, built, request, comments, events, writer } as const;
+}
+
+function readTaskIssueRecordFromComment(comment: LinearIssueRecordComment) {
+  const record = readExactTaskIssueRecord(
+    [comment],
+    parseTaskIssueId(comment.issue_id),
+    comment.comment_id,
+    "actor:symphony",
+  );
+  if (record === null) throw new Error("test_record_comment_missing");
+  return record;
 }
 
 function externalTerminalFixture(
@@ -4473,4 +4675,255 @@ test("retirement closes active Verify and fences its late result from Git and Ta
     "verify_turn",
     "close_verify_performer",
   ]);
+});
+
+test("sealed-fact mutation closure invalidates the Cycle before acceptance can continue", async () => {
+  const fixture = singleWorkGraph();
+  const doneWork = taskIssue({
+    ...fixture.work,
+    revision: parseTaskRevision("revision:work:only:done-before-mutation"),
+    status_id: workflow.stage_states.done,
+  });
+  const doneVerify = taskIssue({
+    ...fixture.verify,
+    revision: parseTaskRevision("revision:verify:only:done-before-mutation"),
+    status_id: workflow.stage_states.done,
+  });
+  const request = requestWithGraph(fixture.graph, {
+    cycle_status: "awaiting_acceptance",
+    plan_status: "done",
+    plan_revision: "revision:plan:done-before-mutation",
+    work_issues: [doneWork],
+    work_statuses: ["done"],
+    verify_issue: doneVerify,
+    verify_status: "done",
+  });
+  let mutationClosures = 0;
+  const failedRevision = parseTaskRevision("revision:cycle:sealed-mutation:failed");
+  const writer = {
+    ...planCompletionRecordWriter,
+    persistSealedFactMutation: async (snapshot: CycleAdvanceRequest) => {
+      mutationClosures += 1;
+      return Object.freeze({ ...snapshot, cycle_revision: failedRevision, cycle_status: "failed" as const });
+    },
+  };
+  const machine = new CyclePlanMachine({
+    sealed_basis_reader: sealedBasisReader,
+    plan_completion_record_writer: writer,
+    workflow,
+    caller_issuer: callerAuthority.issuer,
+    task_manager: unexpectedManager(),
+    ...unexpectedCommitVerifyDependencies,
+    reader: { read: async () => { throw new Error("unexpected_mutation_readback"); } },
+    work_performer_factory: unexpectedWorkPerformerFactory,
+    plan_performer_factory: { create: async () => { throw new Error("unexpected_mutation_plan"); } },
+  });
+
+  const observation = {
+    affected_stage_ids: [],
+    offending_resources: [{
+      evidence_kind: "present_digest_mismatch" as const,
+      resource_kind: "cycle" as const,
+      resource_id: request.cycle_id,
+      expected_digest: recordDigest("1"),
+      observed_digest: recordDigest("2"),
+      observed_revision: request.cycle_revision,
+      creation_evidence_digest: null,
+    }],
+  } as const;
+  const result = await machine.advance(request, {
+    ownership: "live",
+    closure: "sealed_fact_mutated",
+    sealed_fact_mutation: observation,
+  } as never);
+
+  assert.equal(result.outcome, "terminal_failed");
+  assert.equal(mutationClosures, 1);
+  assert.equal(result.to_cycle_revision, failedRevision);
+
+  await assert.rejects(
+    machine.advance(request, {
+      ownership: "live",
+      closure: "sealed_fact_mutated",
+      sealed_fact_mutation: { affected_stage_ids: [], offending_resources: [] },
+    } as never),
+    /cycle_machine_execution_invalid/u,
+  );
+  await assert.rejects(
+    machine.advance(request, { ownership: "live", closure: "sealed_fact_mutated" } as never),
+    /cycle_machine_execution_invalid/u,
+  );
+  await assert.rejects(
+    machine.advance(request, { ownership: "live", sealed_fact_mutation: observation } as never),
+    /cycle_machine_execution_invalid/u,
+  );
+  assert.equal(mutationClosures, 1);
+});
+
+test("sealed-fact mutation writes affected Stage and Cycle invalidations before terminal projection", async () => {
+  const fixture = sealedFactMutationFixture();
+  const activeWork = fixture.request.sealed_work_issues[0]!;
+  const observation = {
+    affected_stage_ids: [
+      parseTaskIssueId(activeWork.issue_id),
+      parseTaskIssueId(fixture.request.sealed_work_issues[1]!.issue_id),
+      parseTaskIssueId(fixture.request.verify_issue!.issue_id),
+    ],
+    offending_resources: [{
+      evidence_kind: "present_digest_mismatch" as const,
+      resource_kind: "stage" as const,
+      resource_id: activeWork.issue_id,
+      expected_digest: recordDigest("1"),
+      observed_digest: recordDigest("2"),
+      observed_revision: activeWork.revision,
+      creation_evidence_digest: null,
+    }],
+  } as const;
+
+  await assert.rejects(
+    fixture.writer.persistSealedFactMutation(
+      fixture.request,
+      fixture.basis,
+      Object.freeze({ assertActive: () => undefined }),
+      { ...observation, affected_stage_ids: [parseTaskIssueId("UNKNOWN-SEALED-STAGE")] },
+    ),
+    /sealed_fact_stage_identity_invalid/u,
+  );
+  assert.deepEqual(fixture.events, []);
+
+  const result = await fixture.writer.persistSealedFactMutation(
+    fixture.request,
+    fixture.basis,
+    Object.freeze({ assertActive: () => undefined }),
+    observation,
+  );
+
+  assert.equal(result.cycle_status, "failed");
+  assert.equal(result.sealed_work_issues[0]?.status, "failed");
+  assert.equal(result.sealed_work_issues[1]?.status, "done");
+  assert.equal(result.verify_issue?.status, "done");
+  assert.deepEqual(fixture.events, [
+    `record:${activeWork.issue_id}`,
+    `status:${activeWork.issue_id}:failed`,
+    `record:${fixture.request.cycle_id}`,
+    `status:${fixture.request.cycle_id}:failed`,
+  ]);
+
+  const stageComments = fixture.comments.get(parseTaskIssueId(activeWork.issue_id)) ?? [];
+  const stageRecord = parseStageInvalidationRecord(
+    readTaskIssueRecordFromComment(stageComments[0]!),
+  );
+  assert.equal(stageRecord.invalidation_kind, "sealed_fact_mutated");
+  assert.equal(stageRecord.terminal_status, "Failed");
+  assert.equal(stageRecord.stage_id, activeWork.issue_id);
+
+  const cycleComments = fixture.comments.get(parseTaskIssueId(fixture.request.cycle_id)) ?? [];
+  const cycleRecord = parseCycleInvalidationRecord(
+    readTaskIssueRecordFromComment(cycleComments[0]!),
+  );
+  assert.equal(cycleRecord.invalidation_kind, "sealed_fact_mutated");
+  assert.equal(cycleRecord.terminal_status, "Failed");
+  assert.equal(cycleRecord.successor_policy, "permanently_quarantined");
+  assert.deepEqual(cycleRecord.offending_resources, observation.offending_resources);
+  assert.equal(
+    cycleRecord.observed_execution_graph_digest,
+    createHash("sha256").update(JSON.stringify({
+      graph: {
+        plan_issue: fixture.request.plan_issue,
+        sealed_work_issues: fixture.request.sealed_work_issues,
+        verify_issue: fixture.request.verify_issue,
+        sealed_relations: fixture.request.sealed_relations,
+      },
+      offending_resources: observation.offending_resources,
+    }), "utf8").digest("hex"),
+  );
+});
+
+test("sealed-fact mutation restart reuses partial records and preserves terminal stages", async () => {
+  const fixture = sealedFactMutationFixture();
+  const activeWork = fixture.request.sealed_work_issues[0]!;
+  const observation = {
+    affected_stage_ids: [parseTaskIssueId(activeWork.issue_id)],
+    offending_resources: [{
+      evidence_kind: "present_digest_mismatch" as const,
+      resource_kind: "stage" as const,
+      resource_id: activeWork.issue_id,
+      expected_digest: recordDigest("1"),
+      observed_digest: recordDigest("2"),
+      observed_revision: activeWork.revision,
+      creation_evidence_digest: null,
+    }],
+  } as const;
+  let assertions = 0;
+
+  await assert.rejects(
+    fixture.writer.persistSealedFactMutation(
+      fixture.request,
+      fixture.basis,
+      Object.freeze({
+        assertActive: () => {
+          assertions += 1;
+          if (assertions === 10) throw new Error("test_partial_write");
+        },
+      }),
+      observation,
+    ),
+    /test_partial_write/u,
+  );
+  assert.deepEqual(fixture.events, [
+    `record:${activeWork.issue_id}`,
+    `status:${activeWork.issue_id}:failed`,
+    `record:${fixture.request.cycle_id}`,
+  ]);
+
+  const restarted = bindCycleAdvanceRequest({
+    ...fixture.request,
+    sealed_work_issues: fixture.request.sealed_work_issues.map((stage, index) => (
+      index === 0
+        ? { ...stage, revision: parseTaskRevision("revision:sealed-mutation:work-failed"), status: "failed" as const }
+        : stage
+    )),
+  });
+  const result = await fixture.writer.persistSealedFactMutation(
+    restarted,
+    fixture.basis,
+    Object.freeze({ assertActive: () => undefined }),
+    observation,
+  );
+
+  assert.equal(result.cycle_status, "failed");
+  assert.equal(result.sealed_work_issues[0]?.status, "failed");
+  assert.deepEqual(fixture.events, [
+    `record:${activeWork.issue_id}`,
+    `status:${activeWork.issue_id}:failed`,
+    `record:${fixture.request.cycle_id}`,
+    `status:${fixture.request.cycle_id}:failed`,
+  ]);
+  assert.equal(
+    (fixture.comments.get(parseTaskIssueId(activeWork.issue_id)) ?? []).filter(
+      ({ comment_id }) => comment_id === fixture.built.manifest.ordered_work_nodes[0]!.invalidation_record_id,
+    ).length,
+    1,
+  );
+  assert.equal(
+    (fixture.comments.get(parseTaskIssueId(fixture.request.cycle_id)) ?? []).filter(
+      ({ comment_id }) => comment_id === fixture.basis.specification.cycle_invalidation_record_id,
+    ).length,
+    1,
+  );
+  await assert.rejects(
+    fixture.writer.persistSealedFactMutation(
+      restarted,
+      fixture.basis,
+      Object.freeze({ assertActive: () => undefined }),
+      {
+        ...observation,
+        offending_resources: [{
+          ...observation.offending_resources[0]!,
+          observed_digest: recordDigest("3"),
+        }],
+      },
+    ),
+    /sealed_fact_cycle_record_anchor_mismatch/u,
+  );
 });

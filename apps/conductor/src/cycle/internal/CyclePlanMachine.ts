@@ -47,9 +47,11 @@ import {
   type UpdateIssueCall,
 } from "../../task-management/mcp/TaskMcpSchemas.js";
 import { bindCycleTaskManageCommand } from "../../runtime/CycleTaskManageCommand.js";
-import type {
-  CycleMachineExecution,
-  CycleMachineInterface,
+import {
+  parseSealedFactMutationObservation,
+  type CycleMachineExecution,
+  type CycleMachineInterface,
+  type SealedFactMutationObservation,
 } from "../api/CycleMachineInterface.js";
 import {
   bindCycleAdvanceRequest,
@@ -88,6 +90,7 @@ type CycleExecutionFailureReason =
   | "lost_execution_context"
   | "lost_work_thread_context"
   | "active_root_admission_lost"
+  | "sealed_fact_mutated"
   | "cycle_transition_failed";
 
 export interface CyclePlanPerformerFactory {
@@ -151,6 +154,12 @@ interface PlanCompletionRecordPersistence {
     execution: TaskManageBoundaryExecution,
     terminalOutcome?: "failed" | "canceled",
   ): Promise<unknown>;
+  persistSealedFactMutation?(
+    request: CycleAdvanceRequest,
+    basis: SealedCycleBasis,
+    execution: TaskManageBoundaryExecution,
+    observation?: SealedFactMutationObservation,
+  ): Promise<CycleAdvanceRequest>;
   persistWork(...args: Parameters<PlanCompletionRecordWriter["persistWork"]>): Promise<unknown>;
   persistVerify(...args: Parameters<PlanCompletionRecordWriter["persistVerify"]>): Promise<unknown>;
   persistPlanInvalidation(...args: Parameters<PlanCompletionRecordWriter["persistPlanInvalidation"]>): Promise<unknown>;
@@ -218,6 +227,8 @@ function failureReasonMarkdown(reason: CycleExecutionFailureReason) {
         ? "Cycle failed because the shared Work thread was lost before the next Work Item."
       : reason === "active_root_admission_lost"
         ? "Cycle was canceled because the active Root lost admission."
+      : reason === "sealed_fact_mutated"
+        ? "Cycle failed because a sealed instruction, relation, or record was mutated."
       : reason === "verify_phase_failed"
         ? "Cycle failed during exact commit or Verify execution."
       : reason === "work_phase_failed"
@@ -296,13 +307,33 @@ function parseExecution(value: CycleMachineExecution): CycleMachineExecution {
   if (
     typeof value !== "object"
     || value === null
-    || Object.keys(value).some((key) => key !== "ownership" && key !== "closure")
+    || Object.keys(value).some((key) => (
+      key !== "ownership" && key !== "closure" && key !== "sealed_fact_mutation"
+    ))
     || (value.ownership !== "live" && value.ownership !== "lost")
-    || (value.closure !== undefined && value.closure !== "admission_lost")
+    || (
+      value.closure !== undefined
+      && value.closure !== "admission_lost"
+      && value.closure !== "sealed_fact_mutated"
+    )
   ) throw new Error("cycle_machine_execution_invalid");
+  let sealedFactMutation: SealedFactMutationObservation | undefined;
+  if (value.sealed_fact_mutation !== undefined) {
+    try {
+      sealedFactMutation = parseSealedFactMutationObservation(value.sealed_fact_mutation);
+    } catch {
+      throw new Error("cycle_machine_execution_invalid");
+    }
+  }
+  if ((value.closure === "sealed_fact_mutated") !== (sealedFactMutation !== undefined)) {
+    throw new Error("cycle_machine_execution_invalid");
+  }
   return Object.freeze({
     ownership: value.ownership,
     ...(value.closure === undefined ? {} : { closure: value.closure }),
+    ...(sealedFactMutation === undefined
+      ? {}
+      : { sealed_fact_mutation: sealedFactMutation }),
   });
 }
 
@@ -510,6 +541,34 @@ export class CyclePlanMachine implements CycleMachineInterface {
     if (externalCycleTerminal !== null) return externalCycleTerminal;
     if (execution.closure === "admission_lost") {
       return this.#failCycle(request, "active_root_admission_lost", "canceled", epoch, "canceled");
+    }
+    if (execution.closure === "sealed_fact_mutated") {
+      const persist = this.#planCompletionRecordWriter.persistSealedFactMutation;
+      if (persist === undefined) {
+        return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+      }
+      try {
+        const basis = await this.#readSealedBasis(request);
+        const persisted = await persist.call(
+          this.#planCompletionRecordWriter,
+          request,
+          basis,
+          this.#execution(epoch),
+          execution.sealed_fact_mutation,
+        );
+        this.#assertActive(epoch);
+        if (
+          persisted.root_id !== request.root_id
+          || persisted.cycle_id !== request.cycle_id
+          || persisted.runtime_generation !== request.runtime_generation
+          || persisted.correlation_id !== request.correlation_id
+          || persisted.cycle_status !== "failed"
+        ) throw new Error("sealed_fact_cycle_projection_mismatch");
+        return failedResult(request, "terminal_failed", persisted.cycle_revision, "sealed_fact_mutated");
+      } catch {
+        this.#assertActive(epoch);
+        return failedResult(request, "precondition_failed", request.cycle_revision, "cycle_transition_failed");
+      }
     }
     const externalTerminal = await this.#handleExternalTerminalStage(request, epoch);
     if (externalTerminal !== null) return externalTerminal;
