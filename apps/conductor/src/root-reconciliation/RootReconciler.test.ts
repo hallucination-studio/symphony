@@ -58,8 +58,8 @@ function performerWith(response: string, requests: PerformerLaunchRequest[]): Pe
 
 function createReconciler(performer: Performer, runDirectory: string) {
   return new RootReconciler({
-    performer, runDirectory, agent: "codex", model: "gpt-5.6-luna",
-    reasoningEffort: "max", timeoutMs: 1_000,
+    performer, runDirectory, reconcileAgent: "codex", reconcileModel: "gpt-5.6-luna",
+    reconcileReasoningEffort: "max", timeoutMs: 1_000,
   });
 }
 
@@ -175,7 +175,7 @@ test("parses completion and human decisions without a repair turn", async () => 
   assert.equal(humanLaunches.length, 1);
 });
 
-test("omits model and reasoning so Root Reconcile can use local Execute defaults", async () => {
+test("omits model and reasoning so Root Reconcile can use local Codex defaults", async () => {
   const world = await fixture();
   const launches: PerformerLaunchRequest[] = [];
   const reconciler = new RootReconciler({
@@ -184,7 +184,7 @@ test("omits model and reasoning so Root Reconcile can use local Execute defaults
       launches,
     ),
     runDirectory: world.runDirectory,
-    agent: "codex",
+    reconcileAgent: "codex",
     timeoutMs: 1_000,
   });
 

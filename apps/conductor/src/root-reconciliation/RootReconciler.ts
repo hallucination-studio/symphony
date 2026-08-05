@@ -19,9 +19,9 @@ const MAX_VISIBLE_REASON_LENGTH = 50;
 export interface RootReconcilerOptions {
   readonly performer: Performer;
   readonly runDirectory: string;
-  readonly agent: AgentKind;
-  readonly model?: string;
-  readonly reasoningEffort?: string;
+  readonly reconcileAgent: AgentKind;
+  readonly reconcileModel?: string;
+  readonly reconcileReasoningEffort?: string;
   readonly timeoutMs: number;
 }
 
@@ -151,9 +151,10 @@ export class RootReconciler {
     const diagnosticJsonlPath = path.join(this.options.runDirectory, `root-reconcile-${runId}.jsonl`);
     const diagnosticStderrPath = path.join(this.options.runDirectory, `root-reconcile-${runId}.stderr`);
     const launch: PerformerLaunchRequest = {
-      agent: this.options.agent,
-      ...(this.options.model === undefined ? {} : { model: this.options.model }),
-      ...(this.options.reasoningEffort === undefined ? {} : { reasoning_effort: this.options.reasoningEffort }),
+      agent: this.options.reconcileAgent,
+      ...(this.options.reconcileModel === undefined ? {} : { model: this.options.reconcileModel }),
+      ...(this.options.reconcileReasoningEffort === undefined
+        ? {} : { reasoning_effort: this.options.reconcileReasoningEffort }),
       prompt: renderPrompt(request),
       working_directory: noWorkspaceDirectory,
       sandbox: "no_workspace",

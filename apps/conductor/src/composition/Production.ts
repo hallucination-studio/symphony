@@ -14,12 +14,12 @@ export async function createProductionRootRun(
   const root = await startup.gateway.get_issue(startup.request.linear_root);
   const workflow = await ensureLinearWorkflow(root.team_id, startup.gateway);
   const reconciler = new RootReconciler({
-    performer: startup.executePerformer,
+    performer: startup.reconcilePerformer,
     runDirectory: startup.request.run_directory,
-    agent: startup.request.agent,
-    ...(startup.request.execute_model === undefined ? {} : { model: startup.request.execute_model }),
-    ...(startup.request.execute_reasoning_effort === undefined
-      ? {} : { reasoningEffort: startup.request.execute_reasoning_effort }),
+    reconcileAgent: startup.request.reconcile_agent,
+    ...(startup.request.reconcile_model === undefined ? {} : { reconcileModel: startup.request.reconcile_model }),
+    ...(startup.request.reconcile_reasoning_effort === undefined
+      ? {} : { reconcileReasoningEffort: startup.request.reconcile_reasoning_effort }),
     timeoutMs: 120_000,
   });
   const cycleRunner = new CycleRunner({
@@ -27,10 +27,11 @@ export async function createProductionRootRun(
     executePerformer: startup.executePerformer,
     auditPerformer: startup.auditPerformer,
     workflow,
-    agent: startup.request.agent,
+    executeAgent: startup.request.execute_agent,
     ...(startup.request.execute_model === undefined ? {} : { executeModel: startup.request.execute_model }),
     ...(startup.request.execute_reasoning_effort === undefined
       ? {} : { executeReasoningEffort: startup.request.execute_reasoning_effort }),
+    auditAgent: startup.request.audit_agent,
     ...(startup.request.audit_model === undefined ? {} : { auditModel: startup.request.audit_model }),
     ...(startup.request.audit_reasoning_effort === undefined
       ? {} : { auditReasoningEffort: startup.request.audit_reasoning_effort }),

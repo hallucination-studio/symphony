@@ -106,9 +106,13 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
     linear_root: "ENG-123",
     workspace_path: "/workspaces/ENG-123",
     run_directory: "/runs/ENG-123",
-    agent: "codex",
+    reconcile_agent: "codex",
+    reconcile_model: "reconcile-model",
+    reconcile_reasoning_effort: "medium",
+    execute_agent: "codex",
     execute_model: "execute-model",
     execute_reasoning_effort: "high",
+    audit_agent: "codex",
     audit_model: "audit-model",
     audit_reasoning_effort: "xhigh",
     max_cycles: 30,
@@ -117,9 +121,13 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
     linear_root: "ENG-123",
     workspace_path: "/workspaces/ENG-123",
     run_directory: "/runs/ENG-123",
-    agent: "codex",
+    reconcile_agent: "codex",
+    reconcile_model: "reconcile-model",
+    reconcile_reasoning_effort: "medium",
+    execute_agent: "codex",
     execute_model: "execute-model",
     execute_reasoning_effort: "high",
+    audit_agent: "codex",
     audit_model: "audit-model",
     audit_reasoning_effort: "xhigh",
     max_cycles: 30,
@@ -132,8 +140,9 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
   ]) {
     assert.throws(() => parseHarnessRunRequest({ ...request, ...extra }), /invalid_contract_keys/u);
   }
-  assert.throws(() => parseHarnessRunRequest({ ...request, agent: "claude" }), /invalid_contract_variant/u);
-  assert.throws(() => parseHarnessRunRequest({ ...request, agent: null }), /invalid_contract_variant/u);
+  assert.throws(() => parseHarnessRunRequest({ ...request, agent: "codex" }), /invalid_contract_keys/u);
+  assert.throws(() => parseHarnessRunRequest({ ...request, reconcile_agent: "claude" }), /invalid_contract_variant/u);
+  assert.throws(() => parseHarnessRunRequest({ ...request, audit_agent: null }), /invalid_contract_variant/u);
   assert.throws(() => parseHarnessRunRequest({ ...request, max_cycles: 0 }), /invalid_max_cycles/u);
   assert.throws(() => parseHarnessRunRequest({ ...request, workspace_path: "relative" }), /invalid_workspace_path/u);
   assert.deepEqual(parseHarnessRunRequest({
@@ -141,16 +150,17 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
     run_directory: "/runs/ENG-123", max_cycles: 30,
   }), {
     linear_root: "ENG-123", workspace_path: "/workspaces/ENG-123",
-    run_directory: "/runs/ENG-123", agent: "codex", max_cycles: 30,
+    run_directory: "/runs/ENG-123", reconcile_agent: "codex", execute_agent: "codex", audit_agent: "codex", max_cycles: 30,
   });
   assert.deepEqual(parseHarnessRunRequest({
     linear_root: "ENG-123", workspace_path: "/workspaces/ENG-123",
-    run_directory: "/runs/ENG-123", execute_model: "execute-only",
+    run_directory: "/runs/ENG-123", reconcile_reasoning_effort: "high", execute_model: "execute-only",
     audit_reasoning_effort: "xhigh", max_cycles: 1,
   }), {
     linear_root: "ENG-123", workspace_path: "/workspaces/ENG-123",
-    run_directory: "/runs/ENG-123", agent: "codex",
-    execute_model: "execute-only", audit_reasoning_effort: "xhigh", max_cycles: 1,
+    run_directory: "/runs/ENG-123", reconcile_agent: "codex", reconcile_reasoning_effort: "high",
+    execute_agent: "codex", execute_model: "execute-only", audit_agent: "codex",
+    audit_reasoning_effort: "xhigh", max_cycles: 1,
   });
 });
 

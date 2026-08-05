@@ -192,7 +192,7 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
   const runner = new CycleRunner({
     gateway: world.gateway, executePerformer: performer, auditPerformer: performer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   let published = 0;
   const conductor = new Conductor({
@@ -296,7 +296,7 @@ test("final Inbox input cancels completion and enters the next frozen Cycle", as
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   let published = 0;
   const conductor = new Conductor({
@@ -317,7 +317,7 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
   const runner = new CycleRunner({
     gateway: world.gateway, executePerformer: rolePerformer, auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const stopped = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
@@ -547,7 +547,7 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
   const cycleRunner = new CycleRunner({
     gateway: world.gateway, executePerformer: performer, auditPerformer: performer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const conductor = new Conductor({
     gateway: world.gateway,

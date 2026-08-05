@@ -33,9 +33,10 @@ export interface CycleRunnerOptions {
   readonly executePerformer: Performer;
   readonly auditPerformer: Performer;
   readonly workflow: CycleWorkflow;
-  readonly agent: AgentKind;
+  readonly executeAgent: AgentKind;
   readonly executeModel?: string;
   readonly executeReasoningEffort?: string;
+  readonly auditAgent: AgentKind;
   readonly auditModel?: string;
   readonly auditReasoningEffort?: string;
   readonly timeoutMs: number;
@@ -371,7 +372,7 @@ export class CycleRunner {
     const executeDiagnosticJsonlPath = path.join(request.rootState.run_directory, `${cyclePrefix}-execute.jsonl`);
     const executeDiagnosticStderrPath = path.join(request.rootState.run_directory, `${cyclePrefix}-execute.stderr`);
     const executeProcess = await launchSafely(this.options.executePerformer, {
-      agent: this.options.agent,
+      agent: this.options.executeAgent,
       ...(this.options.executeModel === undefined ? {} : { model: this.options.executeModel }),
       ...(this.options.executeReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.executeReasoningEffort }),
@@ -407,7 +408,7 @@ export class CycleRunner {
     const auditDiagnosticJsonlPath = path.join(request.rootState.run_directory, `${cyclePrefix}-audit.jsonl`);
     const auditDiagnosticStderrPath = path.join(request.rootState.run_directory, `${cyclePrefix}-audit.stderr`);
     const auditProcess = await launchSafely(this.options.auditPerformer, {
-      agent: this.options.agent,
+      agent: this.options.auditAgent,
       ...(this.options.auditModel === undefined ? {} : { model: this.options.auditModel }),
       ...(this.options.auditReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.auditReasoningEffort }),

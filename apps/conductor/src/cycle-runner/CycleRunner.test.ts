@@ -125,8 +125,8 @@ test("creates exact family and trusts only a fresh Audit", async () => {
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", executeModel: "execute-model", executeReasoningEffort: "high",
-    auditModel: "audit-model", auditReasoningEffort: "xhigh", timeoutMs: 1_000,
+    executeAgent: "codex", executeModel: "execute-model", executeReasoningEffort: "high",
+    auditAgent: "codex", auditModel: "audit-model", auditReasoningEffort: "xhigh", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -139,12 +139,14 @@ test("creates exact family and trusts only a fresh Audit", async () => {
   assert.equal(outcome.audit.verdict, "accepted");
   assert.equal(launches.length, 2);
   assert.equal(launches[0]?.sandbox, "workspace_write");
+  assert.equal(launches[0]?.agent, "codex");
   assert.equal(launches[0]?.model, "execute-model");
   assert.equal(launches[0]?.reasoning_effort, "high");
   assert.equal(launches[0]?.final_response_path, path.join(fixture.runDirectory, "cycle-001-executor-result.md"));
   assert.equal(launches[0]?.diagnostic_jsonl_path?.startsWith(fixture.runDirectory), true);
   assert.equal(launches[0]?.diagnostic_stderr_path?.startsWith(fixture.runDirectory), true);
   assert.equal(launches[1]?.sandbox, "read_only");
+  assert.equal(launches[1]?.agent, "codex");
   assert.equal(launches[1]?.model, "audit-model");
   assert.equal(launches[1]?.reasoning_effort, "xhigh");
   assert.equal(launches[1]?.final_response_path, path.join(fixture.runDirectory, "cycle-001-audit-result.md"));
@@ -219,7 +221,7 @@ test("projects the Cycle, Execute, and Audit lifecycle statuses visibly", async 
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
     now: () => {
       nowCalls += 1;
       return updatedAt;
@@ -300,7 +302,7 @@ test("caps the Cycle title at 80 characters while naming role issues by Cycle", 
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   await runner.run({
@@ -331,7 +333,7 @@ test("rejects an Audit response too large to persist with Root State", async () 
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -358,7 +360,7 @@ test("audits residual workspace after Execute start failure", async () => {
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -396,7 +398,7 @@ test("audits residual workspace when the Execute adapter rejects", async () => {
     executePerformer: rejectingPerformer,
     auditPerformer: rejectingPerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -435,7 +437,7 @@ test("fails the Cycle when Audit diagnostics are not durably referenced", async 
     executePerformer: missingDiagnostics,
     auditPerformer: missingDiagnostics,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -461,7 +463,7 @@ test("bounds the mechanical Cycle reason without changing the Audit verdict", as
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
@@ -510,7 +512,7 @@ test("writes explicit bounded role results with the current error message", asyn
     executePerformer: performerWithErrors,
     auditPerformer: performerWithErrors,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -582,7 +584,7 @@ test("keeps Executor Markdown mechanical when its final response reference is wr
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -619,7 +621,7 @@ test("turns invalid UTF-8 Audit Markdown into process_error", async () => {
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
@@ -670,7 +672,7 @@ test("keeps safe malformed Audit Markdown raw while adding a mechanical process 
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
@@ -729,7 +731,7 @@ test("projects valid final messages even after nonzero Executor and Audit exits"
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
@@ -778,7 +780,7 @@ test("keeps role reports in Issue descriptions and links the uploaded Audit resu
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
@@ -828,7 +830,7 @@ test("keeps Audit result upload failures visible without changing the Cycle verd
   const runner = new CycleRunner({
     gateway, executePerformer: rolePerformer, auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
 
   const outcome = await runner.run({
@@ -868,7 +870,7 @@ test("starts no Agent when complete family creation is not durably recorded", as
     executePerformer: neverPerformer,
     auditPerformer: neverPerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   await assert.rejects(
     runner.run({
@@ -890,7 +892,7 @@ test("starts no Agent when cursor persistence fails after family recording", asy
     executePerformer: neverPerformer,
     auditPerformer: neverPerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    agent: "codex", timeoutMs: 1_000,
+    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
   await assert.rejects(runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
