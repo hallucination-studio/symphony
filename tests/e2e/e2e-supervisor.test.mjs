@@ -107,6 +107,27 @@ test("supervisor fails when an external boundary fails", async () => {
   assert.equal(result.blocked.some((entry) => entry.boundary === "supervisor"), true);
 });
 
+test("a passed golden run covers the independent Linear probe without a preconfigured Root", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-golden-coverage-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envPath = path.join(directory, ".env");
+  await writeFile(envPath, `SYMPHONY_LINEAR_TOKEN=${secret}\n`, { encoding: "utf8", mode: 0o600 });
+  const result = await runSupervisor({
+    envPath,
+    testFiles: [path.join(directory, "deterministic.test.mjs")],
+    inherited: {},
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => [
+      { status: "blocked", boundary: "linear", reason: "root_input_missing" },
+      { status: "passed", layer: "real_codex", boundary: "codex" },
+      { status: "passed", layer: "real_git", boundary: "git" },
+      { status: "passed", layer: "real_pr", boundary: "pr" },
+    ],
+    runGolden: async () => ({ status: "passed", layer: "golden", result: { status: "done" } }),
+  });
+  assert.equal(result.blocked, undefined);
+});
+
 test("supervisor applies one deadline across local, real-boundary, and golden phases", async () => {
   const phases = [];
   const startedAt = Date.now();

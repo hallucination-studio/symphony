@@ -3,6 +3,7 @@ dist/
 dist-backend/
 target/
 src-tauri/gen/
+/apps/podium-desktop/src-tauri/gen/
 *.tsbuildinfo
 .env
 workspaces/

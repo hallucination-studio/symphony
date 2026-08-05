@@ -282,6 +282,27 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     summary: "Complete.",
     report: completeReport,
   });
+  const reportAwaitingMechanicalTokenUsage = completeReport.replace("Total tokens: 1.2k", "").trimEnd();
+  assert.deepEqual(parseRootReconcileDecision({
+    kind: "complete",
+    summary: "Complete with token usage pending mechanical projection.",
+    report: reportAwaitingMechanicalTokenUsage,
+  }), {
+    kind: "complete",
+    summary: "Complete with token usage pending mechanical projection.",
+    report: reportAwaitingMechanicalTokenUsage,
+  });
+  const reportWithTrustedMechanicalJson = completeReport
+    .replace("#### Created\n- src/parser.ts: +8 lines\n#### Updated\n- None\n#### Deleted\n- None", JSON.stringify({
+      status: "available",
+      created: [{ path: "src/parser.ts", added_lines: 8, deleted_lines: 0 }],
+      updated: [],
+      deleted: [],
+    }, null, 2))
+    .replace("+8 / -0 lines", JSON.stringify({ insertions: 8, deletions: 0 }, null, 2));
+  assert.equal(parseRootReconcileDecision({
+    kind: "complete", summary: "Complete.", report: reportWithTrustedMechanicalJson,
+  }).report, reportWithTrustedMechanicalJson);
   assert.deepEqual(parseRootReconcileDecision({
     kind: "needs_human",
     reason: "Need a decision.",

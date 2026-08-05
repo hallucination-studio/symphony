@@ -107,7 +107,7 @@ export function boundaryPrerequisite(environment, boundary, { allow = false } = 
   if (!allow) return blocked(boundary, "real_boundary_not_enabled");
   const keys = BOUNDARY_KEYS[boundary];
   if (keys === undefined) throw new Error("e2e_boundary_invalid");
-  if (!CODEX_BOUNDARIES.has(boundary) && !keys.some((key) => hasValue(environment, key))) {
+  if (!CODEX_BOUNDARIES.has(boundary) && boundary !== "pr" && !keys.some((key) => hasValue(environment, key))) {
     return blocked(boundary, "credential_missing");
   }
   return null;

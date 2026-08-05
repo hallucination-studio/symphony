@@ -29,8 +29,10 @@ function renderPrompt(request: RootReconcileRequest): MarkdownText {
   const sections = [
     "You are the Root Manager. Choose exactly one smallest observable next step.",
     "Use only the inputs below. You have no workspace access and must not claim workspace facts.",
-    "Return exactly one control header followed by the required Markdown sections:",
-    "decision: cycle with Objective, Acceptance, Boundaries; decision: complete with Summary; or decision: needs_human with Reason and optional Question.",
+    "Return exactly one of these control-header and h2-section skeletons, replacing bracketed text with Markdown content:",
+    "decision: cycle\n\n## Objective\n[objective]\n\n## Acceptance\n[acceptance]\n\n## Boundaries\n[boundaries]\n\n## Report\n[report]",
+    "decision: complete\n\n## Summary\n[summary]\n\n## Report\n[report]",
+    "decision: needs_human\n\n## Reason\n[reason]\n\n## Question\n[optional question; omit this entire section when unnecessary]\n\n## Report\n[report]",
     "Every decision must include one ## Report section. Inside it use exactly these h3 sections in order: cycle = Why Continue, Evidence, Next Cycle; complete = Overview, File Changes, Line Changes, Verification, Token Usage; needs_human = Reason, Question, Next Step.",
     "For complete reports, use the supplied mechanical Worktree Summary exactly for File Changes and Line Changes. Conductor will replace those sections with the trusted facts and will fill Token Usage; do not invent paths, line counts, or token totals.",
     "A Cycle must be achievable by one Execute session and independently checkable by one read-only Audit.",

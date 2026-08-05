@@ -112,6 +112,9 @@ test("returns one Cycle draft from Root-owned inputs without exposing workspace 
   assert.equal(launches[0]?.prompt.includes("Preserve error locations."), true);
   assert.equal(launches[0]?.prompt.includes("Do not add recovery."), true);
   assert.equal(launches[0]?.prompt.includes("## Latest Audit Result"), false);
+  assert.equal(launches[0]?.prompt.includes("decision: cycle\n\n## Objective"), true);
+  assert.equal(launches[0]?.prompt.includes("decision: complete\n\n## Summary"), true);
+  assert.equal(launches[0]?.prompt.includes("decision: needs_human\n\n## Reason"), true);
 });
 
 test("includes the complete latest Audit in the prompt without child DAG content", async () => {

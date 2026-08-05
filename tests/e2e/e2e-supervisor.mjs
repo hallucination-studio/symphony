@@ -160,7 +160,9 @@ export async function runSupervisor({
   const boundaryFailed = boundaryResults.some((result) => result.status === "failed");
   const blockedResults = [
     ...(configuration.envBlocked === undefined ? [] : [configuration.envBlocked]),
-    ...individualResults.filter((result) => result.status === "blocked"),
+    ...individualResults.filter((result) => result.status === "blocked" && !(goldenResult.status === "passed"
+      && result.boundary === "linear"
+      && result.reason === "root_input_missing")),
     ...(goldenResult.status === "blocked" ? [goldenResult] : []),
   ].map(({ status, boundary, reason }) => ({ status, boundary, reason }));
   return Object.freeze({

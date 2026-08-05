@@ -42,6 +42,10 @@ test("real Codex probes leave independent role overrides optional", () => {
   });
 });
 
+test("the PR boundary permits gh local authentication without an environment token", () => {
+  assert.equal(boundaryPrerequisite({}, "pr", { allow: true }), null);
+});
+
 test("boundary environment partition keeps credentials with their owning boundary", () => {
   const source = {
     SYMPHONY_LINEAR_TOKEN: secret,

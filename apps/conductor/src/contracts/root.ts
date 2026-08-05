@@ -237,14 +237,21 @@ const ROOT_RECONCILE_REPORT_SECTIONS = {
   needs_human: ["Reason", "Question", "Next Step"],
 } as const;
 
-function parseRootReportSections(source: string): ReadonlyMap<string, string> {
+const MECHANICAL_COMPLETE_REPORT_SECTIONS = new Set(["File Changes", "Line Changes", "Token Usage"]);
+
+function parseRootReportSections(
+  source: string,
+  allowedEmptySections: ReadonlySet<string>,
+): ReadonlyMap<string, string> {
   const sections = new Map<string, string>();
   let heading: string | undefined;
   let body: string[] = [];
   const flush = () => {
     if (heading === undefined) return;
     const value = body.join("\n").trim();
-    if (value.length === 0 || sections.has(heading)) throw new Error("invalid_root_reconcile_report");
+    if ((value.length === 0 && !allowedEmptySections.has(heading)) || sections.has(heading)) {
+      throw new Error("invalid_root_reconcile_report");
+    }
     sections.set(heading, value);
   };
   for (const line of source.split("\n")) {
@@ -272,7 +279,8 @@ export function parseRootReconcileReportMarkdown(
   const source = value.replace(/\r\n?/gu, "\n").trim();
   try {
     parseMarkdownText(source, "invalid_root_reconcile_report", 64 * 1024);
-    const sections = parseRootReportSections(source);
+    const allowedEmptySections = kind === "complete" ? new Set(["Token Usage"]) : new Set<string>();
+    const sections = parseRootReportSections(source, allowedEmptySections);
     const expected = ROOT_RECONCILE_REPORT_SECTIONS[kind];
     if (
       sections.size !== expected.length
@@ -282,7 +290,9 @@ export function parseRootReconcileReportMarkdown(
     for (const name of expected) {
       const body = sections.get(name);
       if (body === undefined) throw new Error("invalid_root_reconcile_report");
-      parseMarkdownText(body, "invalid_root_reconcile_report", 64 * 1024);
+      if (body.length > 0 && !(kind === "complete" && MECHANICAL_COMPLETE_REPORT_SECTIONS.has(name))) {
+        parseMarkdownText(body, "invalid_root_reconcile_report", 64 * 1024);
+      }
     }
     return source as MarkdownText;
   } catch {
