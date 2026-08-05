@@ -21,12 +21,20 @@ Provider IDs identify resources. Cycle numbers are display order only. The
 hierarchy is for human visibility and mechanical cancellation; it is not the
 state supplied to Root Reconcile.
 
+Every Issue in this hierarchy uses the shared five-state Linear status plane:
+`Todo` (`unstarted`), `In Progress` (`started`), `In Review` (`started`), `Done`
+(`completed`), or `Canceled` (`canceled`). Conductor changes the Issue status at
+each lifecycle boundary defined by the [Workflow Model](workflow-model.md), so
+the Linear tree is a direct, human-readable view of waiting, running, review,
+terminal, and abandoned work. Comments and Root State add detail but never
+stand in for a status transition.
+
 ## Root documents
 
 | Document | Required content | Write policy |
 |---|---|---|
 | Root title and description | user-authored original long-term requirement | never replaced or augmented by generated requirements |
-| Root State comment | workspace/run directory/branch, task state, pending finding, Harness feedback, phase, comment cursor, and PR URL | one Harness-owned mutable checkpoint |
+| Root State comment | workspace/run directory/branch, task state, complete `latest_audit`, pending finding, Harness feedback, phase, comment cursor, and terminal PR URL or delivery branch | one Harness-owned mutable checkpoint |
 
 Root title and description are the sole original requirement. Root State is the
 sole durable runtime checkpoint. V1 does not reconstruct Root State by parsing
@@ -42,6 +50,9 @@ the complete child tree.
 
 ## Task State
 - Focused parser behavior is independently verified; cleanup is not yet verified.
+
+## Latest Audit
+- The complete validated `AuditRunResult` from the newest terminal Audit.
 
 ## Pending Finding
 - ENG-127: cleanup remains in `src/example.ts`
@@ -62,6 +73,16 @@ stores no credential, transcript, revision, digest, or process handle.
 The per-process `max_cycles` guard is not stored here; it is an operator launch
 limit rather than durable Root progress.
 
+Each Root Reconcile decision appends one `# Symphony Harness: Reconcile`
+Markdown comment. A continue report contains `Why Continue`, `Evidence`, and
+`Next Cycle`; a completion report contains `Overview`, semantic
+`Created`/`Updated`/`Deleted` paths, whole-worktree line changes,
+`Verification`, and short exact `Token Usage`; a human gate contains `Reason`,
+`Question`, and `Next Step`. Conductor copies the validated last response once
+and mechanically supplies completion worktree/token facts. Raw Git porcelain,
+file contents, transcripts, and estimated token values are forbidden. The
+Harness marker keeps these comments out of the Root Inbox.
+
 ## Cycle family documents
 
 | Document | Required sections | Write policy |
@@ -74,32 +95,51 @@ Cycle, Execute, and Audit are created in that order. Audit exists in waiting
 state from family creation and starts only after Execute terminates. V1 does not
 detect or repair manual edits to these descriptions.
 
-## Result comments
+The frozen Cycle title is `[Cycle NNN] <objective>` with a maximum total title
+length of 80 characters. The role titles are exactly `[Executor] Cycle NNN` and
+`[Audit] Cycle NNN`; they carry the Cycle number rather than repeating its
+objective.
 
-| Attachment | Comment | Required fields | Write policy |
+## Result Markdown and uploaded file
+
+Each role's prompt requires one final Markdown response at its local result path.
+The response is copied byte-for-byte to that role's Linear Issue comment only;
+it is intentionally human-facing and does not repeat the frozen Cycle
+objective, acceptance, or boundaries:
+
+| Role | Local file | Required human report | Semantic use |
 |---|---|---|---|
-| Execute | Execute Process Result | launch status, duration, exit code, and optional sanitized process reason | append once before terminal status |
-| Audit | Audit Report | verdict, checks, independent evidence, findings, proposed task state, and residual risk | append once before terminal status |
-| Cycle | Cycle Result | mechanically mapped `Succeeded`, `Rejected`, or `Failed`; Audit Issue reference, Audit verdict, and bounded reason | append once before terminal status |
+| Execute | `cycle-NNN-executor-result.md` | `## Summary`, `## File Changes` with `### Created`/`### Updated`/`### Deleted` paths and +/- line counts, and `## Verification` | display-only; never Audit/Root input |
+| Audit | `cycle-NNN-audit-result.md` | `verdict` plus `## Scope Audited`, `## Implementation Review`, `## Checks`, `## Evidence`, `## Findings`, and `## Task State` | parsed once into typed `AuditRunResult` |
 
-Execute model output is not a result: it is untrusted, duplicates facts that
-Audit must independently establish, and could bias the only semantic reviewer.
-It is therefore never parsed, copied into a comment, supplied to Audit, or used
-to calculate the Cycle result. The Execute comment exposes process health only.
+The parsed Audit result is mechanically serialized as
+`cycle-NNN-audit-result.json`, written privately, and read back and validated
+before it is used for Cycle/Root progression. Only this JSON file is uploaded
+for the Cycle with `application/json` content type. The Cycle Result comment has
+only terminal fields and one visible resource line:
 
-The Audit Report is the sole semantic result. The Cycle Result is retained so a
-human can understand a Cycle without traversing its children, but it is only a
-mechanical projection of the Audit verdict and contains no copied evidence or
-second judgment. Root Reconcile reads neither comment; it receives trusted
-fields after Conductor promotes them to Root State.
+```markdown
+- Audit result: [cycle-NNN-audit-result.json](https://linear.example/asset)
+```
 
-Comments contain normalized bounded facts, never full prompts, assistant
-streams, tool streams, raw role responses, or complete trajectories.
+If upload fails, the line is `- Audit result: upload failed (<current error's
+first 50 characters>)`; the failure is visible but does not alter the Audit
+verdict or progression. The Cycle never contains role Markdown or a second
+summary. A missing, unreadable, invalid, or non-UTF-8 role result becomes a
+visible `process_error`; Conductor never makes a second summarization or
+format-repair Agent call.
+
+There is exactly one Execute and one Audit Agent call. Execute output is never
+supplied to Audit or used to calculate Cycle/Root semantics. JSONL and stderr
+remain private local diagnostics in the external run directory; they are never
+uploaded as comments or files. Linear comments and the single JSON file
+are the operator-visible progression artifacts, while statuses carry the
+workflow lifecycle.
 
 ## Restart abandonment
 
 At process startup, Conductor lists all nonterminal descendants beneath Root and
-mechanically changes each one to the team's canceled state. It does not parse
+mechanically changes each one to the canonical `Canceled` state. It does not parse
 their descriptions or comments, calculate a terminal result, update Trusted
 State from them, or pass them to an Agent.
 

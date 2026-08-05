@@ -185,7 +185,7 @@ export function inspectTargetSemantics(sources) {
     ["missing_root_cycle_execute_audit_topology", /Cycle \| Root[\s\S]*Execute \| Cycle[\s\S]*Audit \| Cycle/u],
     ["missing_failed_execute_audit", /Execute process fails or exits unexpectedly[^\n]*still dispatch Audit/u],
     ["missing_trusted_state_gate", /trusted task state[^\n]*Succeeded Cycles with an `accepted` Audit verdict/u],
-    ["missing_done_noop", /Root \| `Done`[^\n]*no mutation; exit successfully/u],
+    ["missing_done_noop", /Root \| `Done`[^\n]*no Root-owned mutation; exit successfully/u],
     ["missing_root_inbox_fence", /active Cycle exists and new Root comments arrive[^\n]*do not dispatch them into the Cycle/u],
     ["missing_single_root_entry", /Root mode is the only public execution entry[\s\S]*no one-shot\s+role CLI/u],
     ["missing_execute_output_boundary", /Execute model output is neither parsed nor projected/u],

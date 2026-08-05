@@ -2,12 +2,27 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | next-Cycle reasoning and completion recommendation from Root-owned inputs | child-tree interpretation, workspace mutation, Linear calls, or PR publication |
+| target proposal | next-Cycle reasoning and completion recommendation from Root-owned inputs and promoted Audit fields | child-tree interpretation, workspace mutation, Linear calls, or PR publication |
 
 Root Reconcile is the Manager's only semantic decision boundary. It runs in a
 fresh Agent session with no workspace access before the first Cycle, after every
 terminal Cycle, and after startup abandonment of unfinished child Issues.
-If Root is already `Done`, return no-op without starting a Reconcile session or changing any resource.
+If Root is already `Done`, return no-op without starting a Reconcile session or
+changing any Root-owned resource. The preceding team workflow-contract check is
+outside Root Reconcile and may create a missing canonical state.
+
+After terminal, `NeedsHuman`, or startup gates, Conductor normalizes a
+nonterminal Root to `Todo` before the first fresh Reconcile. Once a Cycle family
+is durable, Root becomes `In Progress`; when its complete Audit result is saved
+as `RootState.latest_audit`, Root becomes `In Review` and the next Reconcile
+runs in that visible state. Creating another Cycle returns Root to `In Progress`;
+only terminal delivery sets Root `Done`.
+
+Its closed decision is projected onto the visible Root Issue status by
+Conductor: a created active Cycle yields `In Progress`, `complete` and
+`needs_human` yield `In Review`, and only a recorded PR or pushed branch
+delivery yields `Done`. Reconcile chooses the semantic kind only; it never calls Linear or
+selects a provider status ID.
 
 ## Rebuild boundary
 
@@ -16,13 +31,26 @@ Root Reconcile receives only:
 ```text
 Root title and description
 + Root State current task state
++ Root State `latest_audit` (the complete newest `AuditRunResult`, when present)
 + one current pending finding
 + optional current Harness warning
 + new Root comments after the saved cursor
++ a mechanical whole-worktree file/line summary supplied by Conductor
 ```
 
-It never receives the complete Root Issue tree, old Cycle descriptions, old
-role comments, raw trajectories, or canceled child content. Conductor may list
+Conductor parses the exact Audit result Markdown once, serializes its typed
+value to `cycle-NNN-audit-result.json`, reads that file back and validates it,
+then writes the re-read fields to `RootState.latest_audit`, promotes trusted
+fields, and writes the Cycle Result as a separate mechanical projection before
+the next Reconcile. Exact Executor Markdown is copied only to Execute; exact
+Audit Markdown is copied only to Audit. The JSON file is the sole Cycle file
+upload, and its resource link/error is mechanical detail only. Root Reconcile
+never receives the complete Root Issue tree, Cycle Result, Cycle DAG or
+description, Execute or Audit descriptions or comments, Audit evidence beyond
+`latest_audit`, raw trajectories, or canceled child content. The worktree
+summary is display context only: it contains created/updated/deleted paths and
+line deltas, not file contents, and cannot replace the latest Audit as semantic
+evidence. Conductor may list
 unfinished descendants to cancel them mechanically, but those values do not
 cross the model boundary.
 
@@ -44,10 +72,12 @@ flowchart LR
 |---|---|---|
 | workspace, run directory, and Root branch | Conductor validates supplied paths after process restart; values are not prompt input | allocation, snapshot, or revision identity |
 | Task State | compact rolling task state derived only from Succeeded Cycles | Executor claims, Audit history, or unaudited workspace inference |
+| Latest Audit | complete newest typed `AuditRunResult`, including `process_error`; sole recent detail visible to Reconcile | Cycle DAG/comments, reconstructed history, or raw transcripts |
 | Pending Finding | one current Rejected/Failed summary that the next Cycle must address | a finding ledger or inferred child state |
 | Harness Feedback | one current runtime warning, including possible unaudited residual changes after startup abandonment | trusted progress or a replacement requirement |
 | Root comment cursor | boundary after which comments are new input | full consumed-comment history |
-| Current | idle, active Cycle reference, `NeedsHuman`, or PR URL | hidden route or process handle |
+| Token Usage | exact accumulated process counters when every invocation reported them; otherwise unknown | estimates, cost inference, or semantic progress |
+| Current | idle, active Cycle reference, `NeedsHuman`, PR URL, or delivered branch | hidden route or process handle |
 
 Root State is a Harness-owned comment on Root and the durable runtime checkpoint.
 It is not a requirement source: generated state cannot alter or replace the
@@ -66,9 +96,11 @@ The prompt is built by Root Reconciler, not Performer, in this fixed order:
 fixed Manager instructions
 + Root title and description
 + task_state_markdown
++ parsed `latest_audit` fields rendered as bounded Markdown, when present
 + optional pending_finding
 + optional harness_feedback
 + all new Root comments after comment_cursor
++ mechanical whole-worktree summary
 ```
 
 The fixed instructions require exactly one small-step decision and forbid
@@ -81,11 +113,21 @@ decision: cycle | complete | needs_human
 
 ## Objective / Summary / Reason
 ...
+
+## Report
+### decision-specific human-readable sections
 ```
 
 A Cycle body also contains Acceptance and Boundaries. The caller assigns the
 next Cycle number and all after-cursor comment IDs; the model cannot partially
 consume the batch or select an executor route.
+
+Root Reconcile uses the full Execute role configuration for its fresh process:
+Agent, startup API key/base URL, and optional model/reasoning overrides. This
+keeps one fixed Manager/Execute capability boundary while allowing Audit to use
+an independent provider configuration; it does not share prompts, output, or
+transcripts across roles. Omitted overrides remain under the user's local
+Codex configuration and authentication.
 
 ## Decision contract
 
@@ -97,15 +139,23 @@ RootReconcileDecision =
         objective,
         acceptance,
         boundaries
-      }
+      },
+      report: Why Continue + Evidence + Next Cycle
     }
-  | { kind: complete, summary }
-  | { kind: needs_human, reason, question? }
+  | { kind: complete, summary, report: Overview + File Changes + Line Changes + Verification + Token Usage }
+  | { kind: needs_human, reason, question?, report: Reason + Question + Next Step }
+
+RootReconcileOutcome = { decision, process? }
 ```
 
 The caller validates the decision, assigns `cycle_number`, attaches every
 after-cursor comment ID, and freezes the `CycleSpec`. Root Reconciler does not
 call Linear, render Linear Markdown, create a PR, or change Root State directly.
+Conductor mechanically copies the validated report into one Harness-owned Root
+comment for every decision. For completion it replaces the file, line, and
+token sections with its trusted worktree summary and accumulated process
+counters. Missing usage stays `Unknown`; it is never estimated. This projection
+does not start a second Agent call and Harness comments never re-enter Inbox.
 
 ## Small-step rule
 
@@ -129,10 +179,15 @@ later Reconcile.
 | comment cursor | advance only after all after-cursor comments are committed to a complete Cycle family |
 
 There is no separate Trusted State service or entry ledger. The promotion
-condition is an Audit verdict of `accepted` after any terminal Execute process
-outcome. Execute model output and exit status never establish or veto semantic
-success. Root State is updated after that result and becomes the input to future
-or restarted Reconcile sessions.
+condition is an Audit verdict of `accepted` parsed from the exact Audit Markdown
+and re-read from the persisted JSON after any terminal Execute process outcome.
+Execute Markdown and exit status never establish or veto semantic success.
+Conductor writes the re-read fields to `RootState.latest_audit`, promotes
+trusted fields from them, and makes Root State the input to future or restarted
+Reconcile sessions. Cycle Result remains a mechanical persistence and operator
+projection only; Reconcile never reads the Cycle DAG. A missing/invalid
+Markdown or JSON file is a visible process error, and no second summarization
+Agent call repairs it.
 
 ## Comment transaction
 
@@ -157,11 +212,11 @@ second local injection path. Descendant comments are display-only.
 
 | Condition | Effect |
 |---|---|
-| requirement and new input are satisfied by verified Root State, with no unresolved finding or Harness warning | recommend completion; publication separately requires a non-empty diff |
+| requirement and new input are satisfied by verified Root State, with no unresolved finding or Harness warning | recommend completion; Conductor projects Root `In Review`; publication separately requires a non-empty diff |
 | open finding or new input requires work | create smallest next Cycle |
-| decision needs user input or this process reaches its Cycle bound | set Root State `NeedsHuman` and stop |
+| decision needs user input or this process reaches its Cycle bound | set Root State `NeedsHuman`, project Root `In Review`, and stop |
 | final Inbox check finds new input | discard completion recommendation and Reconcile again |
-| terminal PR function returns a URL | record URL in Root State, then set Root `Done` |
+| terminal delivery returns a PR URL or pushed branch | record it in Root State, then set Root `Done` |
 
 Root Reconcile never marks Root `Done` itself.
 
@@ -171,5 +226,5 @@ Root Reconcile never marks Root `Done` itself.
 |---|---|---|
 | workspace | no mount and no tools | read, write, inspect, commit, reset, clean, or delete |
 | Linear | none directly; caller supplies Root, Root State, and new comments | GraphQL, child-tree read, Issue mutation, or comment rendering |
-| context | original requirement, trusted task state, current pending finding, Harness feedback, and new comments | full Root tree, Audit history, workspace facts, prior role transcripts, arbitrary metadata |
+| context | Root requirement, trusted state including `latest_audit`, finding, Harness feedback, and new comments | child tree, Cycle Result, role content/evidence beyond `latest_audit`, workspace facts, transcripts, or arbitrary metadata |
 | secrets | none | `.env*`, keychains, tokens, Git or provider credentials |

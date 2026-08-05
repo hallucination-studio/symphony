@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | one-Root serial loop, startup abandonment, role dispatch, Root State checkpointing, and terminal PR function | semantic next-step choice, app-server, generic task capabilities, or recovery state machine |
+| target proposal | one-Root serial loop, startup abandonment, role dispatch, Root State checkpointing, and terminal delivery function | semantic next-step choice, app-server, generic task capabilities, or recovery state machine |
 
 The top-level `manager` remains a small composition point. It wires
 `RootReconciler`, `CycleRunner`, `Performer`, `LinearGateway`, and fixed
@@ -16,11 +16,13 @@ export LINEAR_API_KEY="..."
 
 lh-harness run \
   --linear-root ENG-123 \
-  --agent codex \
   --workspace "/workspaces/ENG-123" \
   --dir "/runs/ENG-123" \
-  --model gpt-5.6-luna \
-  --reasoning-effort max \
+  --agent codex \
+  --execute-model "<execute-model>" \
+  --execute-reasoning-effort "<execute-effort>" \
+  --audit-model "<audit-model>" \
+  --audit-reasoning-effort "<audit-effort>" \
   --max-cycles 30
 ```
 
@@ -30,15 +32,24 @@ lh-harness run \
 | Root input | Root title/description are the only task; no separate task input is accepted |
 | `--workspace` | existing isolated Git workspace already allocated to this Root |
 | `--dir` | existing writable run directory outside the workspace |
-| resolved Root | derive team and four semantic workflow states from Linear |
-| `--agent codex` | required closed selection; v1 implements only the Codex CLI adapter |
-| model configuration | one model/reasoning configuration; role isolation comes from fresh sessions and permissions |
+| resolved Root | resolve the Root team and five canonical workflow statuses by exact name and expected type |
+| `--agent codex` | optional closed selection; omission defaults to `codex`, and v1 implements only the Codex CLI adapter |
+| role configuration | optional independent Execute and Audit model/reasoning values; Root Reconcile uses the Execute configuration |
 | `--max-cycles` | in-memory maximum Cycles for this process; it is not durable Root State |
 
-Startup needs no caller-provided Linear team, project, status, label, template,
-or config file. Missing Linear, Git, workspace, run-directory, or PR
+Startup needs no caller-provided Linear team, project, or workflow-state IDs, and
+no harness config file. Missing Linear, Git, workspace, run-directory, or PR
 prerequisites fail before an Agent starts. V1 does not claim Roots or allocate,
 replace, clean, or delete workspace/run directories.
+
+Execute and Audit API keys and base URLs are startup-only environment values,
+resolved independently from `SYMPHONY_EXECUTE_CODEX_API_KEY`,
+`SYMPHONY_EXECUTE_CODEX_BASE_URL`, `SYMPHONY_AUDIT_CODEX_API_KEY`, and
+`SYMPHONY_AUDIT_CODEX_BASE_URL`. Generic `CODEX_API_KEY` and `CODEX_BASE_URL`
+may provide a fallback. They are never fields in `HarnessRunRequest` or public
+Linear data. When a role override is omitted, the fresh Codex process uses the
+user's local `~/.codex` configuration and authentication; the architecture does
+not prescribe a capability matrix or default model/effort.
 
 Root mode is the only public execution entry. V1 deliberately has no one-shot
 role CLI: such an entry would create a second mutation path that can advance an
@@ -59,26 +70,33 @@ Root Issue
 Startup performs this fixed sequence:
 
 ```text
-resolve Root and Root State
--> Root Done? exit without mutation
--> publishing without PR URL? set NeedsHuman and stop
+resolve Root
+-> resolve or create the five canonical Linear statuses by exact name and type
+-> Root Done? exit without Root-owned mutation
+-> resolve Root State
+-> publishing without PR URL or delivery branch? set NeedsHuman, project Root In Review, and stop
 -> validate supplied workspace and run directory against Root State
 -> list unfinished descendant Issue IDs and statuses
--> change every unfinished descendant to canceled
+-> change every unfinished descendant to canonical Canceled
 -> update Root State phase to idle and add Harness feedback that the retained
    workspace may contain unaudited partial modifications
+-> normalize a nonterminal Root to canonical Todo before fresh Reconcile
 -> run fresh Root Reconcile
 ```
+
+The `Done` guard matches only the exact canonical `Done` status ID after the
+team workflow-contract check. A same-named state with another type is a
+resolver conflict, not a terminal Root, and cannot bypass startup validation.
 
 | Rule | Required behavior | Forbidden behavior |
 |---|---|---|
 | `CO-START-001` | if Root State is absent, validate the supplied workspace/run directory and create the initial State comment | claim a Root or allocate directories |
 | `CO-START-002` | if Root State exists, require its workspace, run directory, and branch to match the supplied paths | adopt or create replacement directories |
 | `CO-START-003` | list only unfinished descendant identity/status for cancellation | parse or model old child descriptions, comments, or results |
-| `CO-START-004` | cancel every unfinished Cycle, Execute, and Audit before Reconcile | resume, complete, audit, or synthesize results for them |
-| `CO-START-005` | if saved workspace/run directory is missing or invalid, set `NeedsHuman` and stop | reconstruct from Git hashes, patches, children, or logs |
-| `CO-START-006` | if phase is `publishing` without a PR URL, set `NeedsHuman` and stop before other startup actions | retry, inspect provider state, or adopt a branch/PR |
-| `CO-START-007` | if Root is `Done`, exit before workspace, descendant, or Root State mutation | reopen Root or alter terminal descendants |
+| `CO-START-004` | set every unfinished Cycle, Execute, and Audit to canonical `Canceled` before Reconcile | resume, complete, audit, or synthesize results for them |
+| `CO-START-005` | if saved workspace/run directory is missing or invalid, set `NeedsHuman`, project Root `In Review`, and stop | reconstruct from Git hashes, patches, children, or logs |
+| `CO-START-006` | if phase is `publishing` without a PR URL or delivery branch, set `NeedsHuman`, project Root `In Review`, and stop before other startup actions | retry, inspect provider state, or adopt a branch/PR |
+| `CO-START-007` | after the team workflow-contract check, if Root is `Done`, exit before workspace, descendant, or Root State mutation | reopen Root or alter terminal descendants |
 
 This is abandonment followed by fresh reasoning, not execution recovery. The
 complete Root tree never enters an Agent prompt.
@@ -89,13 +107,14 @@ complete Root tree never enters an Agent prompt.
 %% source-rules: WF-ROUTE-001 WF-ROUTE-002 WF-ROUTE-003 WF-ROUTE-004 WF-ROUTE-005 WF-ROUTE-006 WF-ROUTE-007 WF-ROUTE-008
 flowchart TD
   Start[Startup rebuild] --> Reconcile[Fresh Root Reconcile]
-  Reconcile --> Decision{Decision}
+  Reconcile --> Report[Append human Root report]
+  Report --> Decision{Decision}
   Decision -->|Cycle| Create[Create Cycle, Execute, Audit]
   Create --> Execute[Fresh Execute]
   Execute --> Audit[Fresh read-only Audit]
   Audit --> Close[Close Cycle and update Root State]
   Close --> Reconcile
-  Decision -->|NeedsHuman| Stop[Update Root State and stop]
+  Decision -->|NeedsHuman| Stop[Update Root State and Root In Review]
   Decision -->|Complete| Inbox[Final Root comment read]
   Inbox -->|new input| Reconcile
   Inbox -->|empty| PR[Commit, push, create PR]
@@ -108,6 +127,10 @@ flowchart TD
 | allow one active Cycle and one in-flight Agent process | no parallel roles, Cycles, or subagents |
 | route from current in-memory run state plus Root State checkpoint | never parse the historical child tree for decisions |
 | checkpoint Root State after every durable transition | keep restart input and human view current |
+| collect a typed whole-worktree summary before each Reconcile | expose paths and line deltas only; never substitute it for Audit authority |
+| append one validated report after every Reconcile | copy the decision rationale once; mechanically replace completion file/line/token sections; never start a summarizer call |
+| accumulate Reconcile, Execute, and Audit usage | persist exact safe counters in Root State; one missing invocation makes the displayed total `Unknown` |
+| project status transitions at each lifecycle boundary | leave Linear statuses stale until a comment or local checkpoint changes |
 | retain comments arriving during an active Cycle as new Root input | never add them to active Execute or Audit |
 | Root `Done` | perform no Linear, workspace, or PR mutation; exit |
 
@@ -118,7 +141,7 @@ When Root is `Done`, perform no Linear or workspace mutation and exit.
 | Step | Required behavior |
 |---|---|
 | freeze candidate | validate one minimal `CycleSpec` with selected comment IDs |
-| project family | create Cycle, Execute, and Audit in exact order through Gateway |
+| project family | create Cycle, Execute, and Audit in `Todo`, with role-prefixed objective titles, in exact order through Gateway |
 | record family | persist `CycleSpec`, three provider IDs, and local evidence paths |
 | commit input | only now advance Root State comment cursor and dispatch Execute |
 | earlier failure | leave cursor unchanged, start no Agent, show partial provider state, stop |
@@ -131,15 +154,17 @@ before fresh Reconcile.
 
 | Step | Required behavior | Next step |
 |---|---|---|
-| Execute | Cycle Runner builds frozen prompt and asks Performer for a fresh workspace-write process | persist process facts, discard model output, then Audit |
-| Audit | build independent prompt and ask Performer for a distinct fresh read-only process | persist report, then calculate result |
-| result | apply `WF-RESULT-*` mechanically | append Cycle Result and terminal statuses |
-| Root State | update trusted fields only for Succeeded; clear a workspace warning only after clean full-diff Audit | checkpoint, then Reconcile |
+| activate | after the family record is durable, set Cycle and Root `In Progress` | then start Execute |
+| Execute | start a fresh workspace-write process; prompt requires final `cycle-NNN-executor-result.md` | copy exact human report to Execute, expose current error first 50 chars when absent, finish Execute, then Audit |
+| Audit | start a fresh read-only process; prompt requires final `cycle-NNN-audit-result.md` | parse once, copy exact human report to Audit, expose current error first 50 chars when invalid, finish Audit, then serialize/re-read typed JSON |
+| result | apply `WF-RESULT-*` mechanically | upload only `cycle-NNN-audit-result.json` as `application/json`, append the mapped Cycle Result resource line, then set Cycle `Done` |
+| Root State | write parsed Audit fields to `latest_audit`; update trusted fields only for Succeeded; clear a workspace warning only after clean full-diff Audit | checkpoint Root `In Review`, then Reconcile |
 
 Execute process failure never bypasses Audit and never decides the Cycle result.
-Audit inspects the actual shared Root workspace and receives no Execute model
-output, transcript, or trajectory. Execute process facts may explain that work
-was interrupted, but they are not correctness evidence.
+Audit inspects the actual shared Root workspace and receives no Execute Markdown,
+transcript, or trajectory. Bounded Execute process facts may explain that work
+was interrupted, but they are not correctness evidence. Raw Agent JSONL and
+stderr, when diagnostic paths are supplied, remain private local evidence only.
 
 Cycle Runner renders both role prompts from the same frozen inputs captured at
 family creation: Root title/description, task state, optional pending finding,
@@ -149,9 +174,38 @@ Execute process facts, but no Execute response or transcript. It always checks
 the complete workspace diff for boundary violations as well as the Cycle
 acceptance criteria; its real inspection is the sole semantic authority.
 
-Role responses use small validated control headers. Audit must emit exactly one
-`verdict: accepted | incomplete | blocked | violation | process_error`; prose
-alone never determines Cycle outcome.
+For each role launch, Conductor supplies private
+`diagnostic_jsonl_path`/`diagnostic_stderr_path` values under the external run
+directory. Performer returns only local diagnostic refs and a mechanically
+indexed `thread_id`; neither is included in the role prompt or any Linear
+projection.
+
+Role separation is intentional: Execute and Audit can use different providers
+or capabilities while retaining fixed per-run configuration. There is no
+dynamic per-Cycle routing, plugin discovery, compatibility alias, or shared
+cross-role transcript.
+
+Role responses are Markdown files with fixed human-facing report sections. The
+Executor report is `## Summary`, `## File Changes` with
+`### Created`/`### Updated`/`### Deleted` path and +/- line-count entries, and
+`## Verification`; it is copied only to Execute. The Audit report starts with
+`verdict: accepted | incomplete | blocked | violation | process_error`, then
+uses `## Scope Audited`, `## Implementation Review`, `## Checks`, `## Evidence`,
+`## Findings`, and `## Task State` in that order; it is copied only to Audit.
+Neither report repeats the Cycle description. There is one Execute and one
+Audit Agent call per Cycle. A missing or invalid final file becomes a process
+error; Conductor never starts a second summarization or format-repair call.
+
+Root status is a mechanical projection around the semantic decision: startup
+gates normalize a nonterminal Root to `Todo` before the first fresh Reconcile;
+a durable Cycle family sets Root to `In Progress`; a complete Audit result is
+written to `RootState.latest_audit` and sets Root to `In Review` for the next
+Reconcile; and a later `complete`, `needs_human`, or escaped runtime failure
+remains `In Review`. A recorded PR or pushed branch delivery sets it to `Done`.
+Root
+Reconcile never calls Linear or chooses a status ID. A status mutation failure is
+a provider failure and stops the run; Conductor never silently falls back to a
+comment or local phase.
 
 ### Execute prompt
 
@@ -160,13 +214,16 @@ fixed Executor instructions
 + Root title and description
 + task_state_markdown and optional pending_finding at family creation
 + frozen CycleSpec
++ write the final Markdown response to `cycle-NNN-executor-result.md` as the last response
 ```
 
 The instructions say to perform only the frozen objective, respect boundaries,
-and run relevant checks. Execute has no response schema or success authority;
-its final model output is discarded rather than parsed, persisted, projected,
-or supplied to Audit. It receives no old Cycle tree, Reconcile transcript,
-pending comments, or Audit history.
+and run relevant checks. The final report must focus on actual created/updated/
+deleted files, line deltas, and validation evidence. Execute has no semantic
+response schema or success authority; its final Markdown is copied exactly to
+the Execute comment, then ignored for parsing, Audit input, Root State, and
+Cycle semantics. It receives no old Cycle tree, Reconcile transcript, pending
+comments, or Audit history.
 
 ### Audit prompt
 
@@ -176,27 +233,42 @@ fixed Auditor instructions
 + frozen CycleSpec
 + bounded Execute process facts
 + read-only access to the real Root workspace
++ write the final Markdown response to `cycle-NNN-audit-result.md` as the last response
 ```
 
 Audit independently checks acceptance and the complete workspace diff. Its
-response starts with this validated header, followed by bounded Markdown fields
-for summary, checks, evidence, findings, and the proposed full task state:
+final response is the exact Markdown file copied to the Audit comment only. It
+must explain the audit scope, implementation logic, validation evidence, and
+findings for a human reader rather than restate the Cycle description:
 
 ```text
 verdict: accepted | incomplete | blocked | violation | process_error
 
-## Summary
+## Scope Audited
+...
+## Implementation Review
+...
+## Checks
+...
+## Evidence
+...
+## Findings
 ...
 ## Task State
 ...
 ```
 
-The parser rejects a missing or invalid header. It never infers control values
-from prose and never starts another Agent call to repair formatting. Cycle
-Runner maps this verdict mechanically to the Cycle Result; Root Reconcile later
-reads only the promoted Root State, not the Cycle Result or Audit report.
+The parser rejects a missing or invalid field/file. It never infers control
+values from prose and never starts another Agent call to repair formatting.
+Cycle Runner serializes the parsed Audit value to
+`cycle-NNN-audit-result.json`, re-reads and validates that file, and maps that
+re-read value mechanically to the Cycle Result and `RootState.latest_audit`.
+Only the JSON file is uploaded to Cycle as `application/json`; the Cycle Result
+contains `[cycle-NNN-audit-result.json](https://linear.example/asset)` or the current upload
+error's first 50 characters. Root Reconcile later reads only `latest_audit`, not
+the Cycle comment, Audit Markdown comment, or Cycle DAG.
 
-## Terminal PR function
+## Terminal delivery function
 
 The PR path is an ordinary Conductor function, not a delivery component or
 state machine:
@@ -209,33 +281,49 @@ publishPullRequest(root, rootState)
   -> git add --all
   -> git commit
   -> git push --set-upstream
-  -> create pull request
-  -> return URL or failed step
+  -> attempt pull request through installed `gh`
+  -> return URL; if unavailable, return the already-pushed delivery branch
 ```
 
 No commit hash enters a contract. This is one ordered publication attempt, not
-an exactly-once protocol. On ordinary failure, Conductor records the failed
-step in Root State, leaves Root open and workspace intact, and exits. If a
-process later starts with phase `publishing` but no recorded PR URL, it sets
-`NeedsHuman` and stops without another publication attempt. It does not retry,
-read back, adopt an existing PR, roll back, or repair.
+an exactly-once protocol. Commit or push failure leaves Root open. After a
+successful push, unavailable `gh`, missing `gh` authentication, or PR creation
+failure records `delivery_branch` and completes Root without an HTTP/API-token
+fallback. If a process later starts with phase `publishing` but neither a PR URL
+nor delivery branch, it sets `NeedsHuman` and stops without another publication
+attempt. It does not retry, read back, adopt an existing PR, roll back, or repair.
 
 ## Stop behavior
 
 | Observation | Action |
 |---|---|
 | signal or deadline | cancel live process, record bounded state where possible, stop |
-| this process reaches its maximum Cycle count, or a human question is required | set Root State `NeedsHuman`, stop |
+| this process reaches its maximum Cycle count, or a human question is required | set Root State `NeedsHuman`, project Root `In Review`, and stop |
 | Linear failure | preserve run-directory evidence and stop |
-| missing saved workspace or run directory | set `NeedsHuman`, stop; do not rebuild it |
-| commit/push/PR failure | record failed step, leave Root open and workspace intact, stop |
+| missing saved workspace or run directory | set `NeedsHuman`, project Root `In Review`, and stop; do not rebuild it |
+| commit or push failure | record failed step, leave Root `In Review` and workspace intact, stop |
+| PR unavailable after push | record delivered branch, set Root `Done`, stop successfully |
+| escaped runtime failure | show the current error message's first 50 characters, set Root `In Review`, preserve private diagnostics, fail process |
 
 ## Observability
 
 Structured events include run ID, Root/Issue IDs, Cycle number, role, process
-outcome, semantic result, duration, PR step, and sanitized reason. They exclude
-prompts, raw model output, file contents, diffs, credentials, authorization
-headers, and Git hashes. The run directory stores only transaction records,
-bounded final responses needed by Manager/Audit parsers, Audit material, and PR
-command evidence. Complete trajectories are optional adapter diagnostics, not
-required architecture artifacts or public contract values.
+outcome, semantic result, duration, PR step, the current message's first 50 characters, and at most an
+opaque local `diagnostic_ref`. They exclude prompts, raw model output, file
+contents, diffs, credentials, authorization headers, Git hashes, raw JSONL,
+stderr, and error context. The external run directory stores transaction
+records, the exact `cycle-NNN-*-result.md` files needed by role comments, the
+re-read `cycle-NNN-audit-result.json` used for progression, PR command evidence,
+and private diagnostic artifacts. Role Markdown is uploaded only to its owned
+comments; only the typed Audit JSON is uploaded as a Cycle file. Diagnostic
+artifacts retain bounded raw Agent JSONL/stderr and causal context with private
+permissions and are never supplied to Audit or Root Reconcile, uploaded to
+Linear, or used as workflow authority.
+
+Unknown failures are handled without an exhaustive reason-code taxonomy.
+Public operators receive the current boundary's original message limited to 50
+characters, without cause traversal or added prefixes, and an optional local
+`diagnostic_ref`. Full causal evidence remains private.
+Unhandled Conductor failures also write
+`run_directory/diagnostics/<run_id>/error.json` with a private directory/file
+mode (0700/0600) before the bounded process event is emitted.

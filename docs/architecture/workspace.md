@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | one Root-owned workspace, role access, and one terminal PR command sequence | Cycle decisions, delivery subsystem, merge, or provider reconciliation |
+| target proposal | one Root-owned workspace, role access, and one PR-first terminal delivery sequence | Cycle decisions, delivery subsystem, merge, or provider reconciliation |
 
 ## Root workspace
 
@@ -56,7 +56,7 @@ sequenceDiagram
   E-->>C: mechanical process facts; model output discarded
   C->>A: frozen Cycle contract, process facts, workspace path
   A->>W: inspect current state and run read-only checks
-  A-->>C: independent Audit Result
+A-->>C: exact Audit result Markdown
 ```
 
 | Rule | Boundary | Required behavior |
@@ -68,13 +68,17 @@ sequenceDiagram
 | `WS-HANDOFF-005` | Cycle terminal | leave repair, cleanup, or progress to the next Root Reconcile |
 | `WS-HANDOFF-006` | every Audit | inspect the complete workspace diff for out-of-bound changes, not only files named by Execute |
 
-Execute output is deliberately absent from the handoff. It is an untrusted
+Execute Markdown is deliberately absent from the handoff. It is an untrusted
 self-report and cannot reduce Audit's obligation to inspect the frozen contract
 and complete real diff. Only mechanical process facts cross the boundary so
 Audit knows whether execution was interrupted without treating that fact as a
-semantic conclusion.
+semantic conclusion. Each role's exact final Markdown remains in its local
+`cycle-NNN-*-result.md` file; Conductor copies it to that role's Linear comment
+only. After parsing Audit Markdown, Conductor writes and re-reads the typed
+`cycle-NNN-audit-result.json` and uploads only that JSON file to the Cycle. No
+second summarization call is made.
 
-## Terminal PR publication
+## Terminal delivery
 
 Root Reconcile does not set Root `Done`. A `complete` recommendation enters the
 following fixed sequence:
@@ -88,8 +92,8 @@ fetch Root comments once more
   -> git add --all
   -> git commit
   -> git push --set-upstream
-  -> create pull request
-  -> publish PR URL on Root
+  -> attempt pull request with installed `gh`
+  -> publish PR URL, or record the pushed branch when PR creation is unavailable
   -> set Root Done
 ```
 
@@ -100,10 +104,11 @@ fetch Root comments once more
 | `WS-PR-003` | publish guard | Root State phase is `publishing` before external commands | interrupted publication becomes `NeedsHuman`; never attempt again automatically |
 | `WS-PR-004` | commit | one ordinary commit is created on the Root branch | stop and retain workspace |
 | `WS-PR-005` | push | Root branch is pushed to its configured remote | stop and retain workspace |
-| `WS-PR-006` | create PR | provider returns one PR URL | stop and retain workspace |
-| `WS-PR-007` | complete Root | PR URL is recorded in Root State | only then set Root `Done` |
+| `WS-PR-006` | create PR | installed `gh` returns one PR URL | after a successful push, record the pushed branch instead of failing delivery |
+| `WS-PR-007` | complete Root | PR URL or pushed delivery branch is recorded in Root State | only then set Root `Done` |
 
-The implementation may use the installed Git and provider CLI. It records the
+The implementation uses installed Git and prefers installed `gh`; it does not
+fall back to a token-specific HTTP API. It records the
 commands, bounded output, branch, and PR URL under the supplied run directory, but
 does not model commit identity or use a hash as workflow authority. The local
 evidence directory is outside the Root workspace, so `git add --all` cannot

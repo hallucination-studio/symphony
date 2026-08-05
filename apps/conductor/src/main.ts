@@ -1,74 +1,76 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-import {
-  createProductionConductor,
-  runProductionPoll,
-  type ProductionConductor,
-} from "./composition/ProductionConductor.js";
+import { createProductionRootRun } from "./composition/Production.js";
 import { loadStartup } from "./composition/startup.js";
+import { createGitHubCliPullRequest } from "./workspace/GitHubCliPullRequest.js";
+import { writeFailureEvidence } from "./diagnostics/DiagnosticEvidence.js";
 
 function line(stream: NodeJS.WritableStream, value: object): void {
   stream.write(`${JSON.stringify(value)}\n`);
 }
 
 function reasonCode(error: unknown): string {
-  if (error instanceof Error && /^[a-z][a-z0-9_]{0,63}$/u.test(error.message)) return error.message;
-  return "startup_or_runtime_failed";
+  const message = error instanceof Error ? error.message : String(error);
+  return (message.length === 0 ? "Unknown error" : message).slice(0, 50);
 }
 
-interface ForegroundControl {
-  stopRequested(): boolean;
-  wait(milliseconds: number): Promise<void>;
-}
-
-export async function runForeground(
-  production: ProductionConductor,
-  control: ForegroundControl,
-): Promise<void> {
-  while (!control.stopRequested()) {
-    const poll = await runProductionPoll(production);
-    if (poll.stopped) return;
-    if (!control.stopRequested()) await control.wait(production.polling_interval_ms);
+export async function runMain(
+  argv: readonly string[],
+  environment: Readonly<Record<string, string | undefined>>,
+  stdout: NodeJS.WritableStream,
+  stderr: NodeJS.WritableStream,
+  signal?: AbortSignal,
+): Promise<number> {
+  const runId = randomUUID();
+  let runDirectory: string | undefined;
+  let phase = "startup";
+  try {
+    const startup = await loadStartup(argv, environment);
+    runDirectory = startup.request.run_directory;
+    phase = "composition";
+    const conductor = await createProductionRootRun(
+      startup,
+      createGitHubCliPullRequest({ environment }),
+      (event) => line(stdout, { ...event, run_id: runId }),
+    );
+    phase = "runtime";
+    line(stdout, { event: "conductor_started", run_id: runId, root: startup.request.linear_root });
+    const result = await conductor.run(startup.request.linear_root, signal);
+    line(stdout, { event: "conductor_stopped", run_id: runId, ...result });
+    return 0;
+  } catch (error) {
+    let diagnosticRef: string | undefined;
+    if (runDirectory !== undefined) {
+      try {
+        diagnosticRef = await writeFailureEvidence({ runDirectory, runId, phase, error });
+      } catch {
+        diagnosticRef = undefined;
+      }
+    }
+    line(stderr, {
+      event: "conductor_failed",
+      run_id: runId,
+      reason_code: reasonCode(error),
+      ...(diagnosticRef === undefined ? {} : { diagnostic_ref: diagnosticRef }),
+    });
+    return 1;
   }
 }
 
 async function main(): Promise<void> {
-  const correlationId = `process:${randomUUID()}`;
-  let stopping = false;
-  let releaseWait: (() => void) | null = null;
-  const stop = () => {
-    stopping = true;
-    releaseWait?.();
-  };
+  const controller = new AbortController();
+  const stop = () => controller.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
-    const startup = await loadStartup(process.argv.slice(2), process.env);
-    const production = await createProductionConductor(startup, (entry) => line(process.stdout, entry));
-    line(process.stdout, { event: "conductor_ready", correlation_id: correlationId });
-    await runForeground(production, {
-      stopRequested: () => stopping,
-      wait: (milliseconds) => new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, milliseconds);
-        const release = () => { clearTimeout(timer); resolve(); };
-        releaseWait = release;
-      }),
-    });
-    line(process.stdout, { event: "conductor_stopped", correlation_id: correlationId });
-  } catch (error) {
-    line(process.stderr, {
-      event: "conductor_failed",
-      correlation_id: correlationId,
-      reason_code: reasonCode(error),
-    });
-    process.exitCode = 1;
+    process.exitCode = await runMain(
+      process.argv.slice(2), process.env, process.stdout, process.stderr, controller.signal,
+    );
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
-}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

@@ -3,35 +3,14 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 export type UnknownRecord = Record<string, unknown>;
 
 export const MAX_MARKDOWN_TEXT_LENGTH = 100_000;
+export const MAX_ARRAY_LENGTH = 256;
 
 declare const markdownTextBrand: unique symbol;
-
 export type MarkdownText = string & { readonly [markdownTextBrand]: true };
 
 interface MarkdownNode {
   readonly type: string;
   readonly children?: readonly MarkdownNode[];
-}
-
-function markdownSyntaxTree(value: string): unknown {
-  const stripPosition = (entry: unknown): unknown => {
-    if (Array.isArray(entry)) return entry.map(stripPosition);
-    if (typeof entry !== "object" || entry === null) return entry;
-    return Object.fromEntries(
-      Object.entries(entry)
-        .filter(([key]) => key !== "position" && key !== "spread")
-        .map(([key, child]) => [key, stripPosition(child)]),
-    );
-  };
-  return stripPosition(fromMarkdown(value));
-}
-
-export function markdownSemanticallyEqual(left: string, right: string): boolean {
-  try {
-    return JSON.stringify(markdownSyntaxTree(left)) === JSON.stringify(markdownSyntaxTree(right));
-  } catch {
-    return false;
-  }
 }
 
 const CREDENTIAL_MATERIAL = [
@@ -55,9 +34,7 @@ function hasUnpairedSurrogate(value: string): boolean {
       const next = value.charCodeAt(index + 1);
       if (next < 0xdc00 || next > 0xdfff) return true;
       index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return true;
-    }
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true;
   }
   return false;
 }
@@ -66,7 +43,7 @@ function isBareJsonContainer(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
   try {
-    const parsed: unknown = JSON.parse(trimmed);
+    const parsed = JSON.parse(trimmed) as unknown;
     return typeof parsed === "object" && parsed !== null;
   } catch {
     return false;
@@ -84,6 +61,27 @@ function containsHtml(root: MarkdownNode): boolean {
   return false;
 }
 
+function markdownSyntaxTree(value: string): unknown {
+  const stripPosition = (entry: unknown): unknown => {
+    if (Array.isArray(entry)) return entry.map(stripPosition);
+    if (typeof entry !== "object" || entry === null) return entry;
+    return Object.fromEntries(
+      Object.entries(entry)
+        .filter(([key]) => key !== "position" && key !== "spread")
+        .map(([key, child]) => [key, stripPosition(child)]),
+    );
+  };
+  return stripPosition(fromMarkdown(value));
+}
+
+export function markdownSemanticallyEqual(left: string, right: string): boolean {
+  try {
+    return JSON.stringify(markdownSyntaxTree(left)) === JSON.stringify(markdownSyntaxTree(right));
+  } catch {
+    return false;
+  }
+}
+
 export function parseMarkdownText(
   value: unknown,
   code = "invalid_markdown_text",
@@ -91,6 +89,7 @@ export function parseMarkdownText(
 ): MarkdownText {
   if (
     typeof value !== "string"
+    || value.length === 0
     || value.length > max
     || value.trim().length === 0
     || value.includes("\0")
@@ -105,9 +104,9 @@ export function parseMarkdownText(
 }
 
 export function asRecord(value: unknown, code = "invalid_contract"): UnknownRecord {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(code);
-  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(code);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) throw new Error(code);
   return value as UnknownRecord;
 }
 
@@ -131,10 +130,24 @@ export function parseBoundedString(value: unknown, code: string, max = 256): str
   return value;
 }
 
+export function parseOptionalBoundedString(
+  value: unknown,
+  code: string,
+  max = 256,
+): string | undefined {
+  return value === undefined ? undefined : parseBoundedString(value, code, max);
+}
+
+export function parseAbsolutePath(value: unknown, code: string, max = 1_024): string {
+  const parsed = parseBoundedString(value, code, max);
+  if (!parsed.startsWith("/")) throw new Error(code);
+  return parsed;
+}
+
 export function parseArray<T>(
   value: unknown,
   parser: (entry: unknown) => T,
-  max = 5_000,
+  max = MAX_ARRAY_LENGTH,
 ): readonly T[] {
   if (!Array.isArray(value)) throw new Error("invalid_contract_array");
   if (value.length > max) throw new Error("contract_array_limit_exceeded");
@@ -144,9 +157,27 @@ export function parseArray<T>(
 export function parseStringArray(
   value: unknown,
   parser: (entry: unknown) => string,
-  max = 5_000,
+  max = MAX_ARRAY_LENGTH,
 ): readonly string[] {
   const parsed = parseArray(value, parser, max);
   if (new Set(parsed).size !== parsed.length) throw new Error("duplicate_contract_identity");
   return parsed;
+}
+
+export function parsePositiveInteger(value: unknown, code: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(code);
+  return value as number;
+}
+
+export function parseNonNegativeInteger(value: unknown, code: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(code);
+  return value as number;
+}
+
+export function parseOptional<T>(value: unknown, parser: (entry: unknown) => T): T | undefined {
+  return value === undefined ? undefined : parser(value);
+}
+
+export function freezeObject<T extends object>(value: T): Readonly<T> {
+  return Object.freeze(value);
 }

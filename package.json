@@ -17,12 +17,11 @@
     "lint:e2e": "eslint tests/e2e --ext .mjs --max-warnings 0",
     "test:architecture": "node --test tests/architecture/*.test.mjs",
     "test:e2e": "node tests/e2e/e2e-supervisor.mjs",
-    "test:e2e:runner": "node --test tests/e2e/black-box-runner.test.mjs tests/e2e/e2e-supervisor.test.mjs",
+    "test:e2e:runner": "node --test tests/e2e/black-box-runner.test.mjs tests/e2e/deterministic-scenarios.test.mjs tests/e2e/real-boundary-runners.test.mjs tests/e2e/golden-runner.test.mjs tests/e2e/e2e-supervisor.test.mjs",
     "test:typescript": "npm test -w @symphony/conductor",
     "test": "npm run test:architecture && npm run test:typescript && npm run test:e2e:runner"
   },
   "devDependencies": {
-    "@linear/sdk": "88.2.0",
     "@types/node": "22.10.2",
     "@typescript-eslint/eslint-plugin": "8.18.1",
     "@typescript-eslint/parser": "8.18.1",

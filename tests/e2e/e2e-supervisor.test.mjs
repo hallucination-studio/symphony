@@ -3,254 +3,142 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MAX_E2E_DURATION_MS, partitionEnvironment, runSupervisor } from "./e2e-supervisor.mjs";
 
-const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const secretValues = Object.freeze({
-  human: "human-fixture-token-7e21",
-  product: "product-linear-token-a314",
-  codex: "codex-api-key-c092",
-});
+const secret = "supervisor-secret-not-output";
 
-const fixtureEnvironment = Object.freeze({
-  SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: secretValues.human,
-  SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
-  SYMPHONY_E2E_PROJECT_SLUG_ID: "project-fixture",
-});
-
-const productEnvironment = Object.freeze({
-  SYMPHONY_LINEAR_TOKEN: secretValues.product,
-  SYMPHONY_CODEX_API_KEY: secretValues.codex,
-  SYMPHONY_CODEX_MODEL: "gpt-test-model",
-  SYMPHONY_CODEX_BASE_URL: "https://codex.example.test",
-  SYMPHONY_LINEAR_EXCLUSIVE_MUTATION_ACTOR: "acknowledged",
-  SYMPHONY_LINEAR_MANAGED_DESTRUCTION_PROHIBITED: "acknowledged",
-  SYMPHONY_LINEAR_RELATION_PROVENANCE_AUDITED: "acknowledged",
-});
-
-const completeEnvironment = Object.freeze({
-  ...fixtureEnvironment,
-  ...productEnvironment,
-  SYMPHONY_E2E_DIAGNOSTIC_EVENTS: "1",
-});
-
-function envSource(environment) {
-  return Object.entries(environment)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join("\n");
+function envSource(entries) {
+  return Object.entries(entries).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join("\n");
 }
 
-async function temporaryDirectory(t) {
+test("supervisor partitions .env credentials without crossing boundary ownership", () => {
+  const partitions = partitionEnvironment({
+    LINEAR_API_KEY: secret,
+    CODEX_API_KEY: "agent-secret-not-output",
+    GH_TOKEN: "pr-secret-not-output",
+    SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-secret-not-output",
+    SYMPHONY_E2E_PROJECT_SLUG_ID: "golden-project",
+    SYMPHONY_CODEX_BASE_URL: "https://codex.example.test/v1",
+    ARBITRARY_API_KEY: "must-not-forward",
+  }, { PATH: "/usr/bin", HOME: "/tmp/home" });
+  assert.equal(partitions.testEnvironment.LINEAR_API_KEY, undefined);
+  assert.equal(partitions.linearEnvironment.LINEAR_API_KEY, secret);
+  assert.equal(partitions.agentEnvironment.CODEX_API_KEY, "agent-secret-not-output");
+  assert.equal(partitions.agentEnvironment.CODEX_BASE_URL, "https://codex.example.test/v1");
+  assert.equal(partitions.prEnvironment.GH_TOKEN, "pr-secret-not-output");
+  assert.equal(partitions.linearEnvironment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
+  assert.equal(partitions.agentEnvironment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
+  assert.equal(partitions.prEnvironment.SYMPHONY_E2E_PROJECT_SLUG_ID, undefined);
+  assert.equal(partitions.linearEnvironment.CODEX_BASE_URL, undefined);
+  assert.equal(partitions.linearEnvironment.ARBITRARY_API_KEY, undefined);
+});
+
+test("supervisor runs local layers and reports external layers as blocked", async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-supervisor-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  return directory;
-}
-
-test("partitions complete configuration without crossing credential boundaries", () => {
-  const partition = partitionEnvironment(completeEnvironment, {
-    PATH: "/usr/bin",
-    HOME: "/tmp/test-home",
-    SYMPHONY_LINEAR_TOKEN: "host-product-token-must-not-leak-through",
-    SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "host-fixture-token-must-not-win",
-  });
-
-  assert.equal(partition.runnerEnvironment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, secretValues.human);
-  assert.equal(partition.runnerEnvironment.SYMPHONY_E2E_PROJECT_SLUG_ID, "project-fixture");
-  assert.equal(partition.runnerEnvironment.SYMPHONY_LINEAR_TOKEN, undefined);
-  assert.equal(partition.runnerEnvironment.SYMPHONY_CODEX_API_KEY, undefined);
-  assert.equal(partition.runnerEnvironment.SYMPHONY_E2E_DIAGNOSTIC_EVENTS, "1");
-  assert.equal(partition.runnerEnvironment.PATH, "/usr/bin");
-  assert.equal(partition.runnerEnvironment.ARK_API_KEY, undefined);
-
-  assert.equal(partition.conductorEnvironment.SYMPHONY_LINEAR_TOKEN, secretValues.product);
-  assert.equal(partition.conductorEnvironment.SYMPHONY_CODEX_API_KEY, secretValues.codex);
-  assert.equal(partition.conductorEnvironment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
-  assert.equal(partition.conductorEnvironment.SYMPHONY_E2E_PROJECT_SLUG_ID, undefined);
-  assert.equal(partition.conductorEnvironment.SYMPHONY_E2E_DIAGNOSTIC_EVENTS, "1");
-  assert.equal(partition.conductorEnvironment.HOME, "/tmp/test-home");
-  assert.equal(partition.conductorEnvironment.ARK_API_KEY, undefined);
-});
-
-test("supervisor runs the existing entrypoint with product credentials outside the test child", async (t) => {
-  const directory = await temporaryDirectory(t);
+  context.after(() => rm(directory, { recursive: true, force: true }));
   const envPath = path.join(directory, ".env");
-  const configPath = path.join(directory, "conductor.json");
-  const observationPath = path.join(directory, "observation.json");
-  const conductorPath = path.join(directory, "fake-conductor.mjs");
-  const scenarioPath = path.join(directory, "scenario.test.mjs");
-  const runnerModule = pathToFileURL(path.join(REPOSITORY_ROOT, "tests/e2e/black-box-runner.mjs")).href;
-
-  await writeFile(envPath, envSource(completeEnvironment), { mode: 0o600 });
-  await writeFile(configPath, JSON.stringify({ observationPath }), { mode: 0o600 });
-  await writeFile(conductorPath, [
-    "import { readFileSync, writeFileSync } from 'node:fs';",
-    "const config = JSON.parse(readFileSync(process.argv[process.argv.indexOf('--config') + 1], 'utf8'));",
-    "writeFileSync(config.observationPath, JSON.stringify({",
-    "  productCredential: typeof process.env.SYMPHONY_LINEAR_TOKEN === 'string',",
-    "  codexCredential: typeof process.env.SYMPHONY_CODEX_API_KEY === 'string',",
-    "  fixtureCredential: process.env.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN !== undefined,",
-    "}));",
-    "process.stdout.write(JSON.stringify({ event: 'conductor_ready' }) + '\\n');",
-    "process.on('SIGTERM', () => {",
-    "  process.stdout.write(JSON.stringify({ event: 'conductor_stopped' }) + '\\n');",
-    "  process.exit(0);",
-    "});",
-    "setInterval(() => undefined, 1000);",
-  ].join("\n"), { mode: 0o600 });
-  await writeFile(scenarioPath, [
-    "import assert from 'node:assert/strict';",
-    "import test from 'node:test';",
-    `import { runBlackBoxScenario } from ${JSON.stringify(runnerModule)};`,
-    `const configPath = ${JSON.stringify(configPath)};`,
-    "test('supervised product lifecycle', async () => {",
-    "  assert.equal(process.env.SYMPHONY_LINEAR_TOKEN, undefined);",
-    "  assert.equal(process.env.SYMPHONY_CODEX_API_KEY, undefined);",
-    "  await runBlackBoxScenario({",
-    "    scenario: async ({ product }) => {",
-    "      await product.start(configPath);",
-    "    },",
-    "  });",
-    "});",
-  ].join("\n"), { mode: 0o600 });
-
+  await writeFile(envPath, envSource({
+    LINEAR_API_KEY: secret,
+    CODEX_API_KEY: "agent-secret-not-output",
+  }), { encoding: "utf8", mode: 0o600 });
+  let testRun = false;
   const result = await runSupervisor({
     envPath,
-    conductorEntryPath: conductorPath,
-    testFiles: [scenarioPath],
-    inheritedEnvironment: Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT"),
-    ),
+    testFiles: [path.join(directory, "deterministic.test.mjs")],
+    inherited: { PATH: "/usr/bin", HOME: "/tmp/home" },
+    runTests: async (_files, environment) => {
+      testRun = true;
+      assert.equal(environment.LINEAR_API_KEY, undefined);
+      assert.equal(environment.CODEX_API_KEY, undefined);
+      return { code: 0, signal: null };
+    },
   });
-
-  assert.deepEqual(result, { code: 0, signal: null });
-  assert.deepEqual(JSON.parse(await readFile(observationPath, "utf8")), {
-    productCredential: true,
-    codexCredential: true,
-    fixtureCredential: false,
-  });
+  assert.equal(testRun, true);
+  assert.equal(result.code, 0);
+  assert.equal(result.boundary_results.length, 5);
+  assert.equal(result.blocked.every((entry) => entry.status === "blocked"), true);
+  assert.equal(JSON.stringify(result).includes(secret), false);
 });
 
-test("supervisor runs independent E2E scenarios concurrently within one budget", async (t) => {
-  const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
-  const configPath = path.join(directory, "conductor.json");
-  const conductorPath = path.join(directory, "fake-conductor.mjs");
-  const firstReadyPath = path.join(directory, "first.ready");
-  const secondReadyPath = path.join(directory, "second.ready");
-  const firstScenarioPath = path.join(directory, "first-scenario.test.mjs");
-  const secondScenarioPath = path.join(directory, "second-scenario.test.mjs");
-  const runnerModule = pathToFileURL(path.join(REPOSITORY_ROOT, "tests/e2e/black-box-runner.mjs")).href;
-
-  await writeFile(envPath, envSource(completeEnvironment), { mode: 0o600 });
-  await writeFile(configPath, "{}\n", { mode: 0o600 });
-  await writeFile(conductorPath, [
-    "process.stdout.write(JSON.stringify({ event: 'conductor_ready' }) + '\\n');",
-    "process.on('SIGTERM', () => process.exit(0));",
-    "setInterval(() => undefined, 1000);",
-  ].join("\n"), { mode: 0o600 });
-
-  const scenarioSource = (readyPath) => [
-    "import { access, writeFile } from 'node:fs/promises';",
-    "import { setTimeout as delay } from 'node:timers/promises';",
-    "import test from 'node:test';",
-    `import { runBlackBoxScenario } from ${JSON.stringify(runnerModule)};`,
-    `const configPath = ${JSON.stringify(configPath)};`,
-    `const readyPath = ${JSON.stringify(readyPath)};`,
-    `const otherReadyPath = ${JSON.stringify(readyPath === firstReadyPath ? secondReadyPath : firstReadyPath)};`,
-    "test('independent scenario reaches the shared barrier', async () => {",
-    "  await runBlackBoxScenario({",
-    "    scenario: async ({ product }) => {",
-    "      await product.start(configPath);",
-    "      await writeFile(readyPath, 'ready\\n', { mode: 0o600 });",
-    "      const deadline = Date.now() + 1_500;",
-    "      while (Date.now() < deadline) {",
-    "        try {",
-    "          await access(otherReadyPath);",
-    "          return;",
-    "        } catch {",
-    "          await delay(10);",
-    "        }",
-    "      }",
-    "      throw new Error('parallel_scenario_barrier_timeout');",
-    "    },",
-    "  });",
-    "});",
-  ].join("\n");
-  await writeFile(firstScenarioPath, scenarioSource(firstReadyPath), { mode: 0o600 });
-  await writeFile(secondScenarioPath, scenarioSource(secondReadyPath), { mode: 0o600 });
-
+test("supervisor reports missing .env as blocked while still allowing deterministic layers", async () => {
   const result = await runSupervisor({
-    envPath,
-    conductorEntryPath: conductorPath,
-    testFiles: [firstScenarioPath, secondScenarioPath],
-    maxDurationMs: 3_000,
-    shutdownTimeoutMs: 100,
-    inheritedEnvironment: Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT"),
-    ),
+    envPath: path.join(os.tmpdir(), "symphony-e2e-env-does-not-exist"),
+    testFiles: [path.join(process.cwd(), "tests/e2e/black-box-runner.test.mjs")],
+    inherited: {},
+    runTests: async () => ({ code: 0, signal: null }),
   });
-
-  assert.deepEqual(result, { code: 0, signal: null });
+  assert.equal(result.code, 0);
+  assert.equal(result.boundary_results.length, 5);
+  assert.equal(result.blocked.some((entry) => entry.boundary === "supervisor" && entry.reason === "env_unavailable"), true);
 });
 
-test("supervisor enforces a hard deadline and kills a hung product", async (t) => {
-  const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
-  const configPath = path.join(directory, "conductor.json");
-  const observationPath = path.join(directory, "observation.json");
-  const conductorPath = path.join(directory, "hanging-conductor.mjs");
-  const scenarioPath = path.join(directory, "hanging-scenario.test.mjs");
-  const runnerModule = pathToFileURL(path.join(REPOSITORY_ROOT, "tests/e2e/black-box-runner.mjs")).href;
+test("supervisor fails when an external boundary fails", async () => {
+  const result = await runSupervisor({
+    envPath: path.join(os.tmpdir(), "symphony-e2e-valid-env-does-not-exist"),
+    testFiles: [path.join(process.cwd(), "tests/e2e/black-box-runner.test.mjs")],
+    inherited: {},
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => [{ status: "failed", layer: "real_linear", reason: "linear_boundary_failed" }],
+    runGolden: async () => ({ status: "passed", layer: "golden" }),
+  });
 
-  await writeFile(envPath, envSource(completeEnvironment), { mode: 0o600 });
-  await writeFile(configPath, JSON.stringify({ observationPath }), { mode: 0o600 });
-  await writeFile(conductorPath, [
-    "import { readFileSync, writeFileSync } from 'node:fs';",
-    "const config = JSON.parse(readFileSync(process.argv[process.argv.indexOf('--config') + 1], 'utf8'));",
-    "writeFileSync(config.observationPath, JSON.stringify({ pid: process.pid }));",
-    "process.stdout.write(JSON.stringify({ event: 'conductor_ready' }) + '\\n');",
-    "process.on('SIGTERM', () => undefined);",
-    "setInterval(() => undefined, 1000);",
-  ].join("\n"), { mode: 0o600 });
-  await writeFile(scenarioPath, [
-    "import { runBlackBoxScenario } from " + JSON.stringify(runnerModule) + ";",
-    "import test from 'node:test';",
-    "const configPath = " + JSON.stringify(configPath) + ";",
-    "test('hangs until the supervisor deadline', async () => {",
-    "  await runBlackBoxScenario({",
-    "    scenario: async ({ product }) => {",
-    "      await product.start(configPath);",
-    "      await new Promise(() => undefined);",
-    "    },",
-    "  });",
-    "});",
-  ].join("\n"), { mode: 0o600 });
+  assert.equal(result.code, 1);
+  assert.equal(result.reason, "e2e_boundary_failed");
+  assert.deepEqual(result.boundary_results, [
+    { status: "failed", layer: "real_linear", reason: "linear_boundary_failed" },
+    { status: "passed", layer: "golden" },
+  ]);
+  assert.equal(result.blocked.some((entry) => entry.boundary === "supervisor"), true);
+});
 
+test("supervisor applies one deadline across local, real-boundary, and golden phases", async () => {
+  const phases = [];
   const startedAt = Date.now();
   const result = await runSupervisor({
-    envPath,
-    conductorEntryPath: conductorPath,
-    testFiles: [scenarioPath],
-    maxDurationMs: 800,
-    shutdownTimeoutMs: 100,
-    inheritedEnvironment: Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT"),
-    ),
+    envPath: path.join(os.tmpdir(), "symphony-e2e-deadline-env-does-not-exist"),
+    testFiles: [path.join(process.cwd(), "tests/e2e/black-box-runner.test.mjs")],
+    inherited: {},
+    maxDurationMs: 40,
+    runTests: async (_files, _environment, timeoutMs) => {
+      phases.push(["local", timeoutMs]);
+      return { code: 0, signal: null };
+    },
+    runBoundaries: async () => {
+      phases.push(["real"]);
+      return [];
+    },
+    runGolden: async () => {
+      phases.push(["golden"]);
+      return new Promise(() => {});
+    },
   });
 
-  assert.deepEqual(result, { code: 124, signal: null, reason: "e2e_timeout" });
-  assert.ok(Date.now() - startedAt < 5_000);
-  const observation = JSON.parse(await readFile(observationPath, "utf8"));
-  assert.equal(typeof observation.pid, "number");
-  assert.throws(() => process.kill(observation.pid, 0), { code: "ESRCH" });
+  assert.equal(result.code, 124);
+  assert.equal(result.reason, "e2e_timeout");
+  assert.deepEqual(phases.map(([phase]) => phase), ["local", "real", "golden"]);
+  assert.ok(phases[0][1] <= 40);
+  assert.ok(Date.now() - startedAt < 1_000);
 });
 
-test("supervisor rejects a total E2E budget above the sub-five-minute ceiling", async () => {
+test("the default E2E runner command includes every local layer", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+  const command = packageJson.scripts["test:e2e:runner"];
+  for (const file of [
+    "black-box-runner.test.mjs",
+    "deterministic-scenarios.test.mjs",
+    "real-boundary-runners.test.mjs",
+    "golden-runner.test.mjs",
+    "e2e-supervisor.test.mjs",
+  ]) {
+    assert.equal(command.includes(`tests/e2e/${file}`), true);
+  }
+});
+
+test("supervisor enforces the bounded E2E duration", async () => {
   assert.ok(MAX_E2E_DURATION_MS < 5 * 60_000);
   await assert.rejects(
-    runSupervisor({ maxDurationMs: MAX_E2E_DURATION_MS + 1 }),
+    runSupervisor({ maxDurationMs: MAX_E2E_DURATION_MS + 1, runTests: async () => ({ code: 0, signal: null }) }),
     /invalid_e2e_configuration/u,
   );
 });

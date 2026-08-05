@@ -18,7 +18,7 @@ test: install
 test-all: lint typecheck build test
 
 dev: install
-	npm run dev -w @symphony/conductor
+	npm run dev -w @symphony/conductor -- $(ARGS)
 
 stop:
 	-pkill -f 'apps/conductor/dist/main.js'

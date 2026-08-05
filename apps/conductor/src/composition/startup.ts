@@ -1,95 +1,84 @@
-import { open } from "node:fs/promises";
-import path from "node:path";
-
-import { parseConductorConfig, type ConductorConfig } from "./config.js";
-
-const MAX_CONFIG_BYTES = 1024 * 1024;
-const MAX_TOKEN_LENGTH = 4096;
+import { parseCliArguments } from "./cli.js";
+import type { HarnessRunRequest } from "../contracts/harness.js";
+import { parseRootWorkspace, type RootWorkspace } from "../contracts/workspace.js";
+import { createProductionLinearGateway } from "../linear/LinearGraphqlGateway.js";
+import type { LinearGateway } from "../linear/LinearGateway.js";
+import { bindRootWorkspace } from "../workspace/RootWorkspace.js";
+import {
+  CodexCliPerformer,
+  type CodexCliPerformerOptions,
+} from "../performer/internal/CodexCliPerformer.js";
+import type { Performer } from "../performer/api/Performer.js";
 
 export interface ConductorStartup {
-  readonly config_path: string;
-  readonly config: ConductorConfig;
-  readonly linear_token: string;
-  readonly codex_api_key: string;
-  readonly codex_base_url: string;
-  readonly codex_model: string;
-  readonly linear_provider_capabilities: {
-    readonly exclusive_mutation_actor: true;
-    readonly managed_destruction_prohibited: true;
-    readonly relation_provenance_audited: true;
-  };
+  readonly request: HarnessRunRequest;
+  readonly resolveWorkspace: () => Promise<RootWorkspace>;
+  readonly gateway: LinearGateway;
+  readonly executePerformer: Performer;
+  readonly auditPerformer: Performer;
 }
 
-function configPath(argv: readonly string[]): string {
-  if (argv.length !== 2 || argv[0] !== "--config" || typeof argv[1] !== "string" || !path.isAbsolute(argv[1])) {
-    throw new Error("invalid_startup_arguments");
-  }
-  return path.normalize(argv[1]);
+const CODEX_ENVIRONMENT_KEYS = [
+  "PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL",
+] as const;
+
+export function resolveCodexRoleOptions(
+  env: Readonly<Record<string, string | undefined>>,
+  role: "EXECUTE" | "AUDIT",
+): CodexCliPerformerOptions {
+  const apiKey = env[`SYMPHONY_${role}_CODEX_API_KEY`]
+    ?? env.CODEX_API_KEY ?? env.SYMPHONY_CODEX_API_KEY;
+  const baseUrl = env[`SYMPHONY_${role}_CODEX_BASE_URL`]
+    ?? env.CODEX_BASE_URL ?? env.SYMPHONY_CODEX_BASE_URL;
+  const environment: Record<string, string | undefined> = {};
+  for (const key of CODEX_ENVIRONMENT_KEYS) environment[key] = env[key];
+  if (apiKey !== undefined) environment.CODEX_API_KEY = apiKey;
+  return Object.freeze({
+    executable: env.CODEX_EXECUTABLE ?? "codex",
+    environment: Object.freeze(environment),
+    ...(baseUrl === undefined ? {} : { base_url: baseUrl }),
+  });
 }
 
-function secret(env: Readonly<Record<string, string | undefined>>, name: string, missing: string, invalid: string): string {
-  const value = env[name];
-  if (value === undefined || value.length === 0) throw new Error(missing);
-  if (value.length > MAX_TOKEN_LENGTH || /\s/u.test(value)) throw new Error(invalid);
-  return value;
-}
-
-function requiredAttestation(env: Readonly<Record<string, string | undefined>>, name: string): true {
-  if (env[name] !== "acknowledged") throw new Error("unsupported_linear_provider_capability");
-  return true;
-}
-
-async function readConfig(configFile: string): Promise<unknown> {
-  let handle;
-  try {
-    handle = await open(configFile, "r");
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size < 2 || stat.size > MAX_CONFIG_BYTES) throw new Error("invalid_startup_config");
-    return JSON.parse(await handle.readFile({ encoding: "utf8" })) as unknown;
-  } catch {
-    throw new Error("invalid_startup_config");
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
+function performerForRole(
+  env: Readonly<Record<string, string | undefined>>,
+  role: "EXECUTE" | "AUDIT",
+): Performer {
+  return new CodexCliPerformer(resolveCodexRoleOptions(env, role));
 }
 
 export async function loadStartup(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<ConductorStartup> {
-  const configFile = configPath(argv);
-  const linearToken = secret(env, "SYMPHONY_LINEAR_TOKEN", "missing_linear_token", "invalid_linear_token");
-  const codexApiKey = secret(env, "SYMPHONY_CODEX_API_KEY", "missing_codex_api_key", "invalid_codex_api_key");
-  const codexModel = secret(env, "SYMPHONY_CODEX_MODEL", "missing_codex_model", "invalid_codex_model");
-  const linearProviderCapabilities = Object.freeze({
-    exclusive_mutation_actor: requiredAttestation(env, "SYMPHONY_LINEAR_EXCLUSIVE_MUTATION_ACTOR"),
-    managed_destruction_prohibited: requiredAttestation(env, "SYMPHONY_LINEAR_MANAGED_DESTRUCTION_PROHIBITED"),
-    relation_provenance_audited: requiredAttestation(env, "SYMPHONY_LINEAR_RELATION_PROVENANCE_AUDITED"),
-  });
-  const codexBaseUrl = env.SYMPHONY_CODEX_BASE_URL;
-  const parsedBaseUrl = codexBaseUrl && URL.canParse(codexBaseUrl) ? new URL(codexBaseUrl) : null;
-  if (
-    !codexBaseUrl
-    || !parsedBaseUrl
-    || !["http:", "https:"].includes(parsedBaseUrl.protocol)
-    || parsedBaseUrl.username !== ""
-    || parsedBaseUrl.password !== ""
-  ) {
-    throw new Error("invalid_codex_base_url");
-  }
-  let config: ConductorConfig;
+  let request: HarnessRunRequest;
   try {
-    config = parseConductorConfig(await readConfig(configFile));
-  } catch {
-    throw new Error("invalid_startup_config");
+    request = parseCliArguments(argv);
+  } catch (error) {
+    if (error instanceof Error && error.message === "invalid_command") {
+      throw new Error("invalid_startup_arguments");
+    }
+    throw error;
   }
+  const gateway = createProductionLinearGateway(env);
+  let resolvedWorkspace: Promise<RootWorkspace> | undefined;
+  const resolveWorkspace = (): Promise<RootWorkspace> => {
+    resolvedWorkspace ??= bindRootWorkspace({
+      rootId: request.linear_root,
+      workspace: request.workspace_path,
+      runDirectory: request.run_directory,
+    }).then((bound) => parseRootWorkspace({
+      workspace_path: bound.workspacePath,
+      run_directory: bound.runDirectory,
+      root_branch: bound.rootBranch,
+    }));
+    return resolvedWorkspace;
+  };
   return Object.freeze({
-    config_path: configFile,
-    config,
-    linear_token: linearToken,
-    codex_api_key: codexApiKey,
-    codex_base_url: codexBaseUrl,
-    codex_model: codexModel,
-    linear_provider_capabilities: linearProviderCapabilities,
+    request,
+    resolveWorkspace,
+    gateway,
+    executePerformer: performerForRole(env, "EXECUTE"),
+    auditPerformer: performerForRole(env, "AUDIT"),
   });
 }
