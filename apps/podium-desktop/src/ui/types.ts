@@ -19,7 +19,6 @@ export interface RoleLaunchConfigView {
 export interface ProjectBindingView {
   id: string;
   projectId: string;
-  projectName: string;
   routingLabel: string;
   repositoryPath: string;
   baseBranch: string;
@@ -76,17 +75,16 @@ export type DesktopState =
 export type DesktopCommand =
   | { kind: "create_binding"; binding: ProjectBindingDraftView }
   | { kind: "update_binding"; binding: ProjectBindingView }
+  | { kind: "delete_binding"; bindingId: string }
   | { kind: "start_binding"; bindingId: string }
-  | { kind: "stop_binding"; bindingId: string }
-  | { kind: "start_slot"; slotId: string }
-  | { kind: "stop_slot"; slotId: string };
+  | { kind: "stop_binding"; bindingId: string };
 
 export type DesktopCommandResult =
   | { kind: "confirmed" }
   | { kind: "rejected"; sanitizedReason: string };
 
 export interface DesktopHost {
-  getState(): DesktopState;
+  getState(): Promise<DesktopState>;
   execute(command: DesktopCommand): Promise<DesktopCommandResult>;
 }
 

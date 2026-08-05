@@ -20,8 +20,8 @@ test("keeps the desktop information architecture to three pages", () => {
 test("overview renders more than one binding and multiple slots", () => {
   render(<App initialState={createDemoState()} onCommand={confirmed} />);
   expect(screen.getByRole("heading", { name: "Project Bindings" })).toBeInTheDocument();
-  expect(screen.getAllByText("Symphony").length).toBeGreaterThan(0);
-  expect(screen.getByText("Operator Console")).toBeInTheDocument();
+  expect(screen.getAllByText("project-symphony").length).toBeGreaterThan(0);
+  expect(screen.getByText("project-console")).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Root assignments" })).toBeInTheDocument();
   expect(screen.getAllByText(/SYM-101/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/OPS-201/).length).toBeGreaterThan(0);
@@ -33,7 +33,6 @@ test("settings saves a flattened binding with optional role fields", async () =>
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   fireEvent.click(screen.getByRole("button", { name: "New binding" }));
   fireEvent.change(screen.getByRole("textbox", { name: "Project ID" }), { target: { value: "project-new" } });
-  fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "New Project" } });
   fireEvent.change(screen.getByRole("textbox", { name: "Routing label" }), { target: { value: "new" } });
   fireEvent.change(screen.getByRole("textbox", { name: "Repository path" }), { target: { value: "~/Code/new" } });
   fireEvent.click(screen.getByRole("button", { name: "Save binding" }));
@@ -52,12 +51,13 @@ test("settings saves a flattened binding with optional role fields", async () =>
   );
 });
 
-test("conductors exposes binding and Root assignment controls", () => {
+test("conductors exposes binding controls while assignments stay scheduler-owned", () => {
   const command = vi.fn().mockImplementation(confirmed);
   render(<App initialState={createDemoState()} onCommand={command} />);
   fireEvent.click(screen.getByRole("button", { name: "Conductors" }));
   expect(screen.getByRole("heading", { name: "Project Bindings" })).toBeInTheDocument();
-  expect(screen.getAllByRole("button", { name: /Start|Stop/ }).length).toBeGreaterThan(2);
+  expect(screen.getAllByRole("button", { name: /Start binding|Stop binding/ })).toHaveLength(2);
+  expect(screen.queryByRole("button", { name: /assignment/i })).not.toBeInTheDocument();
   fireEvent.click(screen.getAllByRole("button", { name: "Stop binding" })[0]!);
-  expect(command).toHaveBeenCalledWith({ kind: "stop_binding", bindingId: "binding-symphony" });
+  expect(command).toHaveBeenCalledWith({ kind: "stop_binding", bindingId: "project-symphony" });
 });

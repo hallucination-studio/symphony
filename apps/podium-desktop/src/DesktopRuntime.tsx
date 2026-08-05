@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { App } from "./App";
+import { TauriDesktopHost } from "./TauriDesktopHost";
 import type {
   DesktopCommand,
   DesktopCommandResult,
@@ -27,9 +28,8 @@ const roleDefaults = {
 
 function binding(overrides: Partial<ProjectBindingView>): ProjectBindingView {
   return {
-    id: "binding-symphony",
+    id: "project-symphony",
     projectId: "project-symphony",
-    projectName: "Symphony",
     routingLabel: "core",
     repositoryPath: "~/Code/acme/symphony",
     baseBranch: "main",
@@ -43,9 +43,8 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
   const observedAt = now();
   const bindings = [
     binding({
-      id: "binding-symphony",
+      id: "project-symphony",
       projectId: "project-symphony",
-      projectName: "Symphony",
       routingLabel: "core",
       repositoryPath: "~/Code/acme/symphony",
       baseBranch: "main",
@@ -55,9 +54,8 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       execute_reasoning_effort: "high",
     }),
     binding({
-      id: "binding-console",
+      id: "project-console",
       projectId: "project-console",
-      projectName: "Operator Console",
       routingLabel: "console",
       repositoryPath: "~/Code/acme/console",
       baseBranch: "trunk",
@@ -70,7 +68,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
     slots: [
       {
         slotId: "slot-1",
-        bindingId: "binding-symphony",
+        bindingId: "project-symphony",
         root: {
           rootId: "root-101",
           identifier: "SYM-101",
@@ -85,7 +83,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       },
       {
         slotId: "slot-2",
-        bindingId: "binding-symphony",
+        bindingId: "project-symphony",
         root: {
           rootId: "root-102",
           identifier: "SYM-102",
@@ -100,7 +98,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       },
       {
         slotId: "slot-3",
-        bindingId: "binding-console",
+        bindingId: "project-console",
         root: {
           rootId: "root-201",
           identifier: "OPS-201",
@@ -115,7 +113,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       },
       {
         slotId: "slot-4",
-        bindingId: "binding-console",
+        bindingId: "project-console",
         root: null,
         processState: "terminal",
         recentEvent: "Slot is available",
@@ -138,7 +136,7 @@ export class MemoryDesktopHost implements DesktopHost {
     this.state = structuredClone(initialState);
   }
 
-  getState(): DesktopState {
+  async getState(): Promise<DesktopState> {
     return structuredClone(this.state);
   }
 
@@ -151,18 +149,29 @@ export class MemoryDesktopHost implements DesktopHost {
 }
 
 export function DesktopRuntime() {
-  const host = useMemo(() => new MemoryDesktopHost(), []);
-  const [state, setState] = useState<DesktopState>(() => host.getState());
+  const host = useMemo<DesktopHost>(() => isTauri() ? new TauriDesktopHost() : new MemoryDesktopHost(), []);
+  const [state, setState] = useState<DesktopState>({ kind: "loading", objectLabel: "Podium state" });
+  const refresh = useCallback(async () => setState(await host.getState()), [host]);
+  useEffect(() => {
+    void refresh();
+    if (!isTauri()) return;
+    const timer = window.setInterval(() => void refresh(), 2_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
   const onCommand = useCallback(
     async (command: DesktopCommand) => {
       const result = await host.execute(command);
-      setState(host.getState());
+      await refresh();
       return result;
     },
-    [host],
+    [host, refresh],
   );
 
   return <App initialState={state} onCommand={onCommand} />;
+}
+
+function isTauri(): boolean {
+  return "__TAURI_INTERNALS__" in window;
 }
 
 type AppliedCommand =
@@ -199,6 +208,16 @@ function applyCommand(state: DesktopState, command: DesktopCommand): AppliedComm
     return { kind: "confirmed", state: next };
   }
 
+  if (command.kind === "delete_binding") {
+    if (!next.overview.bindings.some((entry) => entry.id === command.bindingId)) {
+      return { kind: "rejected", sanitizedReason: "That binding no longer exists." };
+    }
+    next.overview.bindings = next.overview.bindings.filter((entry) => entry.id !== command.bindingId);
+    next.overview.slots = next.overview.slots.filter((entry) => entry.bindingId !== command.bindingId);
+    next.overview.observedAt = observedAt;
+    return { kind: "confirmed", state: next };
+  }
+
   if (command.kind === "start_binding" || command.kind === "stop_binding") {
     if (!next.overview.bindings.some((entry) => entry.id === command.bindingId)) {
       return { kind: "rejected", sanitizedReason: "That binding no longer exists." };
@@ -218,26 +237,13 @@ function applyCommand(state: DesktopState, command: DesktopCommand): AppliedComm
     return { kind: "confirmed", state: next };
   }
 
-  const slotIndex = next.overview.slots.findIndex((entry) => entry.slotId === command.slotId);
-  if (slotIndex < 0) return { kind: "rejected", sanitizedReason: "That Conductor slot no longer exists." };
-  const starting = command.kind === "start_slot";
-  const slot = next.overview.slots[slotIndex];
-  if (!slot) return { kind: "rejected", sanitizedReason: "That Conductor slot no longer exists." };
-  next.overview.slots[slotIndex] = {
-    ...slot,
-    processState: starting ? "running" : "terminal",
-    recentEvent: starting ? "Root assignment started" : "Root assignment stopped",
-    observedAt,
-  };
-  next.overview.observedAt = observedAt;
-  return { kind: "confirmed", state: next };
+  return { kind: "rejected", sanitizedReason: "Unsupported Desktop command." };
 }
 
 function normalizeBinding(input: ProjectBindingDraftView | ProjectBindingView, fallbackId: string): ProjectBindingView {
   return {
     id: input.id ?? fallbackId,
     projectId: input.projectId.trim(),
-    projectName: input.projectName.trim(),
     routingLabel: input.routingLabel.trim(),
     repositoryPath: input.repositoryPath.trim(),
     baseBranch: input.baseBranch.trim(),
@@ -260,7 +266,7 @@ function cleanOptional(value: string | null | undefined): string | null {
 }
 
 function validateBinding(value: ProjectBindingView): string | undefined {
-  if (!value.projectId || !value.projectName || !value.routingLabel) return "Project, name, and routing label are required.";
+  if (!value.projectId || !value.routingLabel) return "Project ID and routing label are required.";
   if (!value.repositoryPath || !value.baseBranch) return "Repository path and base branch are required.";
   if (!Number.isInteger(value.concurrency) || value.concurrency < 1) return "Concurrency must be a positive whole number.";
   return undefined;

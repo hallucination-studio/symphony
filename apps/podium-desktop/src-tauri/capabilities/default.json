@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Static Podium Desktop shell capability set",
+  "description": "Podium Desktop local management capability set",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

@@ -69,7 +69,7 @@ export function OverviewPage({
               {view.bindings.map((binding) => (
                 <li key={binding.id}>
                   <div>
-                    <strong>{binding.projectName}</strong>
+                    <strong>{binding.projectId}</strong>
                     <span>
                       {binding.routingLabel} · {summarizePath(binding.repositoryPath)} · {binding.baseBranch}
                     </span>

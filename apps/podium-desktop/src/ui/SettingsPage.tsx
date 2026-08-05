@@ -11,7 +11,6 @@ type BindingFormState = Omit<ProjectBindingView, "id"> & { id?: string };
 
 const blankBinding = (): BindingFormState => ({
   projectId: "",
-  projectName: "",
   routingLabel: "",
   repositoryPath: "",
   baseBranch: "main",
@@ -91,6 +90,21 @@ export function SettingsPage({
     }
   }
 
+  async function removeBinding() {
+    if (!editingId || pending || !window.confirm("Delete this Project Binding? Running Conductors will be stopped.")) return;
+    setPending(true);
+    setError(undefined);
+    const result = await onCommand({ kind: "delete_binding", bindingId: editingId });
+    if (result.kind === "rejected") {
+      setError(result.sanitizedReason);
+    } else {
+      setForm(undefined);
+      setEditingId(undefined);
+      setMessage("Binding deleted.");
+    }
+    setPending(false);
+  }
+
   return (
     <>
       <PageHeading
@@ -113,7 +127,7 @@ export function SettingsPage({
               {bindings.map((binding) => (
                 <li key={binding.id}>
                   <div>
-                    <strong>{binding.projectName}</strong>
+                    <strong>{binding.projectId}</strong>
                     <span>
                       <span className="mono">{binding.id}</span> · {binding.routingLabel} · {binding.repositoryPath}
                     </span>
@@ -142,15 +156,6 @@ export function SettingsPage({
                     required
                     value={form.projectId}
                     onChange={(event) => updateField("projectId", event.target.value)}
-                  />
-                </label>
-                <label>
-                  Project name
-                  <input
-                    name="projectName"
-                    required
-                    value={form.projectName}
-                    onChange={(event) => updateField("projectName", event.target.value)}
                   />
                 </label>
                 <label>
@@ -208,6 +213,11 @@ export function SettingsPage({
                   {pending && <span className="button-spinner" aria-hidden="true" />}
                   {pending ? "Saving…" : "Save binding"}
                 </button>
+                {editingId && (
+                  <button className="button" type="button" disabled={pending} onClick={() => void removeBinding()}>
+                    Delete binding
+                  </button>
+                )}
               </div>
             </form>
           </section>
@@ -276,7 +286,6 @@ function toForm(binding: ProjectBindingView): BindingFormState {
 function toCommandBinding(form: BindingFormState): ProjectBindingDraftView {
   return {
     projectId: form.projectId.trim(),
-    projectName: form.projectName.trim(),
     routingLabel: form.routingLabel.trim(),
     repositoryPath: form.repositoryPath.trim(),
     baseBranch: form.baseBranch.trim(),

@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-backend/
+target/
+src-tauri/gen/
 *.tsbuildinfo
 .env
 workspaces/

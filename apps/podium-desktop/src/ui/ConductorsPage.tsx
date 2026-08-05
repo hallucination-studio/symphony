@@ -36,7 +36,7 @@ export function ConductorsPage({
     <>
       <PageHeading
         title="Conductors"
-        description="Start and stop Project Bindings and their Root assignments."
+        description="Start and stop Project Bindings; the scheduler owns Root assignments."
         headingRef={headingRef}
       />
       <div className="page-stack">
@@ -57,7 +57,7 @@ export function ConductorsPage({
                 return (
                   <li key={binding.id}>
                     <div>
-                      <strong>{binding.projectName}</strong>
+                      <strong>{binding.projectId}</strong>
                       <span>
                         <span className="mono">{binding.id}</span> · {binding.routingLabel} · {summarizePath(binding.repositoryPath)} · {binding.baseBranch} · {binding.concurrency} slots
                       </span>
@@ -106,14 +106,12 @@ export function ConductorsPage({
             <ul className="plain-list" aria-label="Conductor slots">
               {slots.map((slot) => {
                 const binding = bindings.find((entry) => entry.id === slot.bindingId);
-                const canStop = slot.processState === "running" || slot.processState === "starting" || slot.processState === "queued";
-                const action = `${slot.slotId}-${canStop ? "stop" : "start"}`;
                 return (
                   <li key={slot.slotId}>
                     <div>
                       <strong>{slot.root ? `${slot.root.identifier} · ${slot.root.title}` : "Unassigned slot"}</strong>
                       <span>
-                        {binding?.projectName ?? "Binding unavailable"} · Priority {slot.root?.priority ?? "-"} · {slot.recentEvent}
+                        {binding?.projectId ?? "Binding unavailable"} · Priority {slot.root?.priority ?? "-"} · {slot.recentEvent}
                       </span>
                       {slot.root && (
                         <span className="mono">
@@ -124,16 +122,6 @@ export function ConductorsPage({
                     </div>
                     <div className="button-row">
                       <ProcessStateBadge state={slot.processState} />
-                      <button
-                        className="button compact"
-                        type="button"
-                        disabled={pendingAction !== undefined || slot.root === null}
-                        aria-busy={pendingAction === action}
-                        onClick={() => void runCommand(action, canStop ? { kind: "stop_slot", slotId: slot.slotId } : { kind: "start_slot", slotId: slot.slotId })}
-                      >
-                        {pendingAction === action && <span className="button-spinner" aria-hidden="true" />}
-                        {canStop ? "Stop assignment" : "Start assignment"}
-                      </button>
                     </div>
                   </li>
                 );
