@@ -5,7 +5,6 @@ import {
   createProductionLinearGateway,
   LinearGraphqlGateway,
 } from "./LinearGraphqlGateway.js";
-import { ROOT_STATE_COMMENT_MARKER } from "./LinearMarkers.js";
 
 type LinearGraphqlTransport = ConstructorParameters<typeof LinearGraphqlGateway>[0];
 
@@ -62,11 +61,6 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
           body: "First input",
           createdAt: "2026-08-05T00:00:00.000Z",
           user: { id: "user-id" },
-        }, {
-          id: "state-comment",
-          body: `${ROOT_STATE_COMMENT_MARKER}\n\nstate`,
-          createdAt: "2026-08-05T00:01:00.000Z",
-          user: { id: "harness-id" },
         },
       ], pageInfo: { hasNextPage: false, endCursor: null } } } },
     };
@@ -98,6 +92,7 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
       } } },
     };
     if (operation === "UpdateIssueStatus") return { data: { issueUpdate: { success: true } } };
+    if (operation === "UpdateIssueDescription") return { data: { issueUpdate: { success: true } } };
     if (operation === "CreateComment") return { data: { commentCreate: { success: true, comment: {
       id: "execute-result-id",
       body: "Process completed",
@@ -105,7 +100,6 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
       issue: { id: "execute-id" },
       user: { id: "harness-id" },
     } } } };
-    if (operation === "UpdateComment") return { data: { commentUpdate: { success: true } } };
     throw new Error(`unexpected operation ${operation}`);
   };
   const gateway = new LinearGraphqlGateway(transport);
@@ -114,14 +108,7 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
   assert.equal((await gateway.create_workflow_state({
     team_id: "team-id", name: "In Review", type: "started", color: "#5E6AD2",
   })).id, "state-review");
-  assert.deepEqual(await gateway.list_root_comments_after("root-id", "comment-1"), [{
-    id: "state-comment",
-    issue_id: "root-id",
-    body: `${ROOT_STATE_COMMENT_MARKER}\n\nstate`,
-    creator_id: "harness-id",
-    created_at: "2026-08-05T00:01:00.000Z",
-  }]);
-  assert.equal((await gateway.find_root_state_comment("root-id"))?.id, "state-comment");
+  assert.deepEqual(await gateway.list_root_comments_after("root-id", "comment-1"), []);
   assert.deepEqual(await gateway.list_unfinished_descendants("root-id"), [
     { id: "cycle-id", status: "active" },
   ]);
@@ -133,21 +120,20 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
     status_id: "state-todo",
   })).id, "execute-id");
   await gateway.update_issue_status("execute-id", "state-done");
+  await gateway.update_issue_description("execute-id", "Frozen execute updated");
   assert.equal((await gateway.create_comment("execute-id", "Process completed")).id, "execute-result-id");
-  await gateway.update_comment("execute-result-id", "Process completed in 10ms");
 
   assert.deepEqual(operations, [
     "ListTeamStates",
     "CreateWorkflowState",
-    "ListIssueComments",
     "ListIssueComments",
     "ListIssueChildren",
     "ListIssueChildren",
     "ListIssueChildren",
     "CreateIssue",
     "UpdateIssueStatus",
+    "UpdateIssueDescription",
     "CreateComment",
-    "UpdateComment",
   ]);
 });
 

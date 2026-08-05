@@ -41,12 +41,11 @@ export interface LinearGateway {
   list_team_states(team_id: string): Promise<readonly LinearWorkflowState[]>;
   create_workflow_state(request: LinearCreateWorkflowStateRequest): Promise<LinearWorkflowState>;
   list_root_comments_after(root_id: string, cursor?: string): Promise<readonly LinearComment[]>;
-  find_root_state_comment(root_id: string): Promise<LinearComment | null>;
   list_unfinished_descendants(root_id: string): Promise<readonly LinearUnfinishedDescendant[]>;
   create_issue(request: LinearCreateIssueRequest): Promise<LinearIssue>;
   update_issue_status(issue_id: string, status_id: string): Promise<void>;
+  update_issue_description(issue_id: string, description: string): Promise<void>;
   create_comment(issue_id: string, body: string): Promise<LinearComment>;
-  update_comment(comment_id: string, body: string): Promise<void>;
   upload_file(
     filename: string,
     content_type: LinearUploadContentType,

@@ -97,14 +97,15 @@ test("serial fake Linear and Agent flow uses real filesystem/Git and publishes o
   const auditIssueId = result.evidence.publicState.cycles[0].audit_issue.id;
   const cycleId = result.evidence.publicState.cycles[0].id;
   const comments = result.evidence.publicState.comments;
-  const executorComment = comments.filter((comment) => comment.issue_id === executeIssueId)
-    .at(-1)?.body ?? "";
-  assert.match(executorComment, /^## Summary\n/u);
-  assert.match(executorComment, /## File Changes/u);
-  assert.match(executorComment, /result\.txt \(\+1\/-0 lines\)/u);
-  const auditComment = comments.filter((comment) => comment.issue_id === auditIssueId).at(-1)?.body ?? "";
-  assert.match(auditComment, /^verdict: accepted\n/u);
-  assert.match(auditComment, /## Scope Audited[\s\S]*## Implementation Review[\s\S]*## Findings/u);
+  const executorDescription = result.evidence.publicState.cycles[0].execute_issue.description;
+  assert.match(executorDescription, /## Summary\n/u);
+  assert.match(executorDescription, /## File Changes/u);
+  assert.match(executorDescription, /result\.txt \(\+1\/-0 lines\)/u);
+  const auditDescription = result.evidence.publicState.cycles[0].audit_issue.description;
+  assert.match(auditDescription, /verdict: accepted\n/u);
+  assert.match(auditDescription, /## Scope Audited[\s\S]*## Implementation Review[\s\S]*## Findings/u);
+  assert.equal(comments.some((comment) => comment.issue_id === executeIssueId), false);
+  assert.equal(comments.some((comment) => comment.issue_id === auditIssueId), false);
   const cycleComments = comments.filter((comment) => comment.issue_id === cycleId).map((comment) => comment.body);
   assert.equal(cycleComments.some((body) => body.includes("## Scope Audited")), false);
   assert.match(cycleComments.at(-1) ?? "", /- Audit result: \[cycle-001-audit-result\.json\]\(https:\/\/linear\.example\/upload\/1\)/u);

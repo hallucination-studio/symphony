@@ -13,10 +13,10 @@ finalizer code and attempt to keep both paths valid.
 | Order | Slice | Required outcome | Check |
 |---|---|---|---|
 | 1 | delete obsolete implementation and tests | remove every system listed in the permanent subtraction gate and its field-shaped tests | removed-symbol and dependency search |
-| 2 | minimal contracts | Root state with parsed `latest_audit`, CycleSpec, exact role Markdown comments, one typed Audit JSON upload, Performer, Gateway, workspace, and PR values | focused contract tests |
+| 2 | minimal contracts | Root state/`latest_audit`, managed snapshot, terminal role descriptions, Cycle history, typed Audit JSON, Performer, Gateway, workspace, and PR values | focused contract tests |
 | 3 | Linear boundary and CLI | injectable Gateway, GraphQL adapter, and one Root-run command | fake Gateway and built CLI scenarios |
 | 4 | supplied Root resources | validate and bind one caller-supplied workspace and external run directory | real Git and filesystem boundary scenario |
-| 5 | Root Reconcile and Cycle projection | one frozen small-step contract, role Markdown comments, one typed Audit JSON upload, and exact Root/Cycle/Execute/Audit hierarchy | semantic and fake Linear tests |
+| 5 | Root Reconcile and Cycle projection | frozen small-step contract, managed snapshot, terminal role reports, Cycle history, typed Audit JSON, and Root/Cycle/Execute/Audit hierarchy | semantic and fake Linear tests |
 | 6 | Execute and Audit | fresh workspace-write Execute and distinct fresh read-only Audit each deliver one final Markdown file; Audit remains sole semantic authority, including failed Execute inspection | real Agent CLI boundary tests |
 | 7 | Root State and Inbox | save every complete terminal Audit as `latest_audit`; promote only `accepted` Audits; checkpoint supplied paths, task state, pending finding, and comment cursor | focused transaction scenarios |
 | 8 | terminal delivery function | final Inbox check, one commit, one push, one `gh` PR attempt; PR unavailable records the pushed branch, then Root Done | temporary remote and fake PR CLI scenario |
@@ -82,7 +82,7 @@ Only these direct replacements are allowed:
 
 | Removed complexity | V1 replacement |
 |---|---|
-| revision, seal, digest, mutation comparison | none; Root description plus audited Root State |
+| revision, seal, digest, mutation comparison | none; immutable Root requirement plus managed snapshot and audited Root State |
 | execution graph, Plan, multi-Work | one serial immutable Cycle with Execute then Audit |
 | recovery, registry, generation, quarantine | cancel unfinished descendants, add Harness feedback, run fresh Reconcile |
 | delivery subsystem and finalizer | one fixed Conductor commit/push/create-PR function |
@@ -106,12 +106,13 @@ only as evidence-path compatibility. They are not target domain concepts.
 | minimal launch | the only public execution command accepts optional `--agent` (default `codex`), one Root, one supplied workspace, and one supplied external run directory |
 | visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Execute/Audit transition follows the Workflow Model matrix |
 | exact topology | Linear shows `Root -> Cycle -> Execute + Audit`; at most one Cycle is active |
+| visible snapshots | Root description has exactly one managed snapshot block refreshed with a local RFC3339 `Updated at` line; Execute/Audit each receive exactly one terminal report append with one local RFC3339 `Updated at` line |
 | frozen input | a Root comment arriving during Execute/Audit appears only in the next Cycle |
 | role isolation | Execute can write; Audit is a different fresh session and cannot write, with independent role capabilities/providers and no shared transcript |
 | failed Execute | Audit still runs against the real residual workspace; Execute output is neither parsed nor supplied as evidence |
 | private diagnostics | bounded raw Agent JSONL/stderr and causal error context remain only under the external run directory; refs/thread IDs never enter Audit, Root, or Linear |
 | trust gate | only an `accepted` Audit adopts the Auditor-supported task state and optional pending finding; Execute exit facts cannot pre-judge the result |
-| Markdown/JSON result projection | Executor Markdown is copied only to Execute, Audit Markdown only to Audit; typed Audit JSON is written/re-read and uploaded to Cycle; Reconcile sees parsed fields only in `latest_audit` |
+| Markdown/JSON result projection | role Markdown appends once; typed Audit JSON is the only Cycle upload; history uses Linear `createdAt`; Reconcile sees only parsed `latest_audit` |
 | comment transaction | failed family creation does not consume selected Root comments or start Execute |
 | final delivery | completion with no new Root input creates one commit, pushes one branch, prefers a `gh` PR, records its URL or the pushed branch, then sets Root Done |
 | PR failure | any commit/push/PR error leaves Root open and workspace intact; no automatic retry or recovery runs |

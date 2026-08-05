@@ -16,7 +16,7 @@ flowchart TD
   Reconcile --> Cycle[Immutable CycleSpec]
   Cycle --> Execute[Execute Issue<br/>fresh workspace-write session]
   Execute --> Audit[Audit Issue<br/>fresh read-only session]
-  Audit --> Result[Exact role comments + uploaded Audit JSON]
+  Audit --> Result[Exact role descriptions + Cycle history + uploaded Audit JSON]
   Result --> State[Trusted fields in Root State]
   State --> Reconcile
   Inbox[New Root comments] --> Reconcile
@@ -39,7 +39,7 @@ update the trusted fields in Root State.
 |---|---|---|
 | workflow | [Workflow Model](workflow-model.md) | topology, canonical Linear statuses, lifecycle, outcomes, routing, failure, persistence |
 | Root semantics | [Root Reconciliation](root-reconciliation.md) | trusted Root State fields, Inbox, next-Cycle choice |
-| Linear documents | [Root Issue Model](root-issue.md) | Issue hierarchy, frozen descriptions, comments |
+| Linear documents | [Root Issue Model](root-issue.md) | Issue hierarchy, managed descriptions, comments |
 | runtime | [Conductor](conductor.md) | CLI, serial loop, Cycle lifecycle, shutdown |
 | process boundary | [Performer](performer.md) | mechanical Agent CLI launch and process capture |
 | provider boundary | [Task Management](task-management.md) | injectable Linear Gateway and projection |
@@ -65,8 +65,8 @@ update the trusted fields in Root State.
 |---|---|
 | one Root and at most one active Cycle | concurrent Cycles or multiple Roots per process |
 | exactly one Execute and one Audit per Cycle | planning stage, DAG, parallel work, or subagents |
-| append-only role and Cycle result comments | changing a Cycle title or description after creation |
-| one mutable Harness status comment on Root | workflow database or full trajectories in Linear |
+| one terminal report appended to each Execute/Audit description, plus append-only Cycle history/result comments | changing a Cycle title or description after creation |
+| one exact Harness-managed checkpoint suffix on Root description | treating generated state as Root requirement or introducing a second checkpoint |
 | five canonical Linear statuses shared by Root and descendants | inferred mappings or editing/deleting user-defined state definitions |
 | new Root comments become next-Reconcile input | old-comment replay or descendant comments as instructions |
 | Root State locates the existing workspace after restart | Agent-session resume, state reconstruction from children, or replacement workspace |
@@ -75,21 +75,25 @@ update the trusted fields in Root State.
 | one terminal commit/push/PR function before Root Done | delivery subsystem, retry/finalizer/convergence, automatic merge |
 | one public Root-run command | one-shot role commands or any second Linear mutation path |
 
-The harness does not modify a created Cycle, Execute, or Audit description and
-does not detect manual edits. Root Reconcile uses the Root description, Root
-State (including the parsed `latest_audit` fields), and new Root comments, with
-no workspace access. Each Execute and Audit prompt requires its role to finish
-with one Markdown result at the prescribed local `cycle-NNN-*-result.md` path.
-Conductor copies the exact Executor Markdown to the Execute comment and exact
-Audit Markdown to the Audit comment; neither role report is copied to the Cycle.
+The harness never modifies a created Cycle title or description and does not
+detect unrelated manual edits. It owns only the exact Root snapshot block and
+one terminal append to each Execute/Audit description. Root Reconcile receives
+the Root requirement after the snapshot block is stripped, Root State (including
+the parsed `latest_audit` fields), and new Root comments, with no workspace
+access. Each Execute and Audit prompt requires its role to finish with one
+Markdown result at the prescribed local `cycle-NNN-*-result.md` path. Conductor
+appends the exact Executor Markdown to the Execute description and exact Audit
+Markdown to the Audit description, each with one local RFC3339 `Updated at` line;
+neither role report is copied to the Cycle.
 There is no second summarization or format-repair Agent call.
 
 Executor Markdown is untrusted process output and remains display-only. Audit
 Markdown is the sole semantic result. Conductor parses its validated fields,
 serializes them to `cycle-NNN-audit-result.json`, reads that file back and
 validates it, writes the re-read value to `RootState.latest_audit`, and uploads
-only that JSON file as `application/json`. The Cycle comment contains a link to
-the uploaded file or the current upload error. Upload failure is visible but
+only that JSON file as `application/json`. Cycle comments contain append-only
+lifecycle, decision, terminal, and upload facts plus a link to the uploaded file
+or the current upload error. Upload failure is visible but
 does not change the Audit verdict. Reconcile never reads the Cycle DAG, Execute
 or Audit descriptions, comments, reports, or transcripts.
 

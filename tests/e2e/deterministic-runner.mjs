@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 import { EvidenceReader } from "./evidence-reader.mjs";
+import { formatLocalTimestamp } from "./linear-driver.mjs";
 
 export async function runDeterministicScenario({ world, linear, agent, createPullRequest }) {
   const root = await linear.readRoot();
@@ -11,6 +12,18 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
     boundaries: "Only one result file may change.",
     consumedCommentIds: comments.map((comment) => comment.id),
   });
+  await linear.createComment(cycle.id, [
+    "# Symphony Harness: Reconcile",
+    "",
+    "### Why Continue",
+    "The requested result file is not yet independently verified.",
+    "",
+    "### Evidence",
+    "No accepted Audit has verified the current workspace.",
+    "",
+    "### Next Cycle",
+    "Create and audit the requested result file.",
+  ].join("\n"));
   const executeRequest = Object.freeze({
     root_id: root.id,
     cycle_id: cycle.id,
@@ -26,7 +39,10 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
     launch_status: execute.launch_status,
     ...(execute.exit_code === undefined ? {} : { exit_code: execute.exit_code }),
   });
-  await linear.createComment(cycle.execute_issue?.id ?? `execute-${cycle.id}`, executorMarkdown || "Executor result missing.");
+  await linear.updateIssueDescription(
+    cycle.execute_issue?.id ?? `execute-${cycle.id}`,
+    `${cycle.execute_issue?.description ?? "## Role\n\nExecute"}\n\n## Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${executorMarkdown || "Executor result missing."}`,
+  );
   const auditRequest = Object.freeze({
     root_id: root.id,
     cycle_id: cycle.id,
@@ -43,7 +59,10 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
   await writeFile(auditJsonPath, `${JSON.stringify(auditResult)}\n`, { encoding: "utf8", mode: 0o600 });
   const persistedAudit = JSON.parse(await readFile(auditJsonPath, "utf8"));
   await linear.recordAudit(cycle.id, persistedAudit);
-  await linear.createComment(cycle.audit_issue?.id ?? `audit-${cycle.id}`, auditMarkdown || "Audit result missing.");
+  await linear.updateIssueDescription(
+    cycle.audit_issue?.id ?? `audit-${cycle.id}`,
+    `${cycle.audit_issue?.description ?? "## Role\n\nAudit"}\n\n## Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${auditMarkdown || "Audit result missing."}`,
+  );
   await writeFile(
     `${world.runDirectory}/deterministic-evidence.jsonl`,
     `${JSON.stringify({ event: "execute", launch_status: execute.launch_status })}\n${JSON.stringify({ event: "audit", verdict: auditResult.verdict })}\n`,

@@ -11,17 +11,21 @@ Every scenario states:
 ```text
 given: Root, workspace, run directory, and provider state
 when: one public `run` launch or one internal scenario action
-then: public Root state, workspace, process, role result comments, Cycle file
-      link/upload outcome, and pull-request outcome
+then: public Root state, Root managed snapshot, workspace, process, terminal
+      role descriptions, Cycle history/result comments, Cycle file link/upload
+      outcome, and pull-request outcome
 cleanup: only resources allocated by that scenario
 ```
 
 Assertions use public facts. They do not assert private call ordering,
 unbounded process output, full Agent transcripts, provider payloads, raw
 diagnostic file bytes, or commit identifiers. Exact role Markdown is public by
-design: tests compare it only at the owned role comments. The typed Audit JSON
+design: tests compare it only at the owned role descriptions. The typed Audit JSON
 file is checked as the single Cycle upload, including `application/json` and
-its returned file URL.
+its returned file URL. Root snapshots are checked for exact markers and a local
+RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. Cycle comment
+ordering uses Linear `createdAt`; tests do not add or require a duplicate body
+timestamp.
 
 ## Scenario Kit
 
@@ -30,7 +34,7 @@ The reusable kit lives under `tests/e2e/` and keeps boundary ownership explicit.
 | Component | Responsibility |
 | --- | --- |
 | `ScenarioWorld` | Creates one isolated workspace, an external run directory, a temporary bare remote, and deterministic Root identifiers. It uses real filesystem and Git operations. |
-| `LinearDriver` | Holds normalized Root, comments, Root State (including parsed `latest_audit`), Cycle records, exact role comments, uploaded-file metadata, and public status in an in-memory provider double. |
+| `LinearDriver` | Holds normalized Root, managed description regions, comments, Root State (including parsed `latest_audit`), Cycle records, exact terminal role descriptions, Cycle history/result comments, uploaded-file metadata, and public status in an in-memory provider double. |
 | `AgentDriver` | Supplies scripted Execute/Audit Markdown files and Reconcile outcomes, and records only bounded launch facts. Execute Markdown remains untrusted. |
 | `EvidenceReader` | Reads public Linear facts, bounded workspace status/diff evidence, and private run-directory file metadata; raw file bytes are never returned. |
 
@@ -78,18 +82,25 @@ not public request fields.
 - one frozen Cycle is created from Root input;
 - Execute uses workspace-write access and writes one untrusted final Markdown file;
 - a fresh read-only Audit inspects the real workspace;
-- the exact Executor Markdown is copied to the Execute comment without parsing;
-- the exact Audit Markdown is copied byte-for-byte to the Audit comment only;
+- the exact Executor Markdown is appended once to the Execute description with
+  one local RFC3339 `Updated at` line, without parsing;
+- the exact Audit Markdown is appended once to the Audit description with one
+  local RFC3339 `Updated at` line;
 - the parsed Audit value is written to `cycle-NNN-audit-result.json`, read back
   and validated, then uploaded once as `application/json` for the Cycle;
-- the Cycle comment records only mechanical terminal fields and a Markdown file
-  link to the uploaded JSON or the current upload error (first 50 characters);
+- Cycle history/result comments record transitions, decisions, terminal fields,
+  and a Markdown file link to the uploaded JSON or the current upload error
+  (first 50 characters); their event time is Linear `createdAt`;
   an upload failure does not change the Audit verdict;
 - Root Reconcile uses the Execute role configuration while Audit may use an
   independent provider, model, reasoning effort, key, and base URL;
-- every Reconcile decision creates one human-readable Root Markdown comment;
+- every Reconcile decision replaces the latest human-readable report in the
+  managed Root suffix; `create_cycle` also copies it once to the new Cycle;
   completion reports use semantic created/updated/deleted paths, whole-worktree
   line deltas, verification evidence, and short exact token totals;
+- every durable Root projection refreshes exactly one managed description block
+  with a local RFC3339 `Updated at` line, while the immutable requirement bytes
+  remain unchanged;
 - an accepted Audit promotes task state and permits one terminal commit, push,
   and injected pull-request result;
 - timed-out Execute facts do not bypass Audit, and failure retains the partial
@@ -98,9 +109,10 @@ not public request fields.
 This layer is local, deterministic, and runs without provider or Agent
 credentials.
 
-The reusable result assertion checks role-comment byte equality, the exact JSON
-filename/content type and re-read contents, the one uploaded-file URL/error,
-and the parsed `latest_audit` verdict. Golden also validates the Executor's
+The reusable result assertion checks the role-description structure and content,
+accepting Linear's equivalent Markdown list-marker normalization. It also checks
+the exact JSON filename/content type and re-read contents, the one uploaded-file
+URL/error, and the parsed `latest_audit` verdict. Golden validates the Executor's
 human-facing `Created`/`Updated`/`Deleted` file-change sections and rejects raw
 Git porcelain status lines; this remains a display-format check, not semantic
 task evidence. It deliberately does not inspect private JSONL/stderr bytes.
@@ -173,9 +185,11 @@ use `SYMPHONY_E2E_EXECUTE_*`/
 user's local configuration and authentication. No test assumes a model,
 reasoning effort, or capability matrix supplied by Symphony.
 
-The golden visible-tree queries also fetch each role's result comments and the
-Cycle Result comment plus Root Reconcile reports. They check the frozen title rules, exact Executor/Audit
-Markdown placement, and one visible `[cycle-NNN-audit-result.json](<assetUrl>)`
+The golden visible-tree queries also fetch the Root managed suffix, each role's
+terminal description, and Cycle rationale/result comments. They check the
+frozen title rules, exact Executor/Audit Markdown placement, one local RFC3339
+`Updated at` line per terminal role description, and one visible
+`[cycle-NNN-audit-result.json](<assetUrl>)`
 file link in the mechanical Cycle Result. The real Gateway's successful JSON
 upload is therefore proven at the public Linear boundary without assuming a
 provider file-list schema. Golden also requires one continue report per Cycle
@@ -218,7 +232,7 @@ The suite covers these observable outcomes:
 | public launch | only `run` accepts the Root launch contract |
 | successful serial flow | accepted Audit, committed workspace, pushed temporary branch, and one PR URL |
 | failed Execute | fresh Audit still runs and partial files remain |
-| Markdown/JSON projection | Executor Markdown only on Execute; Audit Markdown only on Audit; re-read typed Audit JSON is the only Cycle upload; parsed fields enter `latest_audit` and Reconcile ignores the Cycle DAG |
+| Markdown/JSON projection | Executor Markdown only in the Execute terminal description; Audit Markdown only in the Audit terminal description; re-read typed Audit JSON is the only Cycle upload; Cycle history comments use Linear `createdAt`; parsed fields enter `latest_audit` and Reconcile ignores the Cycle DAG |
 | uploaded-file failure | Cycle Result exposes the current upload error (first 50 characters) while the Audit verdict and `latest_audit` remain unchanged |
 | empty or invalid external setup | boundary result is `blocked` with a bounded reason |
 | credential partition | secrets are available only to their owning real boundary and never emitted |
@@ -238,5 +252,6 @@ Markdown as semantic evidence, upload JSONL/stderr, or use uploaded-file
 success as a semantic gate. Executor Markdown receives only the fixed
 human-facing shape check described above; Audit Markdown is parsed once into a
 typed result, its re-read JSON is the only Cycle progression file, and Linear
-must remain an exact, visible projection of the role comments and JSON file;
+must remain an exact, visible projection of the role descriptions, Cycle history
+comments, Root snapshot, and JSON file;
 diagnostic evidence stays private in the caller-owned run directory.

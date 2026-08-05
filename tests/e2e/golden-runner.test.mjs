@@ -23,6 +23,7 @@ import {
   resolveGoldenLaunchArguments,
   runGoldenScenario,
 } from "./golden-runner.mjs";
+import { formatLocalTimestamp } from "./linear-driver.mjs";
 
 test("golden resolves only a credential-free GitHub origin", () => {
   assert.equal(
@@ -359,7 +360,8 @@ test("golden visible tree requires Done Root, Cycle, Execute, and Audit issues",
   );
 });
 
-test("golden result comments prove role Markdown comments and one visible Audit JSON file", () => {
+test("golden result projection uses role descriptions and one visible Audit JSON file", () => {
+  const updatedAt = formatLocalTimestamp();
   const executorMarkdown = [
     "## Summary", "Created the golden file.", "", "## File Changes", "### Created",
     "- symphony-golden.txt (+1/-0 lines)", "### Updated", "- README.md (+2/-1 lines)",
@@ -373,23 +375,47 @@ test("golden result comments prove role Markdown comments and one visible Audit 
     "## Task State", "The golden file is verified.", "",
   ].join("\n");
   const projection = {
+    description: [
+      "Create the requested golden file.",
+      "",
+      "# Symphony Harness: Managed Root",
+      "",
+      `Updated at: ${updatedAt}`,
+      "",
+      "## Root State",
+      "",
+      "```json",
+      '{"current_phase":"completed"}',
+      "```",
+      "",
+      "## Reconcile",
+      "",
+      "### Overview",
+      "The complete worktree satisfies the Root requirement.",
+      "",
+      "### File Changes",
+      "#### Created",
+      "- symphony-golden.txt: +1 lines",
+      "",
+      "#### Updated",
+      "- None",
+      "",
+      "#### Deleted",
+      "- None",
+      "",
+      "### Line Changes",
+      "+1 / -0 lines",
+      "",
+      "### Verification",
+      "The latest Audit accepted the complete diff.",
+      "",
+      "### Token Usage",
+      "Total tokens: 1.2k",
+      "",
+      "# Symphony Harness: End Managed Root",
+    ].join("\n"),
     comments: {
-      nodes: [
-        { body: [
-          "# Symphony Harness: Reconcile", "", "### Why Continue",
-          "The requested golden file is not yet present.", "", "### Evidence",
-          "No accepted Audit has verified the file.", "", "### Next Cycle",
-          "Create and verify the golden file.",
-        ].join("\n") },
-        { body: [
-          "# Symphony Harness: Reconcile", "", "### Overview",
-          "The complete worktree satisfies the Root requirement.", "", "### File Changes",
-          "#### Created", "- symphony-golden.txt: +1 lines", "", "#### Updated", "- None", "",
-          "#### Deleted", "- None", "", "### Line Changes", "+1 / -0 lines", "",
-          "### Verification", "The latest Audit accepted the complete diff.", "",
-          "### Token Usage", "Total tokens: 1.2k",
-        ].join("\n") },
-      ],
+      nodes: [],
       pageInfo: { hasNextPage: false },
     },
     children: {
@@ -397,6 +423,12 @@ test("golden result comments prove role Markdown comments and one visible Audit 
         title: "[Cycle 001] Create the golden file",
         comments: {
           nodes: [
+            { body: [
+              "# Symphony Harness: Reconcile", "", "### Why Continue",
+              "The requested golden file is not yet present.", "", "### Evidence",
+              "No accepted Audit has verified the file.", "", "### Next Cycle",
+              "Create and verify the golden file.",
+            ].join("\n") },
             { body: [
               "## Cycle Result",
               "- Result: succeeded",
@@ -412,14 +444,16 @@ test("golden result comments prove role Markdown comments and one visible Audit 
           nodes: [
             {
               title: "[Executor] Cycle 001",
+              description: `## Role\n\nExecute\n\n## Result\n\nUpdated at: ${updatedAt}\n\n${executorMarkdown}`,
               comments: {
-                nodes: [{ body: executorMarkdown }],
+                nodes: [],
                 pageInfo: { hasNextPage: false },
               },
             },
             {
               title: "[Audit] Cycle 001",
-              comments: { nodes: [{ body: auditMarkdown }], pageInfo: { hasNextPage: false } },
+              description: `## Role\n\nAudit\n\n## Result\n\nUpdated at: ${updatedAt}\n\n${auditMarkdown}`,
+              comments: { nodes: [], pageInfo: { hasNextPage: false } },
             },
           ],
           pageInfo: { hasNextPage: false },
@@ -429,19 +463,32 @@ test("golden result comments prove role Markdown comments and one visible Audit 
     },
   };
   assert.doesNotThrow(() => validateGoldenResultComments(projection));
+  const independentlyTimedProjection = structuredClone(projection);
+  const earlierUpdatedAt = formatLocalTimestamp(new Date(Date.now() - 60_000));
+  independentlyTimedProjection.children.nodes[0].children.nodes[0].description =
+    independentlyTimedProjection.children.nodes[0].children.nodes[0].description.replace(
+      `Updated at: ${updatedAt}`,
+      `Updated at: ${earlierUpdatedAt}`,
+    );
+  assert.notEqual(earlierUpdatedAt, updatedAt);
+  assert.doesNotThrow(() => validateGoldenResultComments(independentlyTimedProjection));
+  const linearNormalizedProjection = structuredClone(projection);
+  linearNormalizedProjection.children.nodes[0].children.nodes[0].description =
+    linearNormalizedProjection.children.nodes[0].children.nodes[0].description.replaceAll("\n- ", "\n* ");
+  assert.doesNotThrow(() => validateGoldenResultComments(linearNormalizedProjection));
   const executorFailure = structuredClone(projection);
-  executorFailure.children.nodes[0].children.nodes[0].comments.nodes[0].body =
-    "## Executor Result\n- Result: failure\n- Error: Process timed out";
+  executorFailure.children.nodes[0].children.nodes[0].description =
+    `## Role\n\nExecute\n\n## Result\n\nUpdated at: ${updatedAt}\n\n## Executor Result\n- Result: failure\n- Error: Process timed out`;
   assert.doesNotThrow(() => validateGoldenResultComments(executorFailure));
   const missingRootReport = structuredClone(projection);
-  missingRootReport.comments.nodes.pop();
+  missingRootReport.description = "Create the requested golden file.";
   assert.throws(
     () => validateGoldenResultComments(missingRootReport),
-    /golden_root_reconcile_comments_invalid/u,
+    /golden_root_description_invalid/u,
   );
   for (const rawStatus of ["?? generated.txt", " M README.md", "D obsolete.txt"]) {
     const rawProjection = structuredClone(projection);
-    rawProjection.children.nodes[0].children.nodes[0].comments.nodes[0].body += `\n${rawStatus}`;
+    rawProjection.children.nodes[0].children.nodes[0].description += `\n${rawStatus}`;
     assert.throws(
       () => validateGoldenResultComments(rawProjection),
       /golden_result_comments_projection_invalid/u,

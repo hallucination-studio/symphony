@@ -14,6 +14,7 @@ import {
   type RootWorktreeFileChange,
   type RootWorktreeSummary,
 } from "../contracts/root.js";
+import { parseLinearIssue } from "../contracts/task-management.js";
 import type { PerformerProcessResult, PerformerTokenUsage } from "../contracts/performer.js";
 import type { LinearComment } from "../contracts/task-management.js";
 import type { LinearWorkflow } from "../contracts/task-management.js";
@@ -22,7 +23,11 @@ import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js
 import type { CycleRunner, CycleRunOutcome } from "../cycle-runner/CycleRunner.js";
 import { readRootInbox } from "../linear/LinearInbox.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
-import { createRootStateComment, parseRootStateComment, updateRootStateComment } from "../linear/LinearRootState.js";
+import {
+  parseRootDescription,
+  updateRootDescription,
+} from "../linear/LinearRootState.js";
+import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
 import { GitCommand } from "../git/internal/GitCommand.js";
 
 interface Reconciler {
@@ -273,16 +278,19 @@ function renderDecisionReport(
   return report;
 }
 
-function rootDecisionComment(
+function rootDecisionReport(
   decision: RootReconcileDecision,
   summary: RootWorktreeSummary,
   tokenUsage: PerformerTokenUsage | undefined,
-): string {
-  const report = parseRootReconcileReportMarkdown(
+): MarkdownText {
+  return parseRootReconcileReportMarkdown(
     renderDecisionReport(decision, summary, tokenUsage),
     decision.kind,
   );
-  return `${ROOT_RECONCILE_COMMENT_MARKER}\n\n${report}`;
+}
+
+function rootDecisionComment(report: MarkdownText): MarkdownText {
+  return parseMarkdownText(`${ROOT_RECONCILE_COMMENT_MARKER}\n\n${report}`);
 }
 
 function matchesWorkspace(state: RootState, workspace: RootWorkspace): boolean {
@@ -335,10 +343,10 @@ export class Conductor {
     const root = await this.options.gateway.get_issue(rootReference);
     if (root.status_id === this.options.workflow.done_status_id) return { status: "done" };
 
-    // Read the Root State before resolving the supplied workspace so terminal
-    // startup gates cannot create binding files or probe the workspace.
-    const existingComment = await this.options.gateway.find_root_state_comment(root.id);
-    const existingState = existingComment === null ? undefined : parseRootStateComment(existingComment);
+    // Read the managed Root description before resolving the supplied workspace
+    // so terminal startup gates cannot create binding files or probe the workspace.
+    const rootDescription = parseRootDescription(root.description);
+    const existingState = rootDescription.state;
     let currentRootStatusId = root.status_id;
     const updateRootStatus = async (statusId: string): Promise<void> => {
       if (currentRootStatusId === statusId) return;
@@ -346,17 +354,19 @@ export class Conductor {
       currentRootStatusId = statusId;
     };
     if (
-      existingComment !== null
-      && existingState?.current_phase === "publishing"
+      existingState?.current_phase === "publishing"
       && existingState.pull_request_url === undefined
       && existingState.delivery_branch === undefined
     ) {
       const reason = "publication_outcome_unknown";
       await updateRootStatus(this.options.workflow.in_review_status_id);
-      await updateRootStateComment(
+      await updateRootDescription(
         this.options.gateway,
-        existingComment,
+        root.id,
+        rootDescription.requirement,
         withState(existingState, { current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason) }),
+        rootDescription.reconcile_report,
+        currentLinearDescriptionTimestamp(),
       );
       return { status: "needs_human", reason };
     }
@@ -373,20 +383,37 @@ export class Conductor {
     const workspace = await (typeof this.options.workspace === "function"
       ? this.options.workspace()
       : this.options.workspace);
-    let projection = existingComment === null
-      ? await createRootStateComment(this.options.gateway, root.id, parseRootState({
+    let projection = rootDescription;
+    if (projection.state === undefined) {
+      const initialState = parseRootState({
         workspace_path: workspace.workspace_path,
         run_directory: workspace.run_directory,
         root_branch: workspace.root_branch,
         current_phase: "idle",
         task_state_markdown: "No independently audited task progress yet.",
         token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-      }))
-      : Object.freeze({ comment: existingComment, state: existingState as RootState });
-    let state = projection.state;
-    const updateState = async (next: RootState): Promise<void> => {
-      projection = await updateRootStateComment(this.options.gateway, projection.comment, next);
-      state = projection.state;
+      });
+      projection = await updateRootDescription(
+        this.options.gateway,
+        root.id,
+        projection.requirement,
+        initialState,
+        undefined,
+        currentLinearDescriptionTimestamp(),
+      );
+    }
+    if (projection.state === undefined) throw new Error("linear_root_description_state_missing");
+    let state: RootState = projection.state;
+    const updateState = async (next: RootState, report = projection.reconcile_report): Promise<void> => {
+      projection = await updateRootDescription(
+        this.options.gateway,
+        root.id,
+        projection.requirement,
+        next,
+        report,
+        currentLinearDescriptionTimestamp(),
+      );
+      state = projection.state as RootState;
     };
     const failVisible = async (error: unknown): Promise<never> => {
       const reason = visibleErrorMessage(error);
@@ -402,6 +429,8 @@ export class Conductor {
       if (error instanceof Error) throw error;
       throw new Error(reason);
     };
+
+    const reconcileRoot = parseLinearIssue({ ...root, description: projection.requirement });
 
     if (!matchesWorkspace(state, workspace)) {
       const reason = "supplied_workspace_binding_mismatch";
@@ -438,18 +467,16 @@ export class Conductor {
       const worktreeSummary = await (this.options.worktreeSummary ?? collectRootWorktreeSummary)(workspace);
       let decision: RootReconcileDecision;
       let reconcileProcess: PerformerProcessResult | undefined;
+      let reconcileReport: MarkdownText;
       try {
         const reconcileOutcome = await this.options.reconciler.reconcile(parseRootReconcileRequest({
-          root, root_state: state, new_root_comments: inbox, worktree_summary: worktreeSummary,
+          root: reconcileRoot, root_state: state, new_root_comments: inbox, worktree_summary: worktreeSummary,
         }), signal);
         decision = reconcileOutcome.decision;
         reconcileProcess = reconcileOutcome.process;
         const tokenUsage = addTokenUsage(state.token_usage, reconcileProcess?.token_usage);
-        await updateState(withState(state, { token_usage: tokenUsage }));
-        await this.options.gateway.create_comment(
-          root.id,
-          rootDecisionComment(decision, worktreeSummary, tokenUsage),
-        );
+        reconcileReport = rootDecisionReport(decision, worktreeSummary, tokenUsage);
+        await updateState(withState(state, { token_usage: tokenUsage }), reconcileReport);
       } catch (error) {
         return failVisible(error);
       }
@@ -522,6 +549,7 @@ export class Conductor {
         const consumedCursor = nextCursor(inbox, state.comment_cursor);
         outcome = await this.options.cycleRunner.run({
           rootId: root.id, teamId: root.team_id, spec, rootState: state,
+          transitionComment: rootDecisionComment(reconcileReport),
           onFamilyRecorded: async () => {
             await updateRootStatus(this.options.workflow.in_progress_status_id);
             await updateState(withState(state, {

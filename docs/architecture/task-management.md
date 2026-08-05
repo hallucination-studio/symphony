@@ -12,15 +12,15 @@ SDK value in public contracts.
 Issue ID, the exact `cycle-NNN-audit-result.json` filename as title and
 filename, content type `application/json`, and the local file bytes as
 `Uint8Array`; it returns only a normalized uploaded file `{ url }`. Role
-Markdown is comment-only. JSONL, stderr, prompts, and arbitrary provider
-payloads are never uploaded.
+Markdown is appended once to the terminal role Issue description. JSONL, stderr,
+prompts, and arbitrary provider payloads are never uploaded.
 
 ## Minimal implementation
 
 | Part | Owns | Must not own |
 |---|---|---|
 | Gateway protocol and GraphQL implementation | typed calls, response validation, timeouts, secret redaction | workflow decisions or Markdown policy |
-| projector/templates | create Cycle family, append results, update statuses and Root State | direct HTTP or Agent invocation |
+| projector/templates | create Cycle family, append terminal reports/history, update descriptions, statuses, Root snapshot, and Root State | direct HTTP or Agent invocation |
 | Inbox helper | read comments after Root State cursor and filter Harness markers | active-Cycle injection or old-comment replay |
 
 Only `LinearGateway` is an architectural interface. Projection, templates, and
@@ -35,12 +35,11 @@ LinearGateway {
   list_team_states(team_id) -> LinearWorkflowState[]
   create_team_state(team_id, name, type) -> LinearWorkflowState
   list_root_comments_after(root_id, cursor?) -> LinearComment[]
-  find_root_state_comment(root_id) -> LinearComment?
   list_unfinished_descendants(root_id) -> { id, status }[]
   create_issue(request) -> LinearIssue
   update_issue_status(issue_id, status_id) -> void
+  update_issue_description(issue_id, body) -> void
   create_comment(issue_id, body) -> LinearComment
-  update_comment(comment_id, body) -> void
   upload_file(filename, content_type: "application/json", contents: Uint8Array) -> LinearUploadedFile
 }
 ```
@@ -56,6 +55,15 @@ LinearGateway {
 There is intentionally no `readRootFamily` operation. Unfinished descendant
 listing exposes only the fields required for mechanical cancellation.
 
+`update_issue_description` is a constrained projection operation, not a general
+content editor. It accepts only one of these owned writes: replace the suffix
+between `# Symphony Harness: Managed Root` and
+`# Symphony Harness: End Managed Root`, or append one terminal
+Executor/Audit report plus one local RFC3339 `Updated at:
+<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line to the matching role description. It
+must preserve all frozen bytes outside the owned region and is never used for
+Cycle descriptions.
+
 ## Canonical status discovery
 
 | Input | Required result |
@@ -63,7 +71,7 @@ listing exposes only the fields required for mechanical cancellation.
 | Root identifier such as `TEAM-123` | one exact existing Root and its team |
 | Root UUID | the same normalized Root shape |
 | Root team | five canonical statuses: `Todo`/`unstarted`, `In Progress`/`started`, `In Review`/`started`, `Done`/`completed`, `Canceled`/`canceled` |
-| Root State marker | zero or one Harness-owned State comment |
+| Root description | zero or one canonical Harness-managed snapshot suffix |
 
 The caller provides no team or workflow-state IDs. The Gateway reads the Root's
 team and resolves the five canonical statuses by exact name and expected type;
@@ -100,30 +108,32 @@ state machine. Because both canonical active states have provider type
 
 | Operation | Required behavior |
 |---|---|
-| initialize Root | create first Root State comment after supplied paths pass validation |
+| initialize Root | append the first managed Root snapshot after supplied paths pass validation |
 | startup abandonment | set every unfinished descendant to canonical `Canceled` before fresh Reconcile |
 | create family | create Cycle, Execute, and Audit in `Todo` in order with correct parents and business-aligned titles |
 | activate family | after all IDs are persisted, set Cycle and Root to `In Progress` before Execute starts |
 | start Execute | set Execute to `In Progress` before launching the process |
 | start Audit | set Cycle to `In Review` and Audit to `In Review` before launching the process |
-| append results | copy each role Markdown to its own comment; write mechanical Cycle fields and one JSON outcome; errors show the current message's first 50 characters |
+| append results | append each exact role Markdown once to its own Issue description; write append-only Cycle history/mechanical fields and one JSON outcome; errors show the current message's first 50 characters |
 | attach results | serialize the parsed Audit result as `cycle-NNN-audit-result.json`, re-read and validate it, then upload that exact file as `application/json`; record its returned URL or current upload error |
 | finish role or Cycle | append its bounded result, then set Execute, Audit, or Cycle to canonical `Done` |
 | project Root decision | active Cycle -> `In Progress`; `complete`, `needs_human`, or escaped runtime failure -> `In Review`; recorded PR or pushed branch delivery -> `Done` |
-| append Root Reconcile result | copy one validated decision report under the Harness marker; mechanically project trusted completion worktree/line/token facts; never feed it back through Root Inbox |
-| update Root State | mutate only the marked Harness State comment |
+| project Root Reconcile result | replace the latest report in the managed Root suffix; copy `create_cycle` once to Cycle history; project trusted completion file/line/token facts; never feed it to Inbox |
+| update Root State | replace only the canonical Harness-managed Root description suffix |
 
-Cycle, Execute, and Audit titles/descriptions are never updated after creation.
-Their frozen titles are `[Cycle NNN] <objective>` (maximum 80 characters total),
-`[Executor] Cycle NNN`, and `[Audit] Cycle NNN` so each role is visibly aligned
-with its business Cycle.
+Cycle title/description is never updated after creation. Execute and Audit
+descriptions are updated exactly once at terminal handling by appending the exact
+role report to their frozen context. Their frozen titles are
+`[Cycle NNN] <objective>` (maximum 80 characters total), `[Executor] Cycle NNN`, and
+`[Audit] Cycle NNN` so each role is visibly aligned with its business Cycle.
 Issue status transitions are explicit Linear mutations and are not replaced by
 comments or Root State. Executor/Audit Markdown is what operators see in their
-comments; the typed Audit JSON is the only Cycle resource and is the file used
-for progression. The Cycle Result links that resource or exposes its current
-upload error. No second summarizer is inserted. An upload failure is visible but
-does not change the parsed Audit verdict. Agent sessions never receive a
-Gateway.
+terminal Issue descriptions; Cycle history/result comments show lifecycle and
+upload facts; the typed Audit JSON is the only Cycle resource and is the file
+used for progression. The Cycle Result links that resource or exposes its
+current upload error. No second summarizer is inserted. An upload failure is
+visible but does not change the parsed Audit verdict. Agent sessions never
+receive a Gateway.
 
 ## Root State policy
 
@@ -149,6 +159,7 @@ saved workspace is missing, stop rather than creating a conflicting workspace.
 | comment is after saved cursor and lacks Harness marker | new Reconcile input |
 | comment carries Harness marker | operational output, never model input |
 | comment belongs to descendant | display-only, never fetched for Reconcile |
+| Cycle history/result comment | append-only lifecycle and mechanical upload record; never model input |
 | selected new comment | cursor remains unchanged until complete Cycle family is recorded |
 | completion recommendation | perform one final after-cursor read before PR function |
 

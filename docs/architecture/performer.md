@@ -58,7 +58,7 @@ The caller owns prompt construction, semantic parsing, and validation. Root
 Reconciler supplies a final-response path for its own decision parser. Cycle
 Runner supplies `cycle-NNN-executor-result.md` and
 `cycle-NNN-audit-result.md` paths and asks both roles to finish with Markdown.
-The Execute Markdown is captured only for exact comment projection and is
+The Execute Markdown is captured only for exact terminal description projection and is
 untrusted; it is not parsed or supplied to Audit. The Audit Markdown is parsed
 once by Cycle Runner as the sole semantic result, then serialized and re-read
 as the private `cycle-NNN-audit-result.json` progression file. A missing,
@@ -91,7 +91,8 @@ usage facts described above. Unknown or malformed JSONL is retained unchanged;
 only recognized usage fields are interpreted, and never as workflow input.
 
 Diagnostic references and `thread_id` are local-only implementation values.
-They are never supplied to the Audit prompt, Root Reconcile, or Linear comments,
+They are never supplied to the Audit prompt, Root Reconcile, or Linear
+descriptions/comments,
 and are not used for routing, trust, restart, or publication. The caller owns
 retention and deletion of the external run directory; Performer does not upload
 or silently discard this evidence after a bounded visible failure. The public
@@ -128,7 +129,7 @@ an Audit attempt.
 | Execute and Audit prompts | Cycle Runner |
 | Cycle result interpretation | Cycle Runner |
 | trusted Root State promotion | Conductor's fixed `accepted`-Audit update |
-| Linear Issue, exact Markdown comments, and typed Audit JSON file projection | private rendering helpers behind Linear Gateway calls |
+| Linear Issue, exact role-description/Root-description/Cycle-comment projections, and typed Audit JSON file projection | private rendering helpers behind Linear Gateway calls |
 | raw process start, stop, bounded final response, exit code, duration, and provider token facts | Performer |
 
 `--agent` selects one thin CLI adapter for the complete Root run and defaults to

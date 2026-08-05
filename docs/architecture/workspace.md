@@ -73,8 +73,10 @@ self-report and cannot reduce Audit's obligation to inspect the frozen contract
 and complete real diff. Only mechanical process facts cross the boundary so
 Audit knows whether execution was interrupted without treating that fact as a
 semantic conclusion. Each role's exact final Markdown remains in its local
-`cycle-NNN-*-result.md` file; Conductor copies it to that role's Linear comment
-only. After parsing Audit Markdown, Conductor writes and re-reads the typed
+`cycle-NNN-*-result.md` file; Conductor appends it once to that role's Linear
+description with one mechanical local RFC3339 `Updated at:
+<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. After parsing
+Audit Markdown, Conductor writes and re-reads the typed
 `cycle-NNN-audit-result.json` and uploads only that JSON file to the Cycle. No
 second summarization call is made.
 

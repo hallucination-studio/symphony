@@ -10,7 +10,6 @@ import type {
   LinearWorkflowState,
 } from "./LinearGateway.js";
 import { parseLinearComment, parseLinearIssue } from "../contracts/task-management.js";
-import { isRootStateComment } from "./LinearMarkers.js";
 
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
 const PAGE_SIZE = 50;
@@ -240,11 +239,11 @@ function operationDocument(operation: string): string {
     UpdateIssueStatus: `mutation UpdateIssueStatus($issueId: String!, $input: IssueUpdateInput!) {
       issueUpdate(id: $issueId, input: $input) { success }
     }`,
+    UpdateIssueDescription: `mutation UpdateIssueDescription($issueId: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $issueId, input: $input) { success }
+    }`,
     CreateComment: `mutation CreateComment($input: CommentCreateInput!) {
       commentCreate(input: $input) { success comment { id body createdAt issue { id } user { id } } }
-    }`,
-    UpdateComment: `mutation UpdateComment($commentId: String!, $input: CommentUpdateInput!) {
-      commentUpdate(id: $commentId, input: $input) { success }
     }`,
     FileUpload: `mutation FileUpload($contentType: String!, $filename: String!, $size: Int!) {
       fileUpload(contentType: $contentType, filename: $filename, size: $size) {
@@ -330,13 +329,6 @@ export class LinearGraphqlGateway implements LinearGateway {
     return Object.freeze(comments.slice(cursorIndex + 1));
   }
 
-  async find_root_state_comment(rootId: string): Promise<LinearComment | null> {
-    const matches = (await this.#listComments(rootId))
-      .filter((entry) => isRootStateComment(entry.body));
-    if (matches.length > 1) throw new Error("linear_root_state_comment_duplicated");
-    return matches[0] ?? null;
-  }
-
   async list_unfinished_descendants(rootId: string): Promise<readonly LinearUnfinishedDescendant[]> {
     const unfinished: LinearUnfinishedDescendant[] = [];
     const pending = [rootId];
@@ -404,6 +396,14 @@ export class LinearGraphqlGateway implements LinearGateway {
     this.#parseSuccess("update_issue_status", issueId, data.issueUpdate);
   }
 
+  async update_issue_description(issueId: string, description: string): Promise<void> {
+    validateLocal(description, 100_000);
+    const data = await this.#request("UpdateIssueDescription", "update_issue_description", issueId, {
+      issueId, input: { description },
+    });
+    this.#parseSuccess("update_issue_description", issueId, data.issueUpdate);
+  }
+
   async create_comment(issueId: string, body: string): Promise<LinearComment> {
     validateLocal(body, 100_000);
     const data = await this.#request("CreateComment", "create_comment", issueId, {
@@ -416,14 +416,6 @@ export class LinearGraphqlGateway implements LinearGateway {
     return this.#parse(
       "create_comment", issueId, () => comment(payload.comment, issueId), payload.comment,
     );
-  }
-
-  async update_comment(commentId: string, body: string): Promise<void> {
-    validateLocal(body, 100_000);
-    const data = await this.#request("UpdateComment", "update_comment", commentId, {
-      commentId, input: { body },
-    });
-    this.#parseSuccess("update_comment", commentId, data.commentUpdate);
   }
 
   async upload_file(

@@ -25,6 +25,44 @@ function requireStatus(value) {
   return value;
 }
 
+function pad(value, width = 2) {
+  return String(value).padStart(width, "0");
+}
+
+export function formatLocalTimestamp(date = new Date()) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const absoluteOffset = Math.abs(offsetMinutes);
+  return [
+    `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`,
+    `${sign}${pad(Math.floor(absoluteOffset / 60))}:${pad(absoluteOffset % 60)}`,
+  ].join("");
+}
+
+const ROOT_DESCRIPTION_START = "# Symphony Harness: Managed Root";
+const ROOT_DESCRIPTION_END = "# Symphony Harness: End Managed Root";
+
+function rootRequirement(description) {
+  const marker = `\n\n${ROOT_DESCRIPTION_START}\n`;
+  const index = description.indexOf(marker);
+  return index < 0 ? description : description.slice(0, index);
+}
+
+function rootStateDescription(description, state) {
+  return [
+    rootRequirement(description),
+    ROOT_DESCRIPTION_START,
+    `Updated at: ${formatLocalTimestamp()}`,
+    "## Root State",
+    "",
+    "```json",
+    JSON.stringify(state, null, 2),
+    "```",
+    ROOT_DESCRIPTION_END,
+  ].join("\n\n");
+}
+
 export class LinearDriver {
   #root;
   #comments = [];
@@ -93,6 +131,21 @@ export class LinearDriver {
     return frozen(clone(comment));
   }
 
+  async updateIssueDescription(issueId, description) {
+    const value = requireText(description, "linear_issue_description_invalid");
+    if (issueId === this.#root.id) {
+      this.#root.description = value;
+    } else {
+      const cycle = this.#cycles.find((entry) => (
+        entry.execute_issue?.id === issueId || entry.audit_issue?.id === issueId
+      ));
+      if (cycle === undefined) throw new Error("linear_issue_not_found");
+      if (cycle.execute_issue.id === issueId) cycle.execute_issue.description = value;
+      else cycle.audit_issue.description = value;
+    }
+    this.#events.push(frozen({ event: "issue_description", issue_id: issueId }));
+  }
+
   async uploadFile(filename, contentType, contents) {
     const failure = this.#uploadFailures.shift();
     if (failure !== undefined) throw new Error(String(failure).slice(0, 50));
@@ -124,6 +177,7 @@ export class LinearDriver {
   async writeRootState(state) {
     if (state === null || typeof state !== "object" || Array.isArray(state)) throw new Error("linear_state_invalid");
     this.#state = clone(state);
+    this.#root.description = rootStateDescription(this.#root.description, state);
     this.#events.push(frozen({ event: "root_state", phase: state.current_phase }));
     return frozen(clone(this.#state));
   }
@@ -138,8 +192,16 @@ export class LinearDriver {
       status: "active",
       execute: null,
       audit: null,
-      execute_issue: { id: `execute-${this.#cycleNumber}`, title: `[Executor] Cycle ${String(this.#cycleNumber).padStart(3, "0")}` },
-      audit_issue: { id: `audit-${this.#cycleNumber}`, title: `[Audit] Cycle ${String(this.#cycleNumber).padStart(3, "0")}` },
+      execute_issue: {
+        id: `execute-${this.#cycleNumber}`,
+        title: `[Executor] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
+        description: "## Role\n\nExecute",
+      },
+      audit_issue: {
+        id: `audit-${this.#cycleNumber}`,
+        title: `[Audit] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
+        description: "## Role\n\nAudit",
+      },
       result: null,
     };
     this.#cycles.push(cycle);

@@ -14,7 +14,7 @@ semantic evidence.
 
 | Interface | Responsibility |
 |---|---|
-| `LinearGateway` | normalized Root, Root State, new-comment, unfinished-descendant, comment, and uploaded-file projection operations |
+| `LinearGateway` | normalized Root, Root State, managed-description, new-comment, unfinished-descendant, comment, and uploaded-file projection operations |
 | `RootReconciler` | current Root snapshot to one next-Cycle, completion, or human-gate decision |
 | `Performer` | mechanically launch one configured Agent CLI process |
 | `CycleRunner` | Execute then Audit and calculate the Cycle result |
@@ -137,10 +137,15 @@ RootState {
 field. Its five IDs are bound only after exact-name and expected-type checks;
 the caller never supplies status IDs or CLI flags.
 
-The Gateway's file operation is `upload_file(filename,
-content_type: "application/json", contents: Uint8Array) -> LinearUploadedFile`.
-It returns only `{ url }`. Only the re-read typed Audit result is uploaded to
-the Cycle as `cycle-NNN-audit-result.json`; role Markdown is comment-only.
+The Gateway's description operation is constrained to replacing the exact
+interior of the Root Harness snapshot block or appending one terminal role
+report plus one local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`
+line to an Execute/Audit description. It preserves all frozen bytes outside the
+owned region and cannot update a Cycle description. The file operation is
+`upload_file(filename, content_type: "application/json", contents: Uint8Array)
+-> LinearUploadedFile`. It returns only `{ url }`. Only the re-read typed Audit
+result is uploaded to the Cycle as `cycle-NNN-audit-result.json`; role Markdown
+is description-only.
 JSONL, stderr, prompts, and arbitrary provider payloads are private and never
 uploaded.
 
@@ -181,7 +186,7 @@ CycleSpec {
 | acceptance | one fresh read-only Audit can check it against the real workspace |
 | boundaries | explicit in-scope and out-of-scope limits |
 | consumed comments | IDs only; bodies are already copied into the rendered Cycle contract where relevant |
-| frozen family | harness never updates Cycle, Execute, or Audit title/description after creation |
+| frozen family | harness never updates Cycle title/description; it appends one terminal report to each Execute/Audit description |
 
 Cycle titles use `[Cycle NNN] <objective>` and are capped at 80 characters in
 total. Execute and Audit titles are exactly `[Executor] Cycle NNN` and
@@ -212,7 +217,8 @@ RootReconcileOutcome { decision, process? }
 ```
 
 Reconcile has no workspace mount, workspace tools, Linear capability, or PR
-credentials. It reads only Root, Root State, and new Root comments; trusted
+credentials. Conductor removes the exact managed Root snapshot block before
+passing Root. Reconcile reads only the immutable requirement, Root State, and new Root comments; trusted
 Audit fields have already been promoted into Root State. It never reads the
 Cycle DAG or Execute/Audit content. Root Reconcile runs through the full Execute
 role configuration, including startup API key/base URL and optional
@@ -313,13 +319,19 @@ Each Cycle role prompt requires its final response to be Markdown in the last
 response position and writes it to a local `cycle-NNN-*-result.md` file. The
 Executor report contains `## Summary`, `## File Changes` with
 `### Created`/`### Updated`/`### Deleted` path and +/- line-count entries, and
-`## Verification`; it is copied byte-for-byte to the Execute comment only and
-is never parsed or supplied to Audit. Git porcelain markers (`??`, `M`, `D`)
-must be translated to those semantic sections rather than copied verbatim. The
-Audit report contains the verdict and
+`## Verification`; it is appended byte-for-byte once to the Execute description
+with one local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line and
+is never parsed or supplied to Audit. Git porcelain markers (`??`, `M`,
+`D`) must be translated to those semantic sections rather than copied verbatim.
+The Audit report contains the verdict and
 `## Scope Audited`, `## Implementation Review`, `## Checks`, `## Evidence`,
-`## Findings`, and `## Task State`; it is copied byte-for-byte to the Audit
-comment only. Neither report repeats the Cycle description.
+`## Findings`, and `## Task State`; it is appended byte-for-byte once to the Audit
+description with one local RFC3339 `Updated at:
+<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. Neither report repeats the Cycle
+description. Byte-for-byte describes the Harness write request. Linear may
+normalize equivalent Markdown syntax when the description is read back; public
+validation therefore requires the same report structure and content, not the
+same list-marker bytes.
 
 | Result | Required Audit verdict |
 |---|---|
@@ -334,9 +346,12 @@ not pre-judge workspace correctness. Only `succeeded` replaces
 Rejected or Failed replaces `pending_finding` with one bounded current failure
 summary.
 
-`CycleTerminalResult` remains as concise mechanical fields for the Cycle
+`CycleTerminalResult` remains as concise mechanical fields for the Cycle Result
 comment: it lets a human read the Cycle without traversing Execute and Audit
-descendants. Cycle Runner parses Audit Markdown once, serializes the typed
+descendants. Additional Cycle history comments are append-only records of each
+status transition, Root decision, terminal result, and JSON upload/link outcome;
+their event timestamp is Linear `createdAt`, not a duplicate body timestamp.
+Cycle Runner parses Audit Markdown once, serializes the typed
 result to `cycle-NNN-audit-result.json`, reads it back and validates it, and
 uses that re-read value for Cycle/Root semantics. The JSON file is the only
 Cycle uploaded file and uses `application/json`; the Cycle Result links its asset

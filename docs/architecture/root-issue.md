@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | Root requirement, Root State comment, child hierarchy, frozen role documents, and result comments | routing, model decisions, or GraphQL mechanics |
+| target proposal | Root requirement, managed Root snapshot, child hierarchy, and role reports | routing, model decisions, or GraphQL mechanics |
 
 ## Issue hierarchy
 
@@ -31,69 +31,64 @@ stand in for a status transition.
 
 ## Root documents
 
-| Document | Required content | Write policy |
-|---|---|---|
-| Root title and description | user-authored original long-term requirement | never replaced or augmented by generated requirements |
-| Root State comment | workspace/run directory/branch, task state, complete `latest_audit`, pending finding, Harness feedback, phase, comment cursor, and terminal PR URL or delivery branch | one Harness-owned mutable checkpoint |
+- **Root title and requirement section.** Its required content is the
+  user-authored original long-term requirement. It is immutable and is never
+  replaced or mixed with generated state.
+- **Root description managed snapshot.** Its required content is the
+  workspace, run directory, branch, task state, complete `latest_audit`, pending
+  finding, Harness feedback, phase, comment cursor, terminal delivery, latest
+  Reconcile report, and local `Updated at`. Harness may replace only this
+  managed suffix; it is the durable checkpoint and never Reconcile input.
 
-Root title and description are the sole original requirement. Root State is the
-sole durable runtime checkpoint. V1 does not reconstruct Root State by parsing
-the complete child tree.
+The Root title and requirement section are the sole original requirement. The
+description may additionally contain exactly one Harness-managed snapshot block:
 
-```markdown
-## Current
-- Workspace: `/run-owned/root-workspace`
-- Run directory: `/run-owned/root-evidence`
-- Branch: `symphony/ENG-123-<run-id>`
-- Phase: Audit
-- Active Cycle: ENG-127
-
-## Task State
-- Focused parser behavior is independently verified; cleanup is not yet verified.
-
-## Latest Audit
-- The complete validated `AuditRunResult` from the newest terminal Audit.
-
-## Pending Finding
-- ENG-127: cleanup remains in `src/example.ts`
-
-## Harness Feedback
-- Startup abandoned unfinished children; the retained workspace may contain
-  unaudited partial modifications.
-
-## Root Input Cursor
-- Last consumed comment: `<comment-id>`
-
-## Pull Request
-- Not created
+````text
+# Symphony Harness: Managed Root
+Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>
+## Root State
+```json
+<canonical RootState JSON>
 ```
+## Reconcile
+<latest validated Reconcile report>
+# Symphony Harness: End Managed Root
+````
 
-The visible comment stays concise. A bounded Harness marker identifies it and
-stores no credential, transcript, revision, digest, or process handle.
-The per-process `max_cycles` guard is not stored here; it is an operator launch
-limit rather than durable Root progress.
+Conductor appends the block when absent and replaces only its interior on later
+projections, refreshing the local RFC3339 `Updated at` line from the customer
+runtime clock each time. It never rewrites the requirement region. Before Root Reconcile,
+Conductor strips the complete block, so generated state cannot become a new
+requirement. The Root State inside this suffix is the sole durable runtime
+checkpoint; V1 does not reconstruct it by parsing the child tree.
 
-Each Root Reconcile decision appends one `# Symphony Harness: Reconcile`
-Markdown comment. A continue report contains `Why Continue`, `Evidence`, and
+The managed suffix stores no credential, transcript, revision, digest, or
+process handle. The per-process `max_cycles` guard is not stored there; it is an
+operator launch limit rather than durable Root progress.
+
+Each Root Reconcile decision replaces the latest `## Reconcile` report in the
+managed suffix. A continue report contains `Why Continue`, `Evidence`, and
 `Next Cycle`; a completion report contains `Overview`, semantic
 `Created`/`Updated`/`Deleted` paths, whole-worktree line changes,
 `Verification`, and short exact `Token Usage`; a human gate contains `Reason`,
-`Question`, and `Next Step`. Conductor copies the validated last response once
-and mechanically supplies completion worktree/token facts. Raw Git porcelain,
-file contents, transcripts, and estimated token values are forbidden. The
-Harness marker keeps these comments out of the Root Inbox.
+`Question`, and `Next Step`. For `create_cycle`, Conductor also copies the exact
+report once to the new Cycle under `# Symphony Harness: Reconcile`, preserving
+Cycle history without creating Root or role result comments. Raw Git porcelain,
+file contents, transcripts, and estimated token values are forbidden.
 
 ## Cycle family documents
 
 | Document | Required sections | Write policy |
 |---|---|---|
 | Cycle description | Objective, Acceptance, Boundaries, Consumed Root Comment IDs | create once; never update |
-| Execute description | Role, parent Cycle, frozen task, acceptance, boundaries, workspace-write policy | create with Cycle; never update |
-| Audit description | Role, parent Cycle, acceptance, independent read-only policy | create with Cycle; never update |
+| Execute description | Role, parent Cycle, frozen task, acceptance, boundaries, workspace-write policy, terminal Executor report | create with Cycle; append the exact terminal report once; never rewrite the frozen context |
+| Audit description | Role, parent Cycle, acceptance, independent read-only policy, terminal Audit report | create with Cycle; append the exact terminal report once; never rewrite the frozen context |
 
 Cycle, Execute, and Audit are created in that order. Audit exists in waiting
-state from family creation and starts only after Execute terminates. V1 does not
-detect or repair manual edits to these descriptions.
+state from family creation and starts only after Execute terminates. Cycle
+description content remains immutable. Only Conductor may append the one terminal
+role report to each role description; V1 does not detect or repair unrelated
+manual edits.
 
 The frozen Cycle title is `[Cycle NNN] <objective>` with a maximum total title
 length of 80 characters. The role titles are exactly `[Executor] Cycle NNN` and
@@ -103,9 +98,13 @@ objective.
 ## Result Markdown and uploaded file
 
 Each role's prompt requires one final Markdown response at its local result path.
-The response is copied byte-for-byte to that role's Linear Issue comment only;
+At terminal handling, the response is appended byte-for-byte once to that role's
+Linear Issue description with one mechanical local RFC3339 `Updated at:
+<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line;
 it is intentionally human-facing and does not repeat the frozen Cycle
-objective, acceptance, or boundaries:
+objective, acceptance, or boundaries. Linear may normalize equivalent Markdown
+syntax such as unordered-list markers on readback. That provider normalization
+does not create another report or change its content contract:
 
 | Role | Local file | Required human report | Semantic use |
 |---|---|---|---|
@@ -125,16 +124,18 @@ only terminal fields and one visible resource line:
 If upload fails, the line is `- Audit result: upload failed (<current error's
 first 50 characters>)`; the failure is visible but does not alter the Audit
 verdict or progression. The Cycle never contains role Markdown or a second
-summary. A missing, unreadable, invalid, or non-UTF-8 role result becomes a
-visible `process_error`; Conductor never makes a second summarization or
-format-repair Agent call.
+summary. Its append-only history comments record status transitions, Root
+decisions, the terminal result, and this link/error; their event timestamp is
+Linear `createdAt`, not a duplicated body field. A missing, unreadable,
+invalid, or non-UTF-8 role result becomes a visible `process_error`; Conductor
+never makes a second summarization or format-repair Agent call.
 
 There is exactly one Execute and one Audit Agent call. Execute output is never
 supplied to Audit or used to calculate Cycle/Root semantics. JSONL and stderr
 remain private local diagnostics in the external run directory; they are never
-uploaded as comments or files. Linear comments and the single JSON file
-are the operator-visible progression artifacts, while statuses carry the
-workflow lifecycle.
+uploaded as comments or files. Role descriptions, Cycle history/result comments,
+the single JSON file, and explicit statuses are the operator-visible progression
+artifacts.
 
 ## Restart abandonment
 
@@ -158,9 +159,11 @@ Reconcile context. Their trusted summaries already exist in Root State.
 | Comment location and author | Meaning |
 |---|---|
 | Root, user-authored after saved cursor | new input for a future Reconcile |
-| Root, Harness State marker | durable runtime checkpoint |
-| Root, other Harness marker | operational output only |
-| Cycle, Execute, or Audit, any author | display-only |
+| Root comment with a Harness marker | reserved operational output; ignored by Inbox |
+| Root managed description suffix | durable runtime checkpoint and latest report; stripped before Reconcile |
+| Cycle history/result comment | append-only operator history; not Reconcile input |
+| Execute or Audit description terminal report | display-only; not Reconcile input |
+| Execute or Audit comments, any author | display-only |
 
 All comments after the prior cursor are consumed together only after the
 complete Cycle family and local record exist. Root State then advances to the

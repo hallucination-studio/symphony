@@ -5,7 +5,6 @@ import {
   InMemoryLinearGateway,
 } from "./InMemoryLinearGateway.js";
 import { parseLinearComment, parseLinearIssue } from "../contracts/task-management.js";
-import { ROOT_STATE_COMMENT_MARKER } from "./LinearMarkers.js";
 
 
 test("in-memory gateway implements the complete normalized Linear boundary", async () => {
@@ -56,12 +55,6 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
       body: "First input",
       creator_id: "user-id",
       created_at: "2026-08-05T00:00:00.000Z",
-    }, {
-      id: "root-state-comment",
-      issue_id: "root-id",
-      body: `${ROOT_STATE_COMMENT_MARKER}\nstate`,
-      creator_id: "harness-id",
-      created_at: "2026-08-05T00:01:00.000Z",
     }].map(parseLinearComment),
   });
 
@@ -73,14 +66,7 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
   });
   assert.equal(review.name, "In Review");
   assert.equal((await gateway.list_team_states("team-id")).length, 5);
-  assert.deepEqual(await gateway.list_root_comments_after("root-id", "comment-1"), [{
-    id: "root-state-comment",
-    issue_id: "root-id",
-    body: `${ROOT_STATE_COMMENT_MARKER}\nstate`,
-    creator_id: "harness-id",
-    created_at: "2026-08-05T00:01:00.000Z",
-  }]);
-  assert.equal((await gateway.find_root_state_comment("root-id"))?.id, "root-state-comment");
+  assert.deepEqual(await gateway.list_root_comments_after("root-id", "comment-1"), []);
   assert.deepEqual(await gateway.list_unfinished_descendants("root-id"), [
     { id: "cycle-id", status: "active" },
     { id: "audit-id", status: "todo" },
@@ -95,18 +81,19 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
   });
   assert.equal(execute.parent_id, "cycle-id");
   await gateway.update_issue_status(execute.id, "state-done");
+  await gateway.update_issue_description(execute.id, "Updated execute");
+  assert.equal((await gateway.get_issue(execute.id)).description, "Updated execute");
   assert.equal((await gateway.get_issue(execute.id)).status, "completed");
 
   const comment = await gateway.create_comment(execute.id, "Process completed");
   assert.equal(comment.issue_id, execute.id);
-  await gateway.update_comment(comment.id, "Process completed in 10ms");
   assert.equal(
     (await gateway.list_root_comments_after(execute.id)).at(0)?.body,
-    "Process completed in 10ms",
+    "Process completed",
   );
 });
 
-test("in-memory gateway fails closed for missing cursors and duplicate Root State comments", async () => {
+test("in-memory gateway fails closed for missing cursors", async () => {
   const root = parseLinearIssue({
     id: "root-id",
     identifier: "ENG-1",
@@ -119,21 +106,12 @@ test("in-memory gateway fails closed for missing cursors and duplicate Root Stat
     team_id: "team-id",
     creator_id: "user-id",
   });
-  const rootState = (id: string) => parseLinearComment({
-    id,
-    issue_id: root.id,
-    body: `${ROOT_STATE_COMMENT_MARKER}\nstate`,
-    creator_id: "harness-id",
-    created_at: "2026-08-05T00:00:00.000Z",
-  });
   const gateway = new InMemoryLinearGateway({
     issues: [root],
     states: [{ id: "state-active", name: "In Progress", type: "started", team_id: "team-id" }],
-    comments: [rootState("state-1"), rootState("state-2")],
   });
 
   await assert.rejects(gateway.list_root_comments_after(root.id, "missing"), /linear_comment_cursor_not_found/u);
-  await assert.rejects(gateway.find_root_state_comment(root.id), /linear_root_state_comment_duplicated/u);
 });
 
 test("in-memory gateway records uploaded files with defensive byte copies", async () => {

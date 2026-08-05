@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseRootState } from "../contracts/root.js";
-import { parseLinearComment, parseLinearIssue } from "../contracts/task-management.js";
+import { parseLinearIssue } from "../contracts/task-management.js";
 import { InMemoryLinearGateway } from "./InMemoryLinearGateway.js";
 import {
-  createRootStateComment,
-  findRootStateComment,
-  parseRootStateComment,
-  renderRootStateComment,
-  updateRootStateComment,
+  ROOT_MANAGED_ROOT_END,
+  ROOT_MANAGED_ROOT_START,
+  parseRootDescription,
+  renderRootDescription,
 } from "./LinearRootState.js";
 
 const state = parseRootState({
@@ -32,81 +31,69 @@ const state = parseRootState({
   comment_cursor: "comment-1",
 });
 
-test("Root State comment has one strict canonical render and parse form", () => {
-  const body = renderRootStateComment(state);
-  const comment = parseLinearComment({
-    id: "state-comment",
-    issue_id: "root-id",
-    body,
-    creator_id: "harness-id",
-    created_at: "2026-08-05T00:00:00.000Z",
+const report = [
+  "### Why Continue", "A bounded task remains incomplete.", "",
+  "### Evidence", "The trusted Root state requires another independently audited change.", "",
+  "### Next Cycle", "Create and verify the parser change.",
+].join("\n");
+const updatedAt = "2026-08-05T00:00:00.000+08:00";
+
+test("Root description keeps the authored requirement outside one strict managed block", () => {
+  const description = renderRootDescription("The parser must reject ambiguity.", state, report, updatedAt);
+  assert.equal(description.split(ROOT_MANAGED_ROOT_START).length, 2);
+  assert.equal(description.split(ROOT_MANAGED_ROOT_END).length, 2);
+  assert.match(description, /^The parser must reject ambiguity\.\n\n# Symphony Harness: Managed Root\n/u);
+  assert.match(description, /Updated at: 2026-08-05T00:00:00\.000\+08:00/u);
+  assert.match(description, /## Root State\n\n```json\n/u);
+  assert.match(description, /## Reconcile\n\n### Why Continue/u);
+  assert.equal(parseRootDescription(description).requirement, "The parser must reject ambiguity.");
+  assert.deepEqual(parseRootDescription(description).state, state);
+  assert.equal(parseRootDescription(description).reconcile_report, report);
+  assert.equal(parseRootDescription(description).updated_at, updatedAt);
+});
+
+test("Root description parser accepts an uninitialized Root and rejects malformed managed blocks", () => {
+  assert.deepEqual(parseRootDescription("The original requirement."), {
+    requirement: "The original requirement.",
   });
 
-  assert.match(body, /^# Symphony Harness: Root State\n\n```json\n/u);
-  assert.deepEqual(parseRootStateComment(comment), state);
+  const rendered = renderRootDescription("The original requirement.", state, undefined, updatedAt);
+  assert.equal(parseRootDescription(rendered).reconcile_report, undefined);
   assert.throws(
-    () => parseRootStateComment(parseLinearComment({ ...comment, body: `${body}\n` })),
-    /linear_root_state_comment_malformed/u,
+    () => parseRootDescription(`${rendered}\n${ROOT_MANAGED_ROOT_START}`),
+    /linear_root_description_malformed/u,
   );
   assert.throws(
-    () => parseRootStateComment(parseLinearComment({
-      ...comment,
-      body: "# Symphony Harness: Root State\n\n```json\n{}\n```",
-    })),
-    /linear_root_state_comment_malformed/u,
+    () => parseRootDescription(rendered.replace("```json", "```json\n{}",)),
+    /linear_root_description_malformed/u,
+  );
+  assert.throws(
+    () => parseRootDescription(rendered.replace("## Root State", "## Root State\n\n## Root State")),
+    /linear_root_description_malformed/u,
   );
 });
 
-test("Root State discovery accepts zero or one and fails closed on duplicate or malformed state comments", () => {
-  const valid = parseLinearComment({
-    id: "state-1",
-    issue_id: "root-id",
-    body: renderRootStateComment(state),
-    creator_id: "harness-id",
-    created_at: "2026-08-05T00:00:00.000Z",
-  });
-  const malformed = parseLinearComment({
-    ...valid,
-    id: "state-malformed",
-    body: "# Symphony Harness: Root State\n\nmalformed",
-  });
-
-  assert.equal(findRootStateComment([]), null);
-  assert.deepEqual(findRootStateComment([valid]), { comment: valid, state });
-  assert.throws(() => findRootStateComment([valid, valid]), /linear_root_state_comment_duplicated/u);
-  assert.throws(() => findRootStateComment([malformed]), /linear_root_state_comment_malformed/u);
-});
-
-test("Root State create and update project only the marked Harness comment", async () => {
-  const root = parseLinearIssue({
-    id: "root-id",
-    identifier: "ENG-1",
-    title: "Root",
-    description: "Original task",
-    url: "https://linear.example/issue/ENG-1",
-    status: "active",
-    status_id: "state-active",
-    parent_id: null,
-    team_id: "team-id",
-    creator_id: "user-id",
-  });
+test("Gateway updates only the Root description while preserving its issue identity", async () => {
   const gateway = new InMemoryLinearGateway({
-    issues: [root],
-    states: [{ id: "state-active", name: "Working", type: "started", team_id: root.team_id }],
+    issues: [parseLinearIssue({
+      id: "root-id",
+      identifier: "ENG-1",
+      title: "Root",
+      description: "Original task",
+      url: "https://linear.example/issue/ENG-1",
+      status: "active",
+      status_id: "state-active",
+      parent_id: null,
+      team_id: "team-id",
+      creator_id: "user-id",
+    })],
+    states: [{ id: "state-active", name: "Working", type: "started", team_id: "team-id" }],
   });
 
-  const created = await createRootStateComment(gateway, root.id, state);
-  assert.deepEqual(created.state, state);
-  await assert.rejects(createRootStateComment(gateway, root.id, state), /linear_root_state_comment_duplicated/u);
-
-  const updatedState = parseRootState({ ...state, current_phase: "execute" });
-  const updated = await updateRootStateComment(gateway, created.comment, updatedState);
-  assert.deepEqual(updated.state, updatedState);
-  assert.equal((await gateway.find_root_state_comment(root.id))?.id, created.comment.id);
-
-  await gateway.create_comment(root.id, renderRootStateComment(updatedState));
-  await assert.rejects(
-    updateRootStateComment(gateway, updated.comment, state),
-    /linear_root_state_comment_duplicated/u,
-  );
+  const description = renderRootDescription("Original task", state, report, updatedAt);
+  await gateway.update_issue_description("root-id", description);
+  const updated = await gateway.get_issue("root-id");
+  assert.equal(updated.id, "root-id");
+  assert.equal(updated.identifier, "ENG-1");
+  assert.equal(updated.description, description);
 });

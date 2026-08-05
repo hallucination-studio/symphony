@@ -470,6 +470,16 @@ const EXECUTOR_REPORT_HEADINGS = Object.freeze([
   "## Summary", "## File Changes", "### Created", "### Updated", "### Deleted", "## Verification",
 ]);
 const RAW_GIT_PORCELAIN_LINE = /^(?:(?:\?\?|[ MADRCU?!]{1,2}) |[12u?!] )[^\r\n]+$/u;
+const LOCAL_TIMESTAMP = /^Updated at: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{2}:[0-9]{2}$/u;
+
+function descriptionResult(description, separator) {
+  const start = description.lastIndexOf(separator);
+  if (start < 0) return undefined;
+  const projection = description.slice(start + separator.length);
+  const boundary = projection.indexOf("\n\n");
+  if (boundary < 0 || !LOCAL_TIMESTAMP.test(projection.slice(0, boundary))) return undefined;
+  return projection.slice(boundary + 2);
+}
 
 function validExecutorHumanReport(body) {
   if (typeof body !== "string") return false;
@@ -482,7 +492,7 @@ function validExecutorHumanReport(body) {
   }
   for (let position = 2; position <= 4; position += 1) {
     const entries = lines.slice(indexes[position] + 1, indexes[position + 1]).filter((line) => line.length > 0);
-    if (entries.length === 0 || entries.some((line) => !line.startsWith("- "))) return false;
+    if (entries.length === 0 || entries.some((line) => !/^(?:-|\*) /u.test(line))) return false;
   }
   return true;
 }
@@ -519,23 +529,29 @@ function validRootReconcileReport(body, kind) {
 }
 
 export function validateGoldenResultComments(issue) {
-  if (!exactObject(issue, ["comments", "children"])
+  if (!exactObject(issue, ["description", "comments", "children"])
+    || typeof issue.description !== "string"
     || !commentConnection(issue.comments)
     || !visibleConnection(issue.children)) {
     throw new Error("golden_result_comments_root_invalid");
   }
   const cycles = issue.children.nodes;
   if (cycles.length < 1) throw new Error("golden_result_comments_cycle_missing");
-  const rootReports = issue.comments.nodes
-    .map(({ body }) => body)
-    .filter((body) => body.startsWith("# Symphony Harness: Reconcile"));
-  const cycleReports = rootReports.filter((body) => body.includes("### Why Continue"));
-  const completionReports = rootReports.filter((body) => body.includes("### Overview"));
-  if (cycleReports.length !== cycles.length
-    || completionReports.length !== 1
-    || cycleReports.some((body) => !validRootReconcileReport(body, "cycle"))
-    || !validRootReconcileReport(completionReports[0], "complete")) {
-    throw new Error("golden_root_reconcile_comments_invalid");
+  const managedStart = issue.description.indexOf("\n\n# Symphony Harness: Managed Root\n");
+  const managedEnd = issue.description.lastIndexOf("\n\n# Symphony Harness: End Managed Root");
+  const reconcileStart = issue.description.indexOf("\n\n## Reconcile\n", managedStart);
+  if (managedStart < 1 || managedEnd <= managedStart || reconcileStart <= managedStart
+    || !issue.description.includes("\n\n## Root State\n", managedStart)
+    || !issue.description.slice(managedStart, managedEnd).split(/\r?\n/u).some((line) => LOCAL_TIMESTAMP.test(line))
+    || issue.comments.nodes.some(({ body }) => body.startsWith("# Symphony Harness:"))) {
+    throw new Error("golden_root_description_invalid");
+  }
+  const completionReport = `# Symphony Harness: Reconcile\n${issue.description.slice(
+    reconcileStart + "\n\n## Reconcile".length,
+    managedEnd,
+  )}`;
+  if (!validRootReconcileReport(completionReport, "complete")) {
+    throw new Error("golden_root_description_invalid");
   }
   const auditResultUrls = [];
   for (const cycle of cycles) {
@@ -549,27 +565,26 @@ export function validateGoldenResultComments(issue) {
     const executor = roles.find((role) => role?.title === `[Executor] Cycle ${cycleTitle[1]}`);
     const audit = roles.find((role) => role?.title === `[Audit] Cycle ${cycleTitle[1]}`);
     if (executor === undefined || audit === undefined
+      || typeof executor.description !== "string" || typeof audit.description !== "string"
       || !commentConnection(executor.comments) || !commentConnection(audit.comments)) {
       throw new Error("golden_result_comments_role_invalid");
     }
-    const executorBodies = executor.comments.nodes.map(({ body }) => body).filter((body) => body.trim().length > 0);
-    const auditBodies = audit.comments.nodes.map(({ body }) => body).filter((body) => body.trim().length > 0);
-    const executorReports = executorBodies.filter((body) => (
-      body.startsWith("## Summary") || body.startsWith("## Executor Result")
-    ));
-    const auditReports = auditBodies.filter((body) => body.startsWith("verdict: "));
-    if (executorReports.length !== 1 || auditReports.length !== 1) {
+    const resultSeparator = "\n\n## Result\n\n";
+    const executorBody = descriptionResult(executor.description, resultSeparator);
+    const auditBody = descriptionResult(audit.description, resultSeparator);
+    if (executorBody === undefined || auditBody === undefined
+      || executor.comments.nodes.length !== 0 || audit.comments.nodes.length !== 0) {
       throw new Error("golden_result_comments_missing");
     }
-    const executorBody = executorReports[0];
-    const auditBody = auditReports[0];
     const cycleBodies = cycle.comments.nodes.map(({ body }) => body);
+    const cycleTransition = cycleBodies.find((body) => body.startsWith("# Symphony Harness: Reconcile"));
     const cycleResult = cycleBodies.find((body) => body.startsWith("## Cycle Result"));
     const auditResultLink = cycleResult?.match(
       new RegExp(`- Audit result: \\[cycle-${cycleTitle?.[1] ?? "000"}-audit-result\\.json\\]\\((https://[^)\\s]+)\\)`, "u"),
     );
     if (auditResultLink?.[1] !== undefined) auditResultUrls.push(auditResultLink[1]);
-    if (executorBody === undefined || auditBody === undefined || cycleResult === undefined
+    if (cycleTransition === undefined || cycleResult === undefined
+      || !validRootReconcileReport(cycleTransition, "cycle")
       || !(validExecutorHumanReport(executorBody) || validExecutorErrorReport(executorBody))
       || !auditBody.startsWith("verdict: ")
       || !auditBody.includes("## Scope Audited")
@@ -693,6 +708,7 @@ async function verifyGoldenVisibleTree(token, rootId) {
 async function verifyGoldenResultComments(token, rootId) {
   const data = await graphql(token, `query GoldenResultComments($id: String!) {
     issue(id: $id) {
+      description
       comments(first: 50) {
         nodes { body }
         pageInfo { hasNextPage }
@@ -700,6 +716,7 @@ async function verifyGoldenResultComments(token, rootId) {
       children(first: 10) {
         nodes {
           title
+          description
           comments(first: 20) {
             nodes { body }
             pageInfo { hasNextPage }
@@ -707,6 +724,7 @@ async function verifyGoldenResultComments(token, rootId) {
           children(first: 3) {
             nodes {
               title
+              description
               comments(first: 20) {
                 nodes { body }
                 pageInfo { hasNextPage }

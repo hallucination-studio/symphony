@@ -8,6 +8,8 @@ import { parseCycleSpec } from "../contracts/cycle.js";
 import type { PerformerLaunchRequest, PerformerProcessResult } from "../contracts/performer.js";
 import { parseRootState } from "../contracts/root.js";
 import { parseLinearIssue } from "../contracts/task-management.js";
+import { parseMarkdownText } from "../contracts/validation.js";
+import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
 import { InMemoryLinearGateway } from "../linear/InMemoryLinearGateway.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
 import type { Performer } from "../performer/api/Performer.js";
@@ -42,7 +44,11 @@ async function world() {
     workspace_path: workspace, run_directory: runDirectory, root_branch: "root/ENG-1",
     current_phase: "cycle", task_state_markdown: "Lexer complete", pending_finding: "Ambiguity remains",
   });
-  return { gateway, spec, rootState, workspace, runDirectory };
+  const transitionComment = parseMarkdownText([
+    "# Symphony Harness: Reconcile", "", "### Why Continue", "...", "", "### Evidence", "...", "",
+    "### Next Cycle", "...",
+  ].join("\n"));
+  return { gateway, spec, rootState, workspace, runDirectory, transitionComment };
 }
 
 function performer(
@@ -125,6 +131,7 @@ test("creates exact family and trusts only a fresh Audit", async () => {
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
 
@@ -204,16 +211,24 @@ test("projects the Cycle, Execute, and Audit lifecycle statuses visibly", async 
     verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
     task_state_markdown: "Acceptance is verified",
   });
+  const updatedAt = new Date("2026-08-05T01:02:03.000Z");
+  const updatedAtText = currentLinearDescriptionTimestamp(updatedAt);
+  let nowCalls = 0;
   const runner = new CycleRunner({
     gateway,
     executePerformer: rolePerformer,
     auditPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     agent: "codex", timeoutMs: 1_000,
+    now: () => {
+      nowCalls += 1;
+      return updatedAt;
+    },
   });
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => {
       assert.equal((await fixture.gateway.get_issue("fake-issue-1")).status_id, "active-id");
     },
@@ -230,19 +245,31 @@ test("projects the Cycle, Execute, and Audit lifecycle statuses visibly", async 
   assert.deepEqual(updates.map(([issueId]) => issueId), [
     "fake-issue-1", "fake-issue-2", "fake-issue-2", "fake-issue-1", "fake-issue-3", "fake-issue-3", "fake-issue-1",
   ]);
-  const executorComments = comments.filter(([issueId]) => issueId === "fake-issue-2").map(([, body]) => body);
-  assert.deepEqual(executorComments, ["Executor completed; this response is not Audit evidence.\n"]);
-  const auditComment = comments.find(([issueId]) => issueId === "fake-issue-3")?.[1] ?? "";
-  const cycleComment = comments.find(([issueId]) => issueId === "fake-issue-1")?.[1] ?? "";
-  assert.equal(auditComment.startsWith("verdict: accepted"), true);
-  assert.equal(auditComment.includes("## Scope Audited"), true);
-  assert.equal(auditComment.includes("## Implementation Review"), true);
+  const executorDescription = (await fixture.gateway.get_issue(outcome.execute.id)).description;
+  const auditDescription = (await fixture.gateway.get_issue(outcome.auditIssue.id)).description;
+  const cycleComments = comments.filter(([issueId]) => issueId === "fake-issue-1").map(([, body]) => body);
+  assert.equal(cycleComments.length, 2);
+  assert.equal(cycleComments[0], fixture.transitionComment);
+  const cycleComment = cycleComments.find((body) => body.startsWith("## Cycle Result")) ?? "";
+  assert.equal(executorDescription.includes("## Role\n\nExecute"), true);
+  assert.equal(executorDescription.includes(
+    `## Result\n\nUpdated at: ${updatedAtText}\n\nExecutor completed; this response is not Audit evidence.\n`,
+  ), true);
+  assert.equal(auditDescription.startsWith("## Role\n\nAudit"), true);
+  assert.equal(auditDescription.includes(
+    `## Result\n\nUpdated at: ${updatedAtText}\n\nverdict: accepted`,
+  ), true);
+  assert.equal(auditDescription.includes("## Scope Audited"), true);
+  assert.equal(auditDescription.includes("## Implementation Review"), true);
+  assert.equal(nowCalls, 2);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.execute.id), false);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.auditIssue.id), false);
   assert.equal(cycleComment.includes("## Cycle Result"), true);
   assert.equal(cycleComment.includes(`- Result: ${outcome.terminal.result}`), true);
   assert.equal(cycleComment.includes(`- Audit Issue: ${outcome.auditIssue.id}`), true);
   assert.equal(cycleComment.includes(`- Audit verdict: ${outcome.audit.verdict}`), true);
   assert.equal(cycleComment.includes(`- Reason: ${outcome.terminal.reason}`), true);
-  assert.equal(cycleComment.includes(auditComment), false);
+  assert.equal(cycleComment.includes(auditDescription), false);
 });
 
 test("caps the Cycle title at 80 characters while naming role issues by Cycle", async () => {
@@ -278,6 +305,7 @@ test("caps the Cycle title at 80 characters while naming role issues by Cycle", 
 
   await runner.run({
     rootId: "root-id", teamId: "team-id", spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
 
@@ -308,6 +336,7 @@ test("rejects an Audit response too large to persist with Root State", async () 
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
 
@@ -334,6 +363,7 @@ test("audits residual workspace after Execute start failure", async () => {
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(launches.length, 2);
@@ -371,6 +401,7 @@ test("audits residual workspace when the Execute adapter rejects", async () => {
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.executeProcess.launch_status, "start_failed");
@@ -409,6 +440,7 @@ test("fails the Cycle when Audit diagnostics are not durably referenced", async 
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
 
@@ -433,6 +465,7 @@ test("bounds the mechanical Cycle reason without changing the Audit verdict", as
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.audit.verdict, "accepted");
@@ -482,21 +515,27 @@ test("writes explicit bounded role results with the current error message", asyn
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
 
-  const executeComment = comments.find(([issueId]) => issueId === "fake-issue-2")?.[1] ?? "";
-  const auditComment = comments.find(([issueId]) => issueId === "fake-issue-3")?.[1] ?? "";
-  assert.equal(executeComment, [
+  const executeDescription = (await fixture.gateway.get_issue(outcome.execute.id)).description;
+  const auditDescription = (await fixture.gateway.get_issue(outcome.auditIssue.id)).description;
+  assert.match(executeDescription, /## Role\n\nExecute/u);
+  assert.match(executeDescription, /## Executor Result\n- Result: failure/u);
+  assert.equal(executeDescription.includes([
     "## Executor Result",
     "- Result: failure",
     `- Error: ${executeError.message.slice(0, 50)}`,
-  ].join("\n"));
-  assert.doesNotMatch(executeComment, /Launch status|Duration ms|Exit code|Process reason|private-cause|performer_/u);
-  assert.match(auditComment, /## Audit Result/u);
-  assert.match(auditComment, /- Verdict: process_error/u);
-  assert.equal(auditComment.includes(auditError.message.slice(0, 50)), true);
-  assert.doesNotMatch(auditComment, /private-audit-cause|audit_process/u);
+  ].join("\n")), true);
+  assert.doesNotMatch(executeDescription, /Launch status|Duration ms|Exit code|Process reason|private-cause|performer_/u);
+  assert.match(auditDescription, /## Role\n\nAudit/u);
+  assert.match(auditDescription, /## Audit Result/u);
+  assert.match(auditDescription, /- Verdict: process_error/u);
+  assert.equal(auditDescription.includes(auditError.message.slice(0, 50)), true);
+  assert.doesNotMatch(auditDescription, /private-audit-cause|audit_process/u);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.execute.id), false);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.auditIssue.id), false);
   if (outcome.audit.verdict !== "process_error") throw new Error("expected audit process error");
   assert.equal(outcome.audit.reason, auditError.message.slice(0, 50));
   assert.deepEqual(JSON.parse(await readFile(path.join(fixture.runDirectory, "cycle-001-audit-result.json"), "utf8")), outcome.audit);
@@ -548,12 +587,14 @@ test("keeps Executor Markdown mechanical when its final response reference is wr
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.terminal.result, "succeeded");
-  const executeComment = comments.find(([issueId]) => issueId === outcome.execute.id)?.[1] ?? "";
-  assert.match(executeComment, /Final response reference mismatch/u);
-  assert.equal(executeComment.includes("Executor prose is retained mechanically."), false);
+  const executeDescription = (await fixture.gateway.get_issue(outcome.execute.id)).description;
+  assert.match(executeDescription, /Final response reference mismatch/u);
+  assert.equal(executeDescription.includes("Executor prose is retained mechanically."), false);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.execute.id), false);
 });
 
 test("turns invalid UTF-8 Audit Markdown into process_error", async () => {
@@ -582,6 +623,7 @@ test("turns invalid UTF-8 Audit Markdown into process_error", async () => {
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.audit.verdict, "process_error");
@@ -632,13 +674,17 @@ test("keeps safe malformed Audit Markdown raw while adding a mechanical process 
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.audit.verdict, "process_error");
-  const auditComments = comments.filter(([issueId]) => issueId === outcome.auditIssue.id).map(([, body]) => body);
-  assert.equal(auditComments.includes(malformed), true);
-  assert.equal(auditComments.some((body) => body.includes("## Audit Result") && body.includes("process_error")), true);
-  const cycleComment = comments.find(([issueId]) => issueId === outcome.cycle.id)?.[1] ?? "";
+  const auditDescription = (await fixture.gateway.get_issue(outcome.auditIssue.id)).description;
+  assert.equal(auditDescription.includes(malformed), true);
+  assert.equal(auditDescription.includes("## Audit Result") && auditDescription.includes("process_error"), true);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.auditIssue.id), false);
+  const cycleComment = comments.find(([issueId, body]) => (
+    issueId === outcome.cycle.id && body.startsWith("## Cycle Result")
+  ))?.[1] ?? "";
   assert.equal(cycleComment.includes(malformed), false);
   assert.deepEqual(fixture.gateway.attachments.map(({ filename }) => filename), ["cycle-001-audit-result.json"]);
   assert.deepEqual(JSON.parse(await readFile(path.join(fixture.runDirectory, "cycle-001-audit-result.json"), "utf8")), outcome.audit);
@@ -687,21 +733,26 @@ test("projects valid final messages even after nonzero Executor and Audit exits"
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.terminal.result, "failed");
-  assert.equal(comments.some(([issueId, body]) => issueId === outcome.execute.id && body === "Executor completed before nonzero exit.\n"), true);
-  assert.equal(comments.some(([issueId, body]) => issueId === outcome.execute.id && body === [
+  const executeDescription = (await fixture.gateway.get_issue(outcome.execute.id)).description;
+  const auditDescription = (await fixture.gateway.get_issue(outcome.auditIssue.id)).description;
+  assert.equal(executeDescription.includes("Executor completed before nonzero exit.\n"), true);
+  assert.equal(executeDescription.includes([
     "## Executor Result", "- Result: failure", "- Error: Process exited with code 2",
   ].join("\n")), true);
-  assert.equal(comments.some(([issueId, body]) => issueId === outcome.auditIssue.id && body === auditRaw), true);
-  assert.equal(comments.some(([issueId, body]) => issueId === outcome.auditIssue.id && body.includes(
+  assert.equal(auditDescription.includes(auditRaw), true);
+  assert.equal(auditDescription.includes(
     "## Audit Result\n- Verdict: process_error\n- Error: Performer exited unsuccessfully",
-  )), true);
+  ), true);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.execute.id), false);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.auditIssue.id), false);
   assert.deepEqual(fixture.gateway.attachments.map(({ filename }) => filename), ["cycle-001-audit-result.json"]);
 });
 
-test("keeps role reports on their Issues and links the uploaded Audit result from Cycle", async () => {
+test("keeps role reports in Issue descriptions and links the uploaded Audit result from Cycle", async () => {
   const fixture = await world();
   const comments: Array<readonly [string, string]> = [];
   const gateway = new Proxy(fixture.gateway as LinearGateway, {
@@ -731,10 +782,19 @@ test("keeps role reports on their Issues and links the uploaded Audit result fro
   });
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
   assert.equal(outcome.terminal.result, "succeeded");
-  const cycleComment = comments.find(([issueId]) => issueId === outcome.cycle.id)?.[1] ?? "";
+  const executeDescription = (await fixture.gateway.get_issue(outcome.execute.id)).description;
+  const auditDescription = (await fixture.gateway.get_issue(outcome.auditIssue.id)).description;
+  assert.equal(executeDescription.includes("Executor completed; this response is not Audit evidence.\n"), true);
+  assert.equal(auditDescription.includes("verdict: accepted"), true);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.execute.id), false);
+  assert.equal(comments.some(([issueId]) => issueId === outcome.auditIssue.id), false);
+  const cycleComment = comments.find(([issueId, body]) => (
+    issueId === outcome.cycle.id && body.startsWith("## Cycle Result")
+  ))?.[1] ?? "";
   assert.equal(cycleComment.includes("cycle-001-executor-result.md"), false);
   assert.equal(cycleComment.includes("cycle-001-audit-result.md"), false);
   assert.equal(
@@ -773,11 +833,14 @@ test("keeps Audit result upload failures visible without changing the Cycle verd
 
   const outcome = await runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => undefined,
   });
 
   assert.equal(outcome.terminal.result, "succeeded");
-  const cycleComment = comments.find(([issueId]) => issueId === outcome.cycle.id)?.[1] ?? "";
+  const cycleComment = comments.find(([issueId, body]) => (
+    issueId === outcome.cycle.id && body.startsWith("## Cycle Result")
+  ))?.[1] ?? "";
   assert.equal(cycleComment.includes("- Audit result: upload failed (upload current message that must remain visible to)"), true);
   assert.deepEqual(
     JSON.parse(await readFile(path.join(fixture.runDirectory, "cycle-001-audit-result.json"), "utf8")),
@@ -810,6 +873,7 @@ test("starts no Agent when complete family creation is not durably recorded", as
   await assert.rejects(
     runner.run({
       rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+      transitionComment: fixture.transitionComment,
       onFamilyRecorded: async () => undefined,
     }),
     /linear_write_failed/u,
@@ -830,6 +894,7 @@ test("starts no Agent when cursor persistence fails after family recording", asy
   });
   await assert.rejects(runner.run({
     rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
     onFamilyRecorded: async () => { throw new Error("root_state_write_failed"); },
   }), /root_state_write_failed/u);
   assert.equal(launches, 0);

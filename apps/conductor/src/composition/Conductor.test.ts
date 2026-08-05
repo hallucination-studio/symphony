@@ -13,11 +13,12 @@ import { parseRootState } from "../contracts/root.js";
 import { parseRootWorkspace } from "../contracts/workspace.js";
 import { CycleRunner } from "../cycle-runner/CycleRunner.js";
 import { InMemoryLinearGateway } from "../linear/InMemoryLinearGateway.js";
-import { createRootStateComment, parseRootStateComment } from "../linear/LinearRootState.js";
+import { parseRootDescription, renderRootDescription } from "../linear/LinearRootState.js";
 import type { Performer } from "../performer/api/Performer.js";
 import { Conductor } from "./Conductor.js";
 
 const exec = promisify(execFile);
+const DESCRIPTION_TIMESTAMP = "2026-08-05T00:00:00.000+08:00";
 
 async function scenario() {
   const base = await mkdtemp(path.join(os.tmpdir(), "symphony-conductor-"));
@@ -100,6 +101,22 @@ function scriptedPerformer(audits: readonly AuditRunResult[], launches: Performe
       };
     },
   };
+}
+
+async function setRootState(
+  world: Awaited<ReturnType<typeof scenario>>,
+  state: ReturnType<typeof parseRootState>,
+  report?: string,
+): Promise<void> {
+  const root = await world.gateway.get_issue("root-id");
+  await world.gateway.update_issue_description(
+    root.id,
+    renderRootDescription(root.description, state, report, DESCRIPTION_TIMESTAMP),
+  );
+}
+
+async function rootProjection(world: Awaited<ReturnType<typeof scenario>>) {
+  return parseRootDescription((await world.gateway.get_issue("root-id")).description);
 }
 
 const cycle = (objective: string): RootReconcileDecision => ({
@@ -192,9 +209,9 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
   assert.equal(published, 1);
   assert.equal(launches.length, 4);
   assert.equal((await world.gateway.get_issue("ENG-1")).status, "completed");
-  const stateComment = await world.gateway.find_root_state_comment("root-id");
-  assert.notEqual(stateComment, null);
-  const state = parseRootStateComment(stateComment as never);
+  const state = (await rootProjection(world)).state;
+  assert.notEqual(state, undefined);
+  if (state === undefined) throw new Error("missing_root_state");
   assert.equal(state.task_state_markdown, "Strict parser behavior is verified");
   assert.equal(state.pending_finding, undefined);
   assert.equal(state.pull_request_url, "https://github.com/acme/repo/pull/1");
@@ -218,6 +235,8 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
     findings: [],
     task_state_markdown: "Strict parser behavior is verified",
   });
+  assert.equal(reconcileRequests[0]?.root.description, "Reject ambiguity.");
+  assert.equal((await world.gateway.list_root_comments_after("root-id")).length, 0);
 });
 
 test("normalizes an unfinished Root to Todo before its first fresh Reconcile", async () => {
@@ -335,7 +354,7 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
 
 test("a recorded PR URL completes Root without repeating publication", async () => {
   const world = await scenario();
-  await createRootStateComment(world.gateway, "root-id", parseRootState({
+  await setRootState(world, parseRootState({
     workspace_path: world.workspacePath,
     run_directory: world.runDirectory,
     root_branch: "root/ENG-1",
@@ -365,7 +384,7 @@ test("a recorded PR URL completes Root without repeating publication", async () 
 
 test("publishing without a recorded PR URL stops before resolving the workspace", async () => {
   const world = await scenario();
-  await createRootStateComment(world.gateway, "root-id", parseRootState({
+  await setRootState(world, parseRootState({
     workspace_path: world.workspacePath,
     run_directory: world.runDirectory,
     root_branch: "root/ENG-1",
@@ -388,9 +407,9 @@ test("publishing without a recorded PR URL stops before resolving the workspace"
     status: "needs_human", reason: "publication_outcome_unknown",
   });
   assert.equal(workspaceResolutions, 0);
-  const stateComment = await world.gateway.find_root_state_comment("root-id");
-  assert.notEqual(stateComment, null);
-  assert.equal(parseRootStateComment(stateComment as never).current_phase, "NeedsHuman");
+  const state = (await rootProjection(world)).state;
+  assert.notEqual(state, undefined);
+  assert.equal(state?.current_phase, "NeedsHuman");
 });
 
 test("fails closed when Reconcile completes with unconsumed Root input", async () => {
@@ -412,7 +431,7 @@ test("fails closed when Reconcile completes with unconsumed Root input", async (
 
 test("a recorded delivered branch completes Root without repeating publication", async () => {
   const world = await scenario();
-  await createRootStateComment(world.gateway, "root-id", parseRootState({
+  await setRootState(world, parseRootState({
     workspace_path: world.workspacePath,
     run_directory: world.runDirectory,
     root_branch: "root/ENG-1",
@@ -451,9 +470,9 @@ test("an escaped Cycle failure records the current message and moves Root to In 
 
   await assert.rejects(conductor.run("ENG-1"), (caught: unknown) => caught === error);
   assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "review-id");
-  const stateComment = await world.gateway.find_root_state_comment("root-id");
-  assert.notEqual(stateComment, null);
-  const state = parseRootStateComment(stateComment as never);
+  const state = (await rootProjection(world)).state;
+  assert.notEqual(state, undefined);
+  if (state === undefined) throw new Error("missing_root_state");
   assert.equal(state.current_phase, "NeedsHuman");
   assert.equal(state.harness_feedback, error.message.slice(0, 50));
 });
@@ -542,17 +561,13 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
   });
 
   assert.equal((await conductor.run("ENG-1")).status, "done");
-  const comments = await world.gateway.list_root_comments_after("root-id");
-  const reports = comments.filter(({ body }) => body.startsWith("# Symphony Harness: Reconcile"));
-  assert.equal(reports.length, 2);
-  assert.match(reports[0]?.body ?? "", /### Why Continue[\s\S]*### Evidence[\s\S]*### Next Cycle/u);
-  const completed = reports[1]?.body ?? "";
+  const projection = await rootProjection(world);
+  const completed = projection.reconcile_report ?? "";
   assert.match(completed, /#### Created\n- created\.txt: \+2 lines/u);
   assert.match(completed, /#### Updated\n- updated\.txt: \+2 \/ -1 lines/u);
   assert.match(completed, /#### Deleted\n- deleted\.txt: -1 lines/u);
   assert.match(completed, /### Line Changes\n\+4 \/ -2 lines/u);
   assert.match(completed, /### Token Usage\nTotal tokens: 1\.3k/u);
   assert.doesNotMatch(completed, /(?:^|\n)(?:\?\?|[ MADRCU?!]{1,2}) /u);
-  const stateComment = await world.gateway.find_root_state_comment("root-id");
-  assert.equal(parseRootStateComment(stateComment as never).token_usage?.total_tokens, 1_300);
+  assert.equal(projection.state?.token_usage?.total_tokens, 1_300);
 });

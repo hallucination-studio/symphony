@@ -10,7 +10,6 @@ import type {
   LinearWorkflowState,
 } from "./LinearGateway.js";
 import { parseLinearComment, parseLinearIssue } from "../contracts/task-management.js";
-import { isRootStateComment } from "./LinearMarkers.js";
 
 
 export interface InMemoryLinearGatewaySeed {
@@ -113,14 +112,6 @@ export class InMemoryLinearGateway implements LinearGateway {
     return Object.freeze(comments.slice(cursorIndex + 1).map(copyComment));
   }
 
-  async find_root_state_comment(rootId: string): Promise<LinearComment | null> {
-    const matches = [...this.#comments.values()].filter((comment) => (
-      comment.issue_id === rootId && isRootStateComment(comment.body)
-    ));
-    if (matches.length > 1) throw new Error("linear_root_state_comment_duplicated");
-    return matches[0] === undefined ? null : copyComment(matches[0]);
-  }
-
   async list_unfinished_descendants(rootId: string): Promise<readonly LinearUnfinishedDescendant[]> {
     const descendants: LinearIssue[] = [];
     const pending = [rootId];
@@ -174,6 +165,12 @@ export class InMemoryLinearGateway implements LinearGateway {
     }));
   }
 
+  async update_issue_description(issueId: string, description: string): Promise<void> {
+    const issue = this.#issues.get(issueId);
+    if (issue === undefined) throw new Error(`linear_issue_not_found:${issueId}`);
+    this.#issues.set(issueId, parseLinearIssue({ ...issue, description }));
+  }
+
   async create_comment(issueId: string, body: string): Promise<LinearComment> {
     if (!this.#issues.has(issueId)) throw new Error(`linear_issue_not_found:${issueId}`);
     this.#commentSequence += 1;
@@ -187,12 +184,6 @@ export class InMemoryLinearGateway implements LinearGateway {
     });
     this.#comments.set(id, comment);
     return copyComment(comment);
-  }
-
-  async update_comment(commentId: string, body: string): Promise<void> {
-    const comment = this.#comments.get(commentId);
-    if (comment === undefined) throw new Error(`linear_comment_not_found:${commentId}`);
-    this.#comments.set(commentId, parseLinearComment({ ...comment, body }));
   }
 
   get attachments(): readonly InMemoryLinearAttachment[] {

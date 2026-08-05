@@ -16,6 +16,7 @@ import type { RootState } from "../contracts/root.js";
 import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js";
 import type { LinearIssue, LinearWorkflow } from "../contracts/task-management.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
+import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
 import type { Performer } from "../performer/api/Performer.js";
 
 const MAX_FINAL_RESPONSE_BYTES = 32 * 1024;
@@ -38,6 +39,7 @@ export interface CycleRunnerOptions {
   readonly auditModel?: string;
   readonly auditReasoningEffort?: string;
   readonly timeoutMs: number;
+  readonly now?: () => Date;
 }
 
 export interface CycleRunRequest {
@@ -45,6 +47,7 @@ export interface CycleRunRequest {
   readonly teamId: string;
   readonly spec: CycleSpec;
   readonly rootState: RootState;
+  readonly transitionComment: MarkdownText;
   readonly onFamilyRecorded: () => Promise<void>;
 }
 
@@ -260,6 +263,17 @@ function auditProcessErrorComment(reason: string): string {
   ].join("\n");
 }
 
+function appendIssueDescription(
+  description: string,
+  updatedAt: Date,
+  additions: readonly (string | undefined)[],
+): string {
+  const report = additions.filter((value): value is string => value !== undefined).join("\n\n");
+  return report.length === 0
+    ? description
+    : `${description}\n\n## Result\n\nUpdated at: ${currentLinearDescriptionTimestamp(updatedAt)}\n\n${report}`;
+}
+
 function processError(result: PerformerProcessResult, fallbackReason?: string): AuditRunResult {
   const reason = result.sanitized_reason?.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
     ?? fallbackReason?.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
@@ -348,6 +362,7 @@ export class CycleRunner {
     });
     await persistFamily(request, { cycle, execute, audit: auditIssue });
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.in_progress_status_id);
+    await this.options.gateway.create_comment(cycle.id, request.transitionComment);
     await request.onFamilyRecorded();
 
     await this.options.gateway.update_issue_status(execute.id, this.options.workflow.in_progress_status_id);
@@ -373,13 +388,16 @@ export class CycleRunner {
       executorMarkdown = response.markdown;
       executorResponseReason = response.reason;
     }
-    if (executorMarkdown !== undefined) await this.options.gateway.create_comment(execute.id, executorMarkdown);
-    if (executorMarkdown === undefined || executeProcess.launch_status !== "exited" || executeProcess.exit_code !== 0) {
-      await this.options.gateway.create_comment(
-        execute.id,
-        executorFailureComment(executeProcess, executorResponseReason),
-      );
-    }
+    const executorFailure = executorMarkdown === undefined
+      || executeProcess.launch_status !== "exited"
+      || executeProcess.exit_code !== 0
+      ? executorFailureComment(executeProcess, executorResponseReason)
+      : undefined;
+    const executorUpdatedAt = (this.options.now ?? (() => new Date()))();
+    await this.options.gateway.update_issue_description(
+      execute.id,
+      appendIssueDescription(execute.description, executorUpdatedAt, [executorMarkdown, executorFailure]),
+    );
     await this.options.gateway.update_issue_status(execute.id, this.options.workflow.done_status_id);
 
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.in_review_status_id);
@@ -437,10 +455,15 @@ export class CycleRunner {
       }
     }
     audit = await persistAndReloadAuditResult(auditResultPath, audit);
-    if (auditMarkdown !== undefined) await this.options.gateway.create_comment(auditIssue.id, auditMarkdown);
-    if (auditErrorReason !== undefined) {
-      await this.options.gateway.create_comment(auditIssue.id, auditProcessErrorComment(auditErrorReason));
-    }
+    const auditUpdatedAt = (this.options.now ?? (() => new Date()))();
+    await this.options.gateway.update_issue_description(
+      auditIssue.id,
+      appendIssueDescription(
+        auditIssue.description,
+        auditUpdatedAt,
+        [auditMarkdown, auditErrorReason === undefined ? undefined : auditProcessErrorComment(auditErrorReason)],
+      ),
+    );
     await this.options.gateway.update_issue_status(auditIssue.id, this.options.workflow.done_status_id);
     const terminal = terminalResult(auditIssue.id, audit);
     const auditResultFilename = path.basename(auditResultPath);
