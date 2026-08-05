@@ -45,12 +45,13 @@ description may additionally contain exactly one Harness-managed snapshot block:
 
 ````text
 # Symphony Harness: Managed Root
+## Metadata
 Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>
-## Root State
+### Root State
 ```json
 <canonical RootState JSON>
 ```
-## Reconcile
+## Result
 <latest validated Reconcile report>
 # Symphony Harness: End Managed Root
 ````
@@ -66,7 +67,7 @@ The managed suffix stores no credential, transcript, revision, digest, or
 process handle. The per-process `max_cycles` guard is not stored there; it is an
 operator launch limit rather than durable Root progress.
 
-Each Root Reconcile decision replaces the latest `## Reconcile` report in the
+Each Root Reconcile decision replaces the latest `## Result` report in the
 managed suffix. A continue report contains `Why Continue`, `Evidence`, and
 `Next Cycle`; a completion report contains `Overview`, semantic
 `Created`/`Updated`/`Deleted` paths, whole-worktree line changes,
@@ -80,15 +81,18 @@ file contents, transcripts, and estimated token values are forbidden.
 
 | Document | Required sections | Write policy |
 |---|---|---|
-| Cycle description | Objective, Acceptance, Boundaries, Consumed Root Comment IDs | create once; never update |
-| Execute description | Role, parent Cycle, frozen task, acceptance, boundaries, workspace-write policy, terminal Executor report | create with Cycle; append the exact terminal report once; never rewrite the frozen context |
-| Audit description | Role, parent Cycle, acceptance, independent read-only policy, terminal Audit report | create with Cycle; append the exact terminal report once; never rewrite the frozen context |
+| Cycle description | `# Task` with Objective, Acceptance, and Boundaries; `# Symphony Metadata` with Consumed Root Comment IDs | create once; never update |
+| Execute description | frozen Task; Role/access Metadata; optional Result | create once; append Result once |
+| Audit description | frozen Task; Role/access Metadata; optional Result | create once; append Result once |
 
 Cycle, Execute, and Audit are created in that order. Audit exists in waiting
-state from family creation and starts only after Execute terminates. Cycle
-description content remains immutable. Only Conductor may append the one terminal
-role report to each role description; V1 does not detect or repair unrelated
-manual edits.
+state from family creation and starts only after Execute terminates. These exact
+top-level regions make ownership visible and mechanically parseable: the Root
+content before the managed marker is user-authored; `# Task` is frozen business
+context; `# Symphony Metadata` is Harness-owned operational context; and
+`# Result` is the terminal human report. Cycle description content remains
+immutable. Only Conductor may append the terminal role report to each role description;
+V1 does not detect or repair unrelated manual edits.
 
 The frozen Cycle title is `[Cycle NNN] <objective>` with a maximum total title
 length of 80 characters. The role titles are exactly `[Executor] Cycle NNN` and

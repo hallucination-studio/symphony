@@ -539,15 +539,16 @@ export function validateGoldenResultComments(issue) {
   if (cycles.length < 1) throw new Error("golden_result_comments_cycle_missing");
   const managedStart = issue.description.indexOf("\n\n# Symphony Harness: Managed Root\n");
   const managedEnd = issue.description.lastIndexOf("\n\n# Symphony Harness: End Managed Root");
-  const reconcileStart = issue.description.indexOf("\n\n## Reconcile\n", managedStart);
+  const reconcileStart = issue.description.indexOf("\n\n## Result\n", managedStart);
   if (managedStart < 1 || managedEnd <= managedStart || reconcileStart <= managedStart
-    || !issue.description.includes("\n\n## Root State\n", managedStart)
+    || !issue.description.includes("\n\n## Metadata\n", managedStart)
+    || !issue.description.includes("\n\n### Root State\n", managedStart)
     || !issue.description.slice(managedStart, managedEnd).split(/\r?\n/u).some((line) => LOCAL_TIMESTAMP.test(line))
     || issue.comments.nodes.some(({ body }) => body.startsWith("# Symphony Harness:"))) {
     throw new Error("golden_root_description_invalid");
   }
   const completionReport = `# Symphony Harness: Reconcile\n${issue.description.slice(
-    reconcileStart + "\n\n## Reconcile".length,
+    reconcileStart + "\n\n## Result".length,
     managedEnd,
   )}`;
   if (!validRootReconcileReport(completionReport, "complete")) {
@@ -569,10 +570,14 @@ export function validateGoldenResultComments(issue) {
       || !commentConnection(executor.comments) || !commentConnection(audit.comments)) {
       throw new Error("golden_result_comments_role_invalid");
     }
-    const resultSeparator = "\n\n## Result\n\n";
+    const resultSeparator = "\n\n# Result\n\n";
     const executorBody = descriptionResult(executor.description, resultSeparator);
     const auditBody = descriptionResult(audit.description, resultSeparator);
     if (executorBody === undefined || auditBody === undefined
+      || !executor.description.startsWith("# Task\n\n")
+      || !executor.description.includes("\n\n# Symphony Metadata\n\n")
+      || !audit.description.startsWith("# Task\n\n")
+      || !audit.description.includes("\n\n# Symphony Metadata\n\n")
       || executor.comments.nodes.length !== 0 || audit.comments.nodes.length !== 0) {
       throw new Error("golden_result_comments_missing");
     }

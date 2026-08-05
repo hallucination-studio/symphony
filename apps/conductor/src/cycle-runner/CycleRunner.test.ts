@@ -10,6 +10,7 @@ import { parseRootState } from "../contracts/root.js";
 import { parseLinearIssue } from "../contracts/task-management.js";
 import { parseMarkdownText } from "../contracts/validation.js";
 import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
+import { parseManagedIssueDescription } from "../linear/LinearIssueDescription.js";
 import { InMemoryLinearGateway } from "../linear/InMemoryLinearGateway.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
 import type { Performer } from "../performer/api/Performer.js";
@@ -253,16 +254,17 @@ test("projects the Cycle, Execute, and Audit lifecycle statuses visibly", async 
   assert.equal(cycleComments.length, 2);
   assert.equal(cycleComments[0], fixture.transitionComment);
   const cycleComment = cycleComments.find((body) => body.startsWith("## Cycle Result")) ?? "";
-  assert.equal(executorDescription.includes("## Role\n\nExecute"), true);
-  assert.equal(executorDescription.includes(
-    `## Result\n\nUpdated at: ${updatedAtText}\n\nExecutor completed; this response is not Audit evidence.\n`,
-  ), true);
-  assert.equal(auditDescription.startsWith("## Role\n\nAudit"), true);
-  assert.equal(auditDescription.includes(
-    `## Result\n\nUpdated at: ${updatedAtText}\n\nverdict: accepted`,
-  ), true);
-  assert.equal(auditDescription.includes("## Scope Audited"), true);
-  assert.equal(auditDescription.includes("## Implementation Review"), true);
+  const executorProjection = parseManagedIssueDescription(executorDescription);
+  const auditProjection = parseManagedIssueDescription(auditDescription);
+  assert.equal(executorProjection.metadata.includes("## Role\n\nExecute"), true);
+  assert.equal(executorProjection.task.includes("## Objective\n\nReject ambiguity"), true);
+  assert.equal(executorProjection.updated_at, updatedAtText);
+  assert.equal(executorProjection.result, "Executor completed; this response is not Audit evidence.");
+  assert.equal(auditProjection.metadata.includes("## Role\n\nAudit"), true);
+  assert.equal(auditProjection.updated_at, updatedAtText);
+  assert.equal(auditProjection.result?.startsWith("verdict: accepted"), true);
+  assert.equal(auditProjection.result?.includes("## Scope Audited"), true);
+  assert.equal(auditProjection.result?.includes("## Implementation Review"), true);
   assert.equal(nowCalls, 2);
   assert.equal(comments.some(([issueId]) => issueId === outcome.execute.id), false);
   assert.equal(comments.some(([issueId]) => issueId === outcome.auditIssue.id), false);

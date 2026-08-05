@@ -80,10 +80,11 @@ place on every durable projection:
 
 ```text
 # Symphony Harness: Managed Root
+## Metadata
 Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>
-## Root State
+### Root State
 <canonical RootState JSON fence>
-## Reconcile
+## Result
 <latest validated Reconcile report>
 # Symphony Harness: End Managed Root
 ```

@@ -53,14 +53,19 @@ function rootStateDescription(description, state) {
   return [
     rootRequirement(description),
     ROOT_DESCRIPTION_START,
+    "## Metadata",
     `Updated at: ${formatLocalTimestamp()}`,
-    "## Root State",
+    "### Root State",
     "",
     "```json",
     JSON.stringify(state, null, 2),
     "```",
     ROOT_DESCRIPTION_END,
   ].join("\n\n");
+}
+
+function managedDescription(task, metadata) {
+  return ["# Task", task, "# Symphony Metadata", metadata].join("\n\n");
 }
 
 export class LinearDriver {
@@ -195,12 +200,18 @@ export class LinearDriver {
       execute_issue: {
         id: `execute-${this.#cycleNumber}`,
         title: `[Executor] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
-        description: "## Role\n\nExecute",
+        description: managedDescription(
+          ["## Objective", objective, "## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
+          "## Role\n\nExecute\n\n## Access\n\nworkspace-write",
+        ),
       },
       audit_issue: {
         id: `audit-${this.#cycleNumber}`,
         title: `[Audit] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
-        description: "## Role\n\nAudit",
+        description: managedDescription(
+          ["## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
+          "## Role\n\nAudit\n\n## Access\n\nread-only",
+        ),
       },
       result: null,
     };

@@ -17,6 +17,7 @@ import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js
 import type { LinearIssue, LinearWorkflow } from "../contracts/task-management.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
 import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
+import { appendManagedIssueResult, renderManagedIssueDescription } from "../linear/LinearIssueDescription.js";
 import type { Performer } from "../performer/api/Performer.js";
 
 const MAX_FINAL_RESPONSE_BYTES = 32 * 1024;
@@ -68,25 +69,35 @@ function issueTitle(prefix: string, objective: CycleSpec["objective"]): string {
 }
 
 function cycleDescription(spec: CycleSpec): string {
-  return [
-    "## Objective", spec.objective, "## Acceptance", spec.acceptance,
-    "## Boundaries", spec.boundaries, "## Consumed Root Comment IDs",
-    ...(spec.consumed_comment_ids.length === 0 ? ["None"] : spec.consumed_comment_ids.map((id) => `- ${id}`)),
-  ].join("\n\n");
+  return renderManagedIssueDescription({
+    task: [
+      "## Objective", spec.objective, "## Acceptance", spec.acceptance, "## Boundaries", spec.boundaries,
+    ].join("\n\n"),
+    metadata: [
+      "## Consumed Root Comment IDs",
+      ...(spec.consumed_comment_ids.length === 0 ? ["None"] : spec.consumed_comment_ids.map((id) => `- ${id}`)),
+    ].join("\n\n"),
+  });
 }
 
 function executeDescription(spec: CycleSpec): string {
-  return [
-    "## Role", "Execute", "## Objective", spec.objective, "## Acceptance", spec.acceptance,
-    "## Boundaries", spec.boundaries, "## Access", "workspace-write; do not commit, push, or create a pull request.",
-  ].join("\n\n");
+  return renderManagedIssueDescription({
+    task: [
+      "## Objective", spec.objective, "## Acceptance", spec.acceptance, "## Boundaries", spec.boundaries,
+    ].join("\n\n"),
+    metadata: [
+      "## Role", "Execute", "## Access", "workspace-write; do not commit, push, or create a pull request.",
+    ].join("\n\n"),
+  });
 }
 
 function auditDescription(spec: CycleSpec): string {
-  return [
-    "## Role", "Audit", "## Acceptance", spec.acceptance, "## Boundaries", spec.boundaries,
-    "## Access", "read-only; inspect the complete real workspace diff independently.",
-  ].join("\n\n");
+  return renderManagedIssueDescription({
+    task: ["## Acceptance", spec.acceptance, "## Boundaries", spec.boundaries].join("\n\n"),
+    metadata: [
+      "## Role", "Audit", "## Access", "read-only; inspect the complete real workspace diff independently.",
+    ].join("\n\n"),
+  });
 }
 
 async function persistFamily(request: CycleRunRequest, family: { cycle: LinearIssue; execute: LinearIssue; audit: LinearIssue }): Promise<void> {
@@ -272,7 +283,7 @@ function appendIssueDescription(
   const report = additions.filter((value): value is string => value !== undefined).join("\n\n");
   return report.length === 0
     ? description
-    : `${description}\n\n## Result\n\nUpdated at: ${currentLinearDescriptionTimestamp(updatedAt)}\n\n${report}`;
+    : appendManagedIssueResult(description, currentLinearDescriptionTimestamp(updatedAt), report);
 }
 
 function processError(result: PerformerProcessResult, fallbackReason?: string): AuditRunResult {

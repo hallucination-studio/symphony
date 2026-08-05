@@ -405,15 +405,17 @@ test("golden result projection uses role descriptions and one visible Audit JSON
       "",
       "# Symphony Harness: Managed Root",
       "",
+      "## Metadata",
+      "",
       `Updated at: ${updatedAt}`,
       "",
-      "## Root State",
+      "### Root State",
       "",
       "```json",
       '{"current_phase":"completed"}',
       "```",
       "",
-      "## Reconcile",
+      "## Result",
       "",
       "### Overview",
       "The complete worktree satisfies the Root requirement.",
@@ -469,7 +471,7 @@ test("golden result projection uses role descriptions and one visible Audit JSON
           nodes: [
             {
               title: "[Executor] Cycle 001",
-              description: `## Role\n\nExecute\n\n## Result\n\nUpdated at: ${updatedAt}\n\n${executorMarkdown}`,
+              description: `# Task\n\n## Objective\n\nCreate the golden file.\n\n# Symphony Metadata\n\n## Role\n\nExecute\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${executorMarkdown}`,
               comments: {
                 nodes: [],
                 pageInfo: { hasNextPage: false },
@@ -477,7 +479,7 @@ test("golden result projection uses role descriptions and one visible Audit JSON
             },
             {
               title: "[Audit] Cycle 001",
-              description: `## Role\n\nAudit\n\n## Result\n\nUpdated at: ${updatedAt}\n\n${auditMarkdown}`,
+              description: `# Task\n\n## Acceptance\n\nVerify the golden file.\n\n# Symphony Metadata\n\n## Role\n\nAudit\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${auditMarkdown}`,
               comments: { nodes: [], pageInfo: { hasNextPage: false } },
             },
           ],
@@ -503,7 +505,7 @@ test("golden result projection uses role descriptions and one visible Audit JSON
   assert.doesNotThrow(() => validateGoldenResultComments(linearNormalizedProjection));
   const executorFailure = structuredClone(projection);
   executorFailure.children.nodes[0].children.nodes[0].description =
-    `## Role\n\nExecute\n\n## Result\n\nUpdated at: ${updatedAt}\n\n## Executor Result\n- Result: failure\n- Error: Process timed out`;
+    `# Task\n\nExecute the Cycle.\n\n# Symphony Metadata\n\n## Role\n\nExecute\n\n# Result\n\nUpdated at: ${updatedAt}\n\n## Executor Result\n- Result: failure\n- Error: Process timed out`;
   assert.doesNotThrow(() => validateGoldenResultComments(executorFailure));
   const missingRootReport = structuredClone(projection);
   missingRootReport.description = "Create the requested golden file.";

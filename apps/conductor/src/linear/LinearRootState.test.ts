@@ -43,9 +43,10 @@ test("Root description keeps the authored requirement outside one strict managed
   assert.equal(description.split(ROOT_MANAGED_ROOT_START).length, 2);
   assert.equal(description.split(ROOT_MANAGED_ROOT_END).length, 2);
   assert.match(description, /^The parser must reject ambiguity\.\n\n# Symphony Harness: Managed Root\n/u);
+  assert.match(description, /## Metadata\n\nUpdated at:/u);
   assert.match(description, /Updated at: 2026-08-05T00:00:00\.000\+08:00/u);
-  assert.match(description, /## Root State\n\n```json\n/u);
-  assert.match(description, /## Reconcile\n\n### Why Continue/u);
+  assert.match(description, /### Root State\n\n```json\n/u);
+  assert.match(description, /## Result\n\n### Why Continue/u);
   assert.equal(parseRootDescription(description).requirement, "The parser must reject ambiguity.");
   assert.deepEqual(parseRootDescription(description).state, state);
   assert.equal(parseRootDescription(description).reconcile_report, report);
@@ -59,6 +60,11 @@ test("Root description parser accepts an uninitialized Root and rejects malforme
 
   const rendered = renderRootDescription("The original requirement.", state, undefined, updatedAt);
   assert.equal(parseRootDescription(rendered).reconcile_report, undefined);
+  const legacy = rendered
+    .replace("## Metadata\n\n", "")
+    .replace("### Root State", "## Root State")
+    .replace("## Result", "## Reconcile");
+  assert.deepEqual(parseRootDescription(legacy), parseRootDescription(rendered));
   assert.throws(
     () => parseRootDescription(`${rendered}\n${ROOT_MANAGED_ROOT_START}`),
     /linear_root_description_malformed/u,

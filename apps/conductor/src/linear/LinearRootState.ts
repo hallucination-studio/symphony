@@ -12,8 +12,11 @@ import { parseLinearDescriptionTimestamp } from "./LinearDescriptionTimestamp.js
 /** The only bytes Conductor owns in a Root Issue description. */
 export const ROOT_MANAGED_ROOT_START = "# Symphony Harness: Managed Root";
 export const ROOT_MANAGED_ROOT_END = "# Symphony Harness: End Managed Root";
-export const ROOT_STATE_SECTION_HEADING = "## Root State";
-export const ROOT_RECONCILE_SECTION_HEADING = "## Reconcile";
+export const ROOT_METADATA_SECTION_HEADING = "## Metadata";
+export const ROOT_STATE_SECTION_HEADING = "### Root State";
+export const ROOT_RESULT_SECTION_HEADING = "## Result";
+const LEGACY_ROOT_STATE_SECTION_HEADING = "## Root State";
+const LEGACY_ROOT_RECONCILE_SECTION_HEADING = "## Reconcile";
 const UPDATED_AT_PREFIX = "Updated at: ";
 
 export interface RootDescriptionProjection {
@@ -47,14 +50,18 @@ function parseManagedBody(lines: readonly string[]): {
   readonly reconcile_report?: MarkdownText | undefined;
   readonly updated_at: string;
 } {
-  const body = lines.join("\n").replace(/^\n/u, "").replace(/\n$/u, "");
+  const rawBody = lines.join("\n").replace(/^\n/u, "").replace(/\n$/u, "");
+  const metadataPrefix = `${ROOT_METADATA_SECTION_HEADING}\n\n`;
+  const structured = rawBody.startsWith(metadataPrefix);
+  const body = structured ? rawBody.slice(metadataPrefix.length) : rawBody;
   const newline = body.indexOf("\n");
   if (newline < 0) malformed();
   const updatedAtLine = body.slice(0, newline);
   if (!updatedAtLine.startsWith(UPDATED_AT_PREFIX)) malformed();
   const updated_at = parseUpdatedAt(updatedAtLine.slice(UPDATED_AT_PREFIX.length));
   const stateBody = body.slice(newline + 1).replace(/^\n/u, "");
-  const statePrefix = `${ROOT_STATE_SECTION_HEADING}\n\n\`\`\`json\n`;
+  const stateHeading = structured ? ROOT_STATE_SECTION_HEADING : LEGACY_ROOT_STATE_SECTION_HEADING;
+  const statePrefix = `${stateHeading}\n\n\`\`\`json\n`;
   if (!stateBody.startsWith(statePrefix)) malformed();
 
   const closingFence = stateBody.indexOf("\n```", statePrefix.length);
@@ -71,7 +78,8 @@ function parseManagedBody(lines: readonly string[]): {
 
   const remainder = stateBody.slice(closingFence + "\n```".length);
   if (remainder.length === 0) return { state, updated_at };
-  const reportPrefix = `\n\n${ROOT_RECONCILE_SECTION_HEADING}\n\n`;
+  const reportHeading = structured ? ROOT_RESULT_SECTION_HEADING : LEGACY_ROOT_RECONCILE_SECTION_HEADING;
+  const reportPrefix = `\n\n${reportHeading}\n\n`;
   if (!remainder.startsWith(reportPrefix)) malformed();
   const report = remainder.slice(reportPrefix.length);
   if (report.length === 0) malformed();
@@ -144,6 +152,8 @@ export function renderRootDescription(
     "",
     ROOT_MANAGED_ROOT_START,
     "",
+    ROOT_METADATA_SECTION_HEADING,
+    "",
     `${UPDATED_AT_PREFIX}${parsedUpdatedAt}`,
     "",
     ROOT_STATE_SECTION_HEADING,
@@ -151,7 +161,7 @@ export function renderRootDescription(
     "```json",
     JSON.stringify(parsedState, null, 2),
     "```",
-    ...(report === undefined ? [] : ["", ROOT_RECONCILE_SECTION_HEADING, "", report]),
+    ...(report === undefined ? [] : ["", ROOT_RESULT_SECTION_HEADING, "", report]),
     "",
     ROOT_MANAGED_ROOT_END,
   ].join("\n");

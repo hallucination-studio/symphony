@@ -41,7 +41,7 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
   });
   await linear.updateIssueDescription(
     cycle.execute_issue?.id ?? `execute-${cycle.id}`,
-    `${cycle.execute_issue?.description ?? "## Role\n\nExecute"}\n\n## Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${executorMarkdown || "Executor result missing."}`,
+    `${cycle.execute_issue?.description ?? "# Task\n\nExecute\n\n# Symphony Metadata\n\n## Role\n\nExecute"}\n\n# Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${executorMarkdown || "Executor result missing."}`,
   );
   const auditRequest = Object.freeze({
     root_id: root.id,
@@ -61,7 +61,7 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
   await linear.recordAudit(cycle.id, persistedAudit);
   await linear.updateIssueDescription(
     cycle.audit_issue?.id ?? `audit-${cycle.id}`,
-    `${cycle.audit_issue?.description ?? "## Role\n\nAudit"}\n\n## Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${auditMarkdown || "Audit result missing."}`,
+    `${cycle.audit_issue?.description ?? "# Task\n\nAudit\n\n# Symphony Metadata\n\n## Role\n\nAudit"}\n\n# Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${auditMarkdown || "Audit result missing."}`,
   );
   await writeFile(
     `${world.runDirectory}/deterministic-evidence.jsonl`,

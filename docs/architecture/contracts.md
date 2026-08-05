@@ -188,10 +188,12 @@ field. Its five IDs are bound only after exact-name and expected-type checks;
 the caller never supplies status IDs or CLI flags.
 
 The Gateway's description operation is constrained to replacing the exact
-interior of the Root Harness snapshot block or appending one terminal role
-report plus one local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`
-line to an Execute/Audit description. It preserves all frozen bytes outside the
-owned region and cannot update a Cycle description. The file operation is
+interior of the Root Harness snapshot block or appending one terminal `# Result`
+region plus one local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`
+line to an Execute/Audit description. Child descriptions separate frozen
+`# Task`, Harness-owned `# Symphony Metadata`, and optional terminal `# Result`
+regions. It preserves all frozen bytes outside the owned region and cannot
+update a Cycle description. The file operation is
 `upload_file(filename, content_type: "application/json", contents: Uint8Array)
 -> LinearUploadedFile`. It returns only `{ url }`. Only the re-read typed Audit
 result is uploaded to the Cycle as `cycle-NNN-audit-result.json`; role Markdown
