@@ -79,6 +79,9 @@ API keys and base URLs are resolved at startup and passed only to the owning
 role process. They are not part of `PerformerLaunchRequest`,
 `HarnessRunRequest`, or any Linear projection. An omitted model or reasoning
 override is left to the user's local Codex configuration and authentication.
+The caller supplies the role's own agent, model, and reasoning values; Reconcile
+does not inherit Execute settings. API keys and base URLs are resolved by the
+Conductor backend environment and never enter this request.
 
 ## Private diagnostic evidence
 
@@ -111,7 +114,7 @@ flowchart LR
 
 | Rule | Caller role | Session | Workspace sandbox | Excluded context |
 |---|---|---|---|---|
-| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the Execute role configuration | no workspace mount or tools | workspace facts and Execute/Audit transcripts |
+| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the independent Reconcile role configuration | no workspace mount or tools | workspace facts and Execute/Audit transcripts |
 | `PF-SESSION-002` | Execute | one fresh process per Cycle | workspace-write | Reconcile transcript, prior Cycle transcripts, and Audit history |
 | `PF-SESSION-003` | Audit | a distinct fresh process after Execute terminates | read-only | Execute transcript, hidden state, and prior Audit history |
 | `PF-PERM-001` | every process | only the configured workspace and role sandbox | supplied by the caller, not inferred by Performer | Linear capability |
@@ -132,12 +135,13 @@ an Audit attempt.
 | Linear Issue, exact role-description/Root-description/Cycle-comment projections, and typed Audit JSON file projection | private rendering helpers behind Linear Gateway calls |
 | raw process start, stop, bounded final response, exit code, duration, and provider token facts | Performer |
 
-`--agent` selects one thin CLI adapter for the complete Root run and defaults to
-`codex`. V1's closed `AgentKind` contains only `codex`; a future value may add
-another thin adapter without changing Root Reconciler or Cycle Runner. Execute
-and Audit still have independent startup credentials, base URLs, model values,
-and reasoning-effort values. There is no dynamic per-Cycle routing, plugin
-discovery, registry, compatibility alias, or cross-role transcript.
+Each role selects one thin CLI adapter through its own `*_agent` value and
+defaults to `codex`. V1's closed `AgentKind` contains only `codex`; a future
+value may add another thin adapter without changing Root Reconciler or Cycle
+Runner. Reconcile, Execute, and Audit retain independent startup credentials,
+base URLs, model values, and reasoning-effort values. There is no dynamic
+per-Cycle routing, plugin discovery, registry, compatibility alias, or
+cross-role transcript.
 
 Performer never constructs, truncates, repairs, or interprets a prompt. Root
 Reconciler owns the Manager prompt; Cycle Runner owns the frozen Execute and

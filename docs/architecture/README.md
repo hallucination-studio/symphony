@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not claim |
 |---|---|---|
-| target proposal | Linear Root / immutable Cycle workflow and ownership | current implementation parity or an implicit migration sequence |
+| target proposal | Linear Root / immutable Cycle workflow, Conductor ownership, and Podium Desktop local orchestration | current implementation parity or an implicit migration sequence |
 
 ## Product goal
 
@@ -27,6 +27,13 @@ flowchart TD
 Each Cycle contains exactly one Execute and one Audit Issue. Audit runs after
 every Execute attempt, including process failures. Only a Succeeded Cycle can
 update the trusted fields in Root State.
+
+Podium Desktop is the local operator surface for V2. It persists Project
+Bindings and stable Root allocations, then runs multiple local Conductors. A
+Conductor remains a deliberately narrow CLI process for exactly one Root,
+exactly one workspace, and exactly one external run directory. Podium owns
+local queueing and process lifecycle around those Conductor invocations; it
+does not own Cycle semantics, Root State, role prompts, or Audit judgment.
 
 ## Reading order
 
@@ -58,6 +65,7 @@ update the trusted fields in Root State.
 | Linear Gateway | normalized GraphQL reads/writes, canonical status resolution, and Issue projection behind an injectable protocol | workflow reasoning, Markdown policy, or hidden state |
 | Root State | persist the minimal checkpoint and promote trusted fields only from Succeeded Cycles | original requirement, child history, or a Trusted State service |
 | Conductor | deterministic serial orchestration, visible status projection, startup cancellation, and fixed terminal delivery function | semantic next-step, audit judgment, or recovery protocol |
+| Podium Desktop | persist Bindings and stable Root paths, prioritize local assignments, and supervise bound Conductors | Cycle semantics, Root State, role prompts, Audit judgment, Web, or cross-machine leases |
 
 ## V1 boundaries
 
@@ -71,7 +79,7 @@ update the trusted fields in Root State.
 | new Root comments become next-Reconcile input | old-comment replay or descendant comments as instructions |
 | Root State locates the existing workspace after restart | Agent-session resume, state reconstruction from children, or replacement workspace |
 | startup cancels all unfinished descendants before fresh Reconcile | continuing, auditing, or interpreting old active children |
-| caller supplies one Root workspace and one external run directory | Root claiming, workspace allocation, Dashboard, or local-task mode |
+| caller supplies one Root workspace and one external run directory | Root claiming or workspace allocation inside Conductor; V2 Podium Desktop owns local allocation |
 | one terminal commit/push/PR function before Root Done | delivery subsystem, retry/finalizer/convergence, automatic merge |
 | one public Root-run command | one-shot role commands or any second Linear mutation path |
 
@@ -104,3 +112,22 @@ references. This evidence is never supplied to Audit or Root Reconcile, never
 uploaded to Linear, and never treated as workflow authority. The caller owns
 retention; golden E2E failures archive evidence before cleaning their owned
 temporary resources and report only `diagnostic_ref`.
+
+## Podium Desktop V2 boundary
+
+Podium Desktop persists one `ProjectBinding` per configured Linear Project. A
+binding contains the project ID, an operator-visible routing label, repository
+path, base branch, local concurrency, and independent Reconcile, Execute, and
+Audit role launch configuration. It also persists each allocated Root's stable
+`root_id`, `workspace_path`, and `run_directory`. Assignment records, process
+IDs, and the pending queue are runtime memory only; they are rebuilt or dropped
+when Desktop stops.
+
+The scheduler is local to one Desktop instance. A higher-priority assignment
+may preempt a lower-priority running assignment; equal priorities never
+preempt. Preemption is ordered: Desktop requests the Conductor process tree to
+stop, confirms that the tree has stopped, and only then starts the replacement.
+There is no cross-machine lease, distributed claim, SQLite store, daemon IPC,
+or Web surface in this V2 target. Conductor `NeedsHuman` remains a V1 terminal
+state, but its Podium scheduling, UI, and E2E behavior are out of scope for this
+round.

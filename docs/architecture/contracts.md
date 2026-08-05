@@ -19,10 +19,12 @@ semantic evidence.
 | `Performer` | mechanically launch one configured Agent CLI process |
 | `CycleRunner` | Execute then Audit and calculate the Cycle result |
 | Conductor PR function | after completion, run one fixed commit/push/create-PR sequence |
+| `ProjectBinding` | persisted Podium Desktop routing, repository, concurrency, and role launch values |
 
 There is no generic Task Manager, capability matrix, MCP command schema,
-delivery subsystem, finalizer, runtime registry, or revision-aware mutation
-interface.
+delivery subsystem, finalizer, runtime registry, cross-machine lease, or
+revision-aware mutation interface. Podium Desktop runtime assignments, process
+IDs, and queue entries are not public or durable contracts.
 
 ## Identity and status
 
@@ -57,9 +59,13 @@ HarnessRunRequest {
   linear_root: string,
   workspace_path: string,
   run_directory: string,
-  agent: codex,
+  reconcile_agent: codex,
+  reconcile_model?: string,
+  reconcile_reasoning_effort?: string,
+  execute_agent: codex,
   execute_model?: string,
   execute_reasoning_effort?: string,
+  audit_agent: codex,
   audit_model?: string,
   audit_reasoning_effort?: string,
   max_cycles: positive integer
@@ -71,22 +77,66 @@ HarnessRunRequest {
 | Root | one identifier or UUID is required; no local task mode or Root discovery |
 | workspace | caller supplies one existing isolated Git workspace already bound to the Root |
 | run directory | caller supplies one writable directory outside the workspace for checkpoint and evidence files |
-| Agent configuration | `--agent` is optional and defaults to `codex`; v1 accepts only `codex` |
-| role configuration | Execute and Audit model/reasoning overrides are optional and independent; Root Reconcile uses the Execute configuration |
+| Reconcile role | `--reconcile-agent` is `codex`; model and reasoning overrides are optional |
+| Execute role | `--execute-agent` is `codex`; model and reasoning overrides are optional |
+| Audit role | `--audit-agent` is `codex`; model and reasoning overrides are optional |
+| role configuration | Reconcile, Execute, and Audit launch values are independent; no role inherits another role's model or reasoning setting |
 | cycle limit | one `max_cycles` value; no round alias or second budget input |
 
 Root mode is the only public execution entry. Tests and diagnostics exercise
 the same internal Cycle Runner, Gateway, prompt, and Performer boundaries
 without a second CLI that can mutate one role outside the serial workflow.
 
-Role API keys and base URLs are startup environment inputs owned by the
-Conductor boundary, not public contract fields. Role-specific values may be
-provided with `SYMPHONY_EXECUTE_CODEX_API_KEY`,
-`SYMPHONY_EXECUTE_CODEX_BASE_URL`, `SYMPHONY_AUDIT_CODEX_API_KEY`, and
-`SYMPHONY_AUDIT_CODEX_BASE_URL`; generic `CODEX_API_KEY` and `CODEX_BASE_URL`
-are an optional fallback. Omitted role overrides use the user's local
-`~/.codex` configuration and authentication. No capability matrix or default
-model/effort is hardcoded.
+Role API keys and base URLs are startup environment inputs resolved by the
+Conductor backend, not public contract fields or Project Binding fields.
+Role-specific values use `SYMPHONY_RECONCILE_CODEX_API_KEY`/
+`SYMPHONY_RECONCILE_CODEX_BASE_URL`,
+`SYMPHONY_EXECUTE_CODEX_API_KEY`/`SYMPHONY_EXECUTE_CODEX_BASE_URL`, and
+`SYMPHONY_AUDIT_CODEX_API_KEY`/`SYMPHONY_AUDIT_CODEX_BASE_URL`. When no
+role-specific value is resolved, Performer injects no key or base URL and the
+fresh Codex CLI uses the user's local `~/.codex` configuration and
+authentication unchanged. No capability matrix or default model/effort is
+hardcoded.
+
+## Podium Desktop values
+
+```text
+RoleLaunchConfig {
+  agent: codex,
+  model?: string,
+  reasoning_effort?: string
+}
+
+ProjectBinding {
+  project_id: string,
+  routing_label: non-empty string,
+  repository_path: absolute path,
+  base_branch: non-empty string,
+  concurrency: positive integer,
+  reconcile_agent: codex,
+  reconcile_model?: string,
+  reconcile_reasoning_effort?: string,
+  execute_agent: codex,
+  execute_model?: string,
+  execute_reasoning_effort?: string,
+  audit_agent: codex,
+  audit_model?: string,
+  audit_reasoning_effort?: string
+}
+
+RootAllocation {
+  root_id: RootIssueId,
+  workspace_path: absolute path,
+  run_directory: absolute path
+}
+```
+
+The three flattened role groups in `ProjectBinding` normalize to independent
+`RoleLaunchConfig` values at launch. `project_id` identifies a Linear Project;
+`routing_label` is visible Desktop configuration, not a hidden Linear status.
+Project Bindings and `RootAllocation` paths persist locally. Assignment, PID,
+and queue values are in-memory Desktop runtime state only. The binding carries
+no key, cookie, token, base URL, process handle, or arbitrary provider object.
 
 ## Linear values
 
@@ -220,9 +270,10 @@ Reconcile has no workspace mount, workspace tools, Linear capability, or PR
 credentials. Conductor removes the exact managed Root snapshot block before
 passing Root. Reconcile reads only the immutable requirement, Root State, and new Root comments; trusted
 Audit fields have already been promoted into Root State. It never reads the
-Cycle DAG or Execute/Audit content. Root Reconcile runs through the full Execute
-role configuration, including startup API key/base URL and optional
-Agent/model/reasoning settings; Audit configuration remains independent. A
+Cycle DAG or Execute/Audit content. Root Reconcile runs through its independent
+`reconcile_agent`, `reconcile_model`, and `reconcile_reasoning_effort` values.
+Execute and Audit use their corresponding role values; startup API keys and base
+URLs remain backend environment resolution, and no role inherits another role. A
 `complete` decision is a recommendation: Conductor must perform
 the final Inbox check and terminal delivery function before setting Root `Done`.
 Every report has a fixed decision-specific Markdown shape. Conductor copies it

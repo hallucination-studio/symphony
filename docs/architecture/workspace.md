@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | one Root-owned workspace, role access, and one PR-first terminal delivery sequence | Cycle decisions, delivery subsystem, merge, or provider reconciliation |
+| target proposal | one Root-owned workspace, role access, and one PR-first terminal delivery sequence | Cycle decisions, delivery subsystem, merge, provider reconciliation, or Podium queue semantics |
 
 ## Root workspace
 
@@ -11,7 +11,7 @@ to the Root. Every Cycle for that Root uses the same workspace. There are no
 per-Cycle worktrees, patch stores, repository snapshots, or workspace versions.
 
 ```text
-manual V1 caller or future Podium
+manual V1 caller or Podium Desktop V2
   -> allocate Root branch, workspace, and external run directory
   -> start Conductor with those exact paths
   -> Execute/Audit sessions use that workspace; Reconcile has no workspace access
@@ -24,12 +24,36 @@ manual V1 caller or future Podium
 | `WS-ROOT-002` | evidence | validate the supplied run directory is writable, outside the workspace, and bound to the same Root |
 | `WS-ROOT-003` | lifetime | require both supplied paths to stay bound to one Root for the complete run |
 | `WS-ROOT-004` | failure | preserve the workspace for inspection; do not reset, clean, rollback, or delete it |
-| `WS-ROOT-005` | ownership | allocation, claiming, cleanup, and deletion belong to the caller or future Podium, never Conductor |
+| `WS-ROOT-005` | ownership | allocation, claiming, cleanup, and deletion belong to the caller or Podium Desktop, never Conductor |
 
 Root State records the workspace, run directory, and branch. On a later process
 start, Conductor requires the supplied paths to match those exact values. It
 never creates or adopts replacements. If either path is missing, invalid, or
 mismatched, the Root becomes `NeedsHuman` and no Agent starts.
+
+## Podium Desktop allocation
+
+Podium Desktop persists a `ProjectBinding` for each configured Linear Project.
+The binding includes its visible routing label, repository path, base branch,
+local concurrency, and independent Reconcile/Execute/Audit role launch values.
+For each assigned Root it also persists a stable allocation containing only
+`root_id`, `workspace_path`, and `run_directory`. Those paths are passed to one
+Conductor invocation and must not be silently replaced on restart.
+
+Assignment records, process IDs, and the pending queue are Desktop memory
+state. They are deliberately not written into Root State, the run directory,
+or a cross-machine lease. A higher-priority assignment may preempt a lower
+priority local assignment; equal priorities do not preempt. Podium confirms the
+entire stopped Conductor process tree before starting the replacement. There is
+no SQLite store, daemon IPC, or Web surface in this target.
+
+| Rule | Boundary | Required behavior |
+|---|---|---|
+| `WS-PODIUM-001` | Project Binding | persist Linear Project identity, visible routing label, repository/base branch, concurrency, and three role launch configurations |
+| `WS-PODIUM-002` | Root allocation | persist `root_id`, `workspace_path`, and `run_directory`; pass all three unchanged to one Conductor |
+| `WS-PODIUM-003` | runtime state | keep assignment, PID, and queue in memory only; rebuild local scheduling state after restart |
+| `WS-PODIUM-004` | preemption | stop the full process tree and confirm termination before launching a replacement; never preempt equal priority |
+| `WS-PODIUM-005` | host boundary | keep scheduling local to one Desktop instance; do not use a cross-machine lease or daemon IPC |
 
 ## Role access
 

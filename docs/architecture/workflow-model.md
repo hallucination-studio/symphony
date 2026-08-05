@@ -311,3 +311,25 @@ this evidence before cleaning their owned temporary resources and report only a
 authority, equality proof, mutation history, delivery record, or recovery
 database. Git necessarily creates an internal commit object for the PR, but its
 hash is neither captured in a public contract nor used for workflow decisions.
+
+## Podium Desktop V2 scheduling
+
+Podium Desktop is a local scheduler around the Conductor workflow. It can run
+multiple local Conductor processes, but each process still owns exactly one
+Root, one workspace, and one external run directory. Podium never enters the
+Root/Cycle state machine or changes a Root's trusted state.
+
+| Rule | Fact | Authority | Consequence |
+|---|---|---|---|
+| `WF-PODIUM-001` | Binding identifies Project, label, repo/base branch, concurrency, and three role configs | persisted Desktop binding | routing stays visible; Conductor receives only its bound Root and paths |
+| `WF-PODIUM-002` | one local Conductor assignment is one Root plus its stable workspace and run directory | Podium Desktop allocation | a Conductor never discovers or adopts another Root, workspace, or run directory |
+| `WF-PODIUM-003` | higher priority may preempt lower priority; equal priorities do not preempt | local Desktop scheduler | priority changes local order, not Linear status or Cycle semantics |
+| `WF-PODIUM-004` | preemption is ordered stop, process-tree confirmation, then replacement start | local Desktop process supervisor | replacement launch waits until every process in the stopped tree is confirmed gone |
+| `WF-PODIUM-005` | Bindings and stable Root paths persist; assignment, PID, and queue state are memory-only | Podium Desktop storage boundary | restart reloads bindings and paths, then rebuilds runtime state without a durable lease |
+| `WF-PODIUM-006` | scheduling is confined to one Desktop host | Podium Desktop process boundary | no cross-machine lease, distributed claim, or daemon IPC is part of this target |
+| `WF-PODIUM-007` | Podium does not schedule, render, or test Conductor `NeedsHuman` handling in this round | V2 scope boundary | existing V1 `NeedsHuman` behavior remains intact, with no new Podium UI, dispatch, or E2E path |
+
+The routing label is a visible operator label used by the Desktop binding; it is
+not a hidden Linear status or a second workflow authority. The Desktop has no
+Web surface in this target. A Conductor remains the only owner of Root
+Reconcile, Execute/Audit order, Root State promotion, and terminal delivery.

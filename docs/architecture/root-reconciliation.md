@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | next-Cycle reasoning and completion recommendation from Root-owned inputs and promoted Audit fields | child-tree interpretation, workspace mutation, Linear calls, or PR publication |
+| target proposal | next-Cycle reasoning and completion recommendation from Root-owned inputs and promoted Audit fields | child-tree interpretation, workspace mutation, Linear calls, PR publication, or Podium scheduling |
 
 Root Reconcile is the Manager's only semantic decision boundary. It runs in a
 fresh Agent session with no workspace access before the first Cycle, after every
@@ -128,12 +128,19 @@ A Cycle body also contains Acceptance and Boundaries. The caller assigns the
 next Cycle number and all after-cursor comment IDs; the model cannot partially
 consume the batch or select an executor route.
 
-Root Reconcile uses the full Execute role configuration for its fresh process:
-Agent, startup API key/base URL, and optional model/reasoning overrides. This
-keeps one fixed Manager/Execute capability boundary while allowing Audit to use
-an independent provider configuration; it does not share prompts, output, or
-transcripts across roles. Omitted overrides remain under the user's local
-Codex configuration and authentication.
+Root Reconcile uses its own independent role launch configuration:
+`reconcile_agent`, `reconcile_model`, and `reconcile_reasoning_effort`. Execute
+and Audit use their corresponding `execute_*` and `audit_*` values; no role
+inherits another role's model, reasoning, or agent selection. API keys and base
+URLs are resolved by the backend from role-specific environment values and are
+never part of the prompt or public contract. When no override is resolved, the
+fresh process keeps the user's local `~/.codex` configuration and
+authentication unchanged. The three roles do not share prompts, output, or
+transcripts.
+
+| Rule | Required behavior | Forbidden behavior |
+|---|---|---|
+| `RR-PODIUM-001` | launch each fresh Reconcile process from the bound `reconcile_*` values | borrow Execute/Audit configuration, inspect Desktop queue state, or receive a process ID |
 
 ## Decision contract
 

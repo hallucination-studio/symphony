@@ -8,6 +8,12 @@
 MCP schema, caller capability, mutation basis, resource revision, or provider
 SDK value in public contracts.
 
+Podium Desktop may persist a `ProjectBinding` whose `project_id` identifies a
+Linear Project and whose `routing_label` is visible operator configuration.
+That binding is a Desktop routing input, not a new Conductor Gateway operation:
+Conductor still receives one already-resolved Root identifier and does not list
+Projects, claim Roots, or choose a Linear status on Podium's behalf.
+
 `attach_file` is the sole result-file upload operation. It receives the Cycle
 Issue ID, the exact `cycle-NNN-audit-result.json` filename as title and
 filename, content type `application/json`, and the local file bytes as

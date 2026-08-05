@@ -44,7 +44,7 @@ and target documentation must no longer depend on:
 - Codex app-server session protocol, dynamic tool bridge, or Root tool surface;
 - generic Task Manager capability issuers, MCP schemas, or provider-neutral
   mutation records;
-- Dashboard, product-level local task mode, or any second operator control plane;
+- Web surfaces, product-level local task mode, or any third operator control plane outside Podium Desktop;
 - `spec_digest`, mutable `task_state`, executor route, or Audit-reference
   selection in the Cycle contract; task state remains Root-owned context;
 - model access to the complete Root tree, descendant content, old role
@@ -54,7 +54,7 @@ and target documentation must no longer depend on:
 - per-Cycle workspace creation, repository snapshots, patch stores, commit-hash
   authority, or Agent-owned commit/push/PR commands;
 - Root claiming, workspace/run-directory allocation, or resource cleanup inside
-  Conductor;
+  Conductor; those local lifecycle duties belong to Podium Desktop in V2;
 - automatic retry, rollback, reset, cleanup, branch repair, PR adoption,
   unknown-outcome reconciliation, or silent Linear-to-local fallback;
 - concurrent Cycles, multiple Roots per process, subagents, webhooks, child
@@ -91,7 +91,7 @@ Only these direct replacements are allowed:
 | Reconcile workspace inspection | audited task state, one pending finding, and Harness feedback |
 | Trusted State subsystem | one task-state field, one pending finding, and parsed Audit fields in `latest_audit` updated mechanically in Root State |
 | PR exactly-once/recovery protocol | one ordered attempt; ambiguous restart becomes `NeedsHuman` |
-| per-role Agent/model configuration | optional independent Execute and Audit model/reasoning configuration fixed for the Root run; Root Reconcile uses Execute configuration |
+| per-role Agent/model configuration | optional independent Reconcile, Execute, and Audit role configuration fixed for the Root run |
 
 Any proposed exception changes the target architecture and requires explicit
 user approval before code or tests are written.
@@ -103,7 +103,7 @@ only as evidence-path compatibility. They are not target domain concepts.
 
 | Scenario | Observable pass condition |
 |---|---|
-| minimal launch | the only public execution command accepts optional `--agent` (default `codex`), one Root, one supplied workspace, and one supplied external run directory |
+| minimal launch | the only public execution command accepts independent `--reconcile-*`, `--execute-*`, and `--audit-*` role values, one Root, one supplied workspace, and one supplied external run directory |
 | visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Execute/Audit transition follows the Workflow Model matrix |
 | exact topology | Linear shows `Root -> Cycle -> Execute + Audit`; at most one Cycle is active |
 | visible snapshots | Root description has exactly one managed snapshot block refreshed with a local RFC3339 `Updated at` line; Execute/Audit each receive exactly one terminal report append with one local RFC3339 `Updated at` line |
@@ -117,24 +117,34 @@ only as evidence-path compatibility. They are not target domain concepts.
 | final delivery | completion with no new Root input creates one commit, pushes one branch, prefers a `gh` PR, records its URL or the pushed branch, then sets Root Done |
 | PR failure | any commit/push/PR error leaves Root open and workspace intact; no automatic retry or recovery runs |
 
-## V2 Podium
+## V2 Podium Desktop
 
-V1 stops at a manually launched Conductor on one machine with one explicitly
-supplied Root, workspace, and run directory. It does not contain a scheduler.
+V1 remains a manually launched Conductor on one machine with one explicitly
+supplied Root, workspace, and run directory. V2 adds Podium Desktop as a local
+operator and scheduler surface above that unchanged CLI. Podium Desktop may
+manage multiple local Conductors, but each Conductor still receives exactly one
+Root, one workspace, and one external run directory.
 
-V2 introduces Podium above Conductor with this fixed ownership boundary:
+Each persisted `ProjectBinding` contains:
 
-| Owner | Responsibility | Must not own |
-|---|---|---|
-| Podium | claim eligible Root Issues, allocate workspace/run-directory pairs, launch and observe one bound Conductor, and own resource lifecycle | Cycle semantics, role prompts, Audit judgment, Root State promotion, or PR publication |
-| Conductor | execute one already-bound Root or one selected Cycle role using supplied paths | Root discovery/claiming, workspace selection, directory allocation, or fleet scheduling |
+- one Linear `project_id` and a visible `routing_label`;
+- one `repository_path` and `base_branch`;
+- one positive local `concurrency` limit; and
+- independent Reconcile, Execute, and Audit `RoleLaunchConfig` values.
 
-Podium has Client and Web surfaces that share the same application boundary.
-V2 first verifies and integrates the existing Client surface, whose
-implementation is outside this repository, then adds the Web surface. V1 does
-not add placeholder APIs, storage, daemon state, or Web code. Before production
-implementation, V2 must define claim leases, multi-process ownership, resource
-retention, authentication, and recovery.
+For every assigned Root, Desktop persists stable `root_id`, `workspace_path`,
+and `run_directory` paths. Assignment records, process IDs, and the pending
+queue are in-memory runtime state only. A higher-priority assignment may
+preempt a lower-priority local assignment; equal priority never preempts. The
+stop sequence confirms that the complete Conductor process tree has exited
+before a replacement starts.
+
+Podium Desktop owns local routing, queueing, process supervision, and resource
+lifecycle. Conductor owns Root Reconcile, Cycle execution, Audit judgment, Root
+State promotion, and terminal delivery. There is no cross-machine lease, SQLite
+store, daemon IPC, or Web surface. This round does not add Podium scheduling,
+UI, or E2E behavior for Conductor `NeedsHuman`; the existing V1 terminal state
+and workflow remain unchanged.
 
 ## Completion gates
 

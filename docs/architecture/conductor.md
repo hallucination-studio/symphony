@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | one-Root serial loop, startup abandonment, role dispatch, Root State checkpointing, and terminal delivery function | semantic next-step choice, app-server, generic task capabilities, or recovery state machine |
+| target proposal | one-Root serial loop, startup abandonment, role dispatch, Root State, and delivery | semantic next-step choice, Podium scheduling, app-server, generic capabilities, or recovery state machine |
 
 The top-level `manager` remains a small composition point. It wires
 `RootReconciler`, `CycleRunner`, `Performer`, `LinearGateway`, and fixed
@@ -18,9 +18,13 @@ lh-harness run \
   --linear-root ENG-123 \
   --workspace "/workspaces/ENG-123" \
   --dir "/runs/ENG-123" \
-  --agent codex \
+  --reconcile-agent codex \
+  --reconcile-model "<reconcile-model>" \
+  --reconcile-reasoning-effort "<reconcile-effort>" \
+  --execute-agent codex \
   --execute-model "<execute-model>" \
   --execute-reasoning-effort "<execute-effort>" \
+  --audit-agent codex \
   --audit-model "<audit-model>" \
   --audit-reasoning-effort "<audit-effort>" \
   --max-cycles 30
@@ -33,29 +37,44 @@ lh-harness run \
 | `--workspace` | existing isolated Git workspace already allocated to this Root |
 | `--dir` | existing writable run directory outside the workspace |
 | resolved Root | resolve the Root team and five canonical workflow statuses by exact name and expected type |
-| `--agent codex` | optional closed selection; omission defaults to `codex`, and v1 implements only the Codex CLI adapter |
-| role configuration | optional independent Execute and Audit model/reasoning values; Root Reconcile uses the Execute configuration |
+| `--reconcile-agent codex` | closed Reconcile role adapter; omission defaults to `codex` |
+| `--execute-agent codex` | closed Execute role adapter; omission defaults to `codex` |
+| `--audit-agent codex` | closed Audit role adapter; omission defaults to `codex` |
+| role configuration | Reconcile, Execute, and Audit model/reasoning values are optional and independent |
 | `--max-cycles` | in-memory maximum Cycles for this process; it is not durable Root State |
 
 Startup needs no caller-provided Linear team, project, or workflow-state IDs, and
 no harness config file. Missing Linear, Git, workspace, run-directory, or PR
-prerequisites fail before an Agent starts. V1 does not claim Roots or allocate,
-replace, clean, or delete workspace/run directories.
+prerequisites fail before an Agent starts. Conductor does not claim Roots or
+allocate, replace, clean, or delete workspace/run directories; Podium Desktop
+performs that local allocation before invoking this CLI.
 
-Execute and Audit API keys and base URLs are startup-only environment values,
-resolved independently from `SYMPHONY_EXECUTE_CODEX_API_KEY`,
-`SYMPHONY_EXECUTE_CODEX_BASE_URL`, `SYMPHONY_AUDIT_CODEX_API_KEY`, and
-`SYMPHONY_AUDIT_CODEX_BASE_URL`. Generic `CODEX_API_KEY` and `CODEX_BASE_URL`
-may provide a fallback. They are never fields in `HarnessRunRequest` or public
-Linear data. When a role override is omitted, the fresh Codex process uses the
-user's local `~/.codex` configuration and authentication; the architecture does
-not prescribe a capability matrix or default model/effort.
+Reconcile, Execute, and Audit API keys and base URLs are startup-only
+environment values resolved independently by the backend from role-specific
+variables. They are never fields in `HarnessRunRequest`, `ProjectBinding`, or
+public Linear data. When a role-specific value is omitted, Performer injects no
+key or base URL and the fresh Codex process keeps the user's local `~/.codex`
+configuration and authentication; Conductor does not inject a replacement
+default.
 
 Root mode is the only public execution entry. V1 deliberately has no one-shot
 role CLI: such an entry would create a second mutation path that can advance an
 Execute or Audit Issue without the serial loop owning the complete Cycle. Tests
 and diagnostics call the internal Cycle Runner, Gateway, prompt, and Performer
 boundaries directly without exposing another production command.
+
+## Podium launch boundary
+
+Podium Desktop launches this CLI once per bound Root. The invocation always
+contains one `--linear-root`, one `--workspace`, and one `--dir`; it never asks a
+Conductor to discover a Project, select another Root, or manage a fleet.
+
+| Rule | Required behavior | Forbidden behavior |
+|---|---|---|
+| `CO-PODIUM-001` | accept one already-bound Root, workspace, and run directory for the process lifetime | discover, claim, or adopt another Root or path |
+| `CO-PODIUM-002` | accept independent Reconcile, Execute, and Audit role launch values | inherit Reconcile settings from Execute or share role credentials |
+| `CO-PODIUM-003` | let Podium stop and replace the process tree only at the external process boundary | implement priority, queue, preemption, or PID persistence inside Conductor |
+| `CO-PODIUM-004` | retain V1 `NeedsHuman` terminal behavior inside Root workflow | add Podium scheduling, UI, or E2E behavior for `NeedsHuman` this round |
 
 ## Startup rebuild
 

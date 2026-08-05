@@ -171,20 +171,25 @@ test("manual Root launch is the only public execution entry", async () => {
 
   for (const flag of [
     "--linear-root",
-    "--agent",
     "--workspace",
     "--dir",
+    "--reconcile-agent",
+    "--reconcile-model",
+    "--reconcile-reasoning-effort",
+    "--execute-agent",
     "--execute-model",
     "--execute-reasoning-effort",
+    "--audit-agent",
     "--audit-model",
     "--audit-reasoning-effort",
     "--max-cycles",
   ]) {
     assert.match(conductor, new RegExp(flag));
   }
-  assert.match(conductor, /`--agent codex` \| optional closed selection; omission defaults to `codex`/);
-  assert.doesNotMatch(conductor, /\s--model(?:\s|`)/u);
-  assert.doesNotMatch(conductor, /\s--reasoning-effort(?:\s|`)/u);
+  assert.match(conductor, /`--reconcile-agent codex` \| closed Reconcile role adapter/);
+  assert.match(conductor, /`--execute-agent codex` \| closed Execute role adapter/);
+  assert.match(conductor, /`--audit-agent codex` \| closed Audit role adapter/);
+  assert.doesNotMatch(conductor, /\s--agent(?:\s|`)/u);
   assert.doesNotMatch(conductor, /--dashboard|--task|--issue/u);
   assert.match(conductor, /Root mode is the only public execution entry/);
   assert.match(conductor, /no one-shot\s+role CLI/);
@@ -274,7 +279,7 @@ test("fresh Root Reconcile and visible Issue titles have closed contracts", asyn
   assert.match(taskManagement, /`\[Cycle NNN\] <objective>` \(maximum 80 characters total\),\s+`\[Executor\] Cycle NNN`, and\s+`\[Audit\] Cycle NNN`/);
 });
 
-test("role configuration is independent without widening the public request", async () => {
+test("role configuration is independent and closed", async () => {
   const sources = await loadArchitecture();
   const contracts = sources.get("contracts.md");
   const conductor = sources.get("conductor.md");
@@ -283,8 +288,13 @@ test("role configuration is independent without widening the public request", as
   const roadmap = sources.get("roadmap.md");
 
   for (const flag of [
+    "--reconcile-agent",
+    "--reconcile-model",
+    "--reconcile-reasoning-effort",
+    "--execute-agent",
     "--execute-model",
     "--execute-reasoning-effort",
+    "--audit-agent",
     "--audit-model",
     "--audit-reasoning-effort",
   ]) {
@@ -293,9 +303,12 @@ test("role configuration is independent without widening the public request", as
   assert.match(contracts, /execute_model\?: string/);
   assert.match(contracts, /audit_reasoning_effort\?: string/);
   assert.match(contracts, /not public contract fields/);
-  assert.match(reconciliation, /uses the full Execute role configuration/);
+  assert.match(contracts, /reconcile_agent: codex/);
+  assert.match(contracts, /reconcile_reasoning_effort\?: string/);
+  assert.match(reconciliation, /own independent role launch configuration/);
+  assert.doesNotMatch(reconciliation, /uses the full Execute role configuration/);
   assert.match(performer, /local Codex configuration and authentication/);
-  assert.match(roadmap, /independent Execute and Audit model\/reasoning configuration/);
+  assert.match(roadmap, /independent Reconcile, Execute, and Audit role configuration/);
   assert.match(roadmap, /per-Cycle routing, compatibility\s+aliases/);
   assert.match(performer, /cross-role transcript/);
 });
@@ -328,14 +341,26 @@ test("diagnostic evidence stays private and non-semantic", async () => {
   assert.match(e2e, /only a stable reason and `diagnostic_ref`/);
 });
 
-test("V1 keeps Podium scheduling and resource allocation out of Conductor", async () => {
+test("V2 Podium Desktop keeps local scheduling outside Conductor", async () => {
   const sources = await loadArchitecture();
+  const workflow = sources.get("workflow-model.md");
   const roadmap = sources.get("roadmap.md");
   const workspace = sources.get("workspace.md");
+  const contracts = sources.get("contracts.md");
+  const conductor = sources.get("conductor.md");
 
-  assert.match(roadmap, /V1 stops at a manually launched Conductor on one machine/);
-  assert.match(roadmap, /Podium \| claim eligible Root Issues, allocate workspace\/run-directory pairs/);
-  assert.match(workspace, /allocation, claiming, cleanup, and deletion belong to the caller or future Podium/);
+  assert.match(roadmap, /V2 Podium Desktop/);
+  assert.match(roadmap, /manage multiple local Conductors/);
+  assert.match(roadmap, /persisted `ProjectBinding`/);
+  assert.match(workflow, /higher priority.*preempt.*lower priority/);
+  assert.match(workflow, /equal priorities do not preempt/);
+  assert.match(workflow, /process-tree confirmation/);
+  assert.match(workspace, /Assignment records, process IDs, and the pending queue are Desktop memory/);
+  assert.match(workspace, /stable allocation/);
+  assert.match(contracts, /ProjectBinding/);
+  assert.match(contracts, /routing_label/);
+  assert.match(conductor, /one `--linear-root`, one `--workspace`, and one `--dir`/);
+  assert.match(conductor, /Podium scheduling, UI, or E2E behavior for `NeedsHuman`/);
 });
 
 test("Done Roots and terminal descendants are not modified", async () => {
