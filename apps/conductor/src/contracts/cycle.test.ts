@@ -18,7 +18,7 @@ import {
   parseSealedExecutionGraph,
   sealCycleSpecification,
 } from "./cycle.js";
-import { MAX_MARKDOWN_TEXT_LENGTH, parseMarkdownText } from "./validation.js";
+import { markdownSemanticallyEqual, MAX_MARKDOWN_TEXT_LENGTH, parseMarkdownText } from "./validation.js";
 import { canonicalTaskRevision } from "./task-management.js";
 
 const rootTarget = Object.freeze({
@@ -77,6 +77,14 @@ test("MarkdownText accepts visible bounded Markdown and rejects hidden control o
   ]) {
     assert.throws(() => parseMarkdownText(invalid), /invalid_markdown_text/u);
   }
+});
+
+test("Markdown semantic equality ignores provider blank-line formatting but preserves content", () => {
+  assert.equal(
+    markdownSemanticallyEqual("## Design\n\n- one\n- two\n\nBody.", "## Design\n\n- one\n\n- two\n\n\nBody."),
+    true,
+  );
+  assert.equal(markdownSemanticallyEqual("## Design\n\nBody one.", "## Design\n\nBody two."), false);
 });
 
 test("RootDefinition is derived from one closed Root description document", () => {

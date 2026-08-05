@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -23,14 +20,7 @@ const requiredEnvironment = Object.freeze({
   SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: secretValues.human,
   SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED: "true",
   SYMPHONY_E2E_PROJECT_SLUG_ID: "project-fixture",
-  SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET: "/tmp/symphony-launcher.sock",
 });
-
-function envSource(environment = requiredEnvironment) {
-  return Object.entries(environment)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join("\n");
-}
 
 async function temporaryDirectory(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-runner-"));
@@ -42,10 +32,9 @@ function errorText(error) {
   return [String(error), error instanceof Error ? error.stack : "", JSON.stringify(error)].join("\n");
 }
 
-test("missing or incomplete configuration fails before fixture or product operations", async (t) => {
-  const directory = await temporaryDirectory(t);
+test("missing or incomplete fixture configuration fails before effects", async () => {
   const cases = [
-    { name: "missing file", environment: null },
+    { name: "missing environment", environment: null },
     ...Object.keys(requiredEnvironment).map((missingKey) => ({
       name: `missing ${missingKey}`,
       environment: Object.fromEntries(
@@ -54,15 +43,13 @@ test("missing or incomplete configuration fails before fixture or product operat
     })),
   ];
 
-  for (const [index, entry] of cases.entries()) {
-    const envPath = path.join(directory, `case-${index}.env`);
-    if (entry.environment) await writeFile(envPath, envSource(entry.environment), { mode: 0o600 });
+  for (const entry of cases) {
     let scenarioCalled = false;
     let productCalled = false;
 
     await assert.rejects(
       runBlackBoxScenario({
-        envPath,
+        fixtureEnvironment: entry.environment ?? {},
         scenario: async () => { scenarioCalled = true; },
         startProduct: async () => {
           productCalled = true;
@@ -79,17 +66,15 @@ test("missing or incomplete configuration fails before fixture or product operat
   }
 });
 
-test("runner exposes only public launcher coordinates to product startup", async (t) => {
+test("runner passes only the config path to product startup", async (t) => {
   const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
   const configPath = path.join(directory, "conductor.json");
-  await writeFile(envPath, envSource(), { mode: 0o600 });
   await writeFile(configPath, "{}", { mode: 0o600 });
   const calls = [];
   let launch;
 
   const result = await runBlackBoxScenario({
-    envPath,
+    fixtureEnvironment: requiredEnvironment,
     startProduct: async (request) => {
       calls.push("start_product");
       launch = request;
@@ -132,26 +117,20 @@ test("runner exposes only public launcher coordinates to product startup", async
     "cleanup_fixture",
   ]);
   assert.equal(launch.configPath, configPath);
-  assert.equal(launch.launcherSocketPath, "/tmp/symphony-launcher.sock");
   assert.equal("environment" in launch, false);
   assert.equal(JSON.stringify(launch).includes(secretValues.human), false);
   assert.equal(JSON.stringify(launch).includes(secretValues.product), false);
   assert.equal(JSON.stringify(launch).includes(secretValues.codex), false);
 });
 
-test("runner rejects production credentials in its file or process environment before effects", async (t) => {
-  const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
+test("runner rejects production credentials in its process environment before effects", async () => {
   const forbiddenKeys = ["SYMPHONY_E2E_LINEAR_DEV_TOKEN", "SYMPHONY_LINEAR_TOKEN"];
 
   for (const key of forbiddenKeys) {
-    await writeFile(envPath, envSource({ ...requiredEnvironment, [key]: secretValues.product }), {
-      mode: 0o600,
-    });
     let scenarioCalled = false;
     await assert.rejects(
       runBlackBoxScenario({
-        envPath,
+        fixtureEnvironment: { ...requiredEnvironment, [key]: secretValues.product },
         scenario: async () => { scenarioCalled = true; },
         startProduct: async () => { throw new Error("product_must_not_start"); },
       }),
@@ -160,12 +139,11 @@ test("runner rejects production credentials in its file or process environment b
     assert.equal(scenarioCalled, false);
   }
 
-  await writeFile(envPath, envSource(), { mode: 0o600 });
   const previous = process.env.SYMPHONY_LINEAR_TOKEN;
   process.env.SYMPHONY_LINEAR_TOKEN = secretValues.product;
   try {
     await assert.rejects(
-      runBlackBoxScenario({ envPath, scenario: async () => undefined }),
+      runBlackBoxScenario({ fixtureEnvironment: requiredEnvironment, scenario: async () => undefined }),
       (error) => error?.code === "invalid_e2e_configuration",
     );
   } finally {
@@ -174,128 +152,13 @@ test("runner rejects production credentials in its file or process environment b
   }
 });
 
-test("deployment launcher injects the production credential outside runner requests and output", async (t) => {
-  const directory = await temporaryDirectory(t);
-  const socketPath = path.join(directory, "launcher.sock");
-  const envPath = path.join(directory, ".env");
-  const configPath = path.join(directory, "conductor.json");
-  const fakeConductorPath = path.join(directory, "fake-conductor.mjs");
-  await writeFile(envPath, envSource({
-    ...requiredEnvironment,
-    SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET: socketPath,
-  }), { mode: 0o600 });
-  await writeFile(configPath, "{}", { mode: 0o600 });
-  await writeFile(fakeConductorPath, [
-    "const credential = process.env.SYMPHONY_LINEAR_TOKEN;",
-    "if (!credential || process.argv.join(' ').includes(credential)) process.exit(2);",
-    "process.stdout.write(JSON.stringify({ event: 'conductor_ready' }) + '\\n');",
-    "process.on('SIGTERM', () => process.exit(0));",
-    "setInterval(() => undefined, 1000).unref();",
-  ].join("\n"), { mode: 0o600 });
-
-  const requests = [];
-  const outputs = [];
-  const server = createServer((connection) => {
-    let buffered = "";
-    let conductor;
-    connection.setEncoding("utf8");
-    connection.on("data", (chunk) => {
-      buffered += chunk;
-      let newline = buffered.indexOf("\n");
-      while (newline >= 0) {
-        const request = JSON.parse(buffered.slice(0, newline));
-        buffered = buffered.slice(newline + 1);
-        requests.push(request);
-        if (request.type === "start") {
-          conductor = spawn(process.execPath, [fakeConductorPath, "--config", request.config_path], {
-            env: { SYMPHONY_LINEAR_TOKEN: secretValues.product },
-            stdio: ["ignore", "pipe", "pipe"],
-          });
-          conductor.stdout.on("data", (value) => {
-            outputs.push(String(value));
-            connection.write(value);
-          });
-        } else if (request.type === "stop") {
-          conductor?.kill("SIGTERM");
-          connection.end();
-        }
-        newline = buffered.indexOf("\n");
-      }
-    });
-  });
-  server.listen(socketPath);
-  await once(server, "listening");
-  t.after(() => server.close());
-
-  await runBlackBoxScenario({
-    envPath,
-    scenario: async ({ product }) => { await product.start(configPath); },
-  });
-
-  assert.deepEqual(requests, [
-    { type: "start", config_path: configPath },
-    { type: "stop" },
-  ]);
-  assert.equal(JSON.stringify(requests).includes(secretValues.product), false);
-  assert.equal(outputs.join("").includes(secretValues.product), false);
-  assert.equal((await readFile(fakeConductorPath, "utf8")).includes(secretValues.product), false);
-});
-
-test("runner observes normal built-process exit and keeps shutdown idempotent", async (t) => {
-  const directory = await temporaryDirectory(t);
-  const socketPath = path.join(directory, "launcher.sock");
-  const envPath = path.join(directory, ".env");
-  const configPath = path.join(directory, "conductor.json");
-  await writeFile(envPath, envSource({
-    ...requiredEnvironment,
-    SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET: socketPath,
-  }), { mode: 0o600 });
-  await writeFile(configPath, "{}", { mode: 0o600 });
-
-  const server = createServer((connection) => {
-    let buffered = "";
-    connection.setEncoding("utf8");
-    connection.on("data", (chunk) => {
-      buffered += chunk;
-      let newline = buffered.indexOf("\n");
-      while (newline >= 0) {
-        const request = JSON.parse(buffered.slice(0, newline));
-        buffered = buffered.slice(newline + 1);
-        if (request.type === "start") {
-          connection.write(`${JSON.stringify({ event: "conductor_ready" })}\n`);
-          setImmediate(() => {
-            connection.write(`${JSON.stringify({ event: "conductor_stopped" })}\n`);
-            connection.end();
-          });
-        }
-        newline = buffered.indexOf("\n");
-      }
-    });
-  });
-  server.listen(socketPath);
-  await once(server, "listening");
-  t.after(() => server.close());
-
-  const result = await runBlackBoxScenario({
-    envPath,
-    scenario: async ({ product }) => {
-      const running = await product.start(configPath);
-      const exit = await running.waitForExit();
-      assert.deepEqual(exit, { status: "stopped" });
-    },
-  });
-  assert.equal(result, undefined);
-});
-
 test("runner sanitizes untrusted fixture and product failures", async (t) => {
   const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
   const configPath = path.join(directory, "conductor.json");
-  await writeFile(envPath, envSource(), { mode: 0o600 });
   await writeFile(configPath, "{}", { mode: 0o600 });
 
   const fixtureFailure = await runBlackBoxScenario({
-    envPath,
+    fixtureEnvironment: requiredEnvironment,
     scenario: async ({ fixtures }) => fixtures.operate(async () => {
       throw new Error(`provider rejected ${secretValues.human}`);
     }),
@@ -304,7 +167,7 @@ test("runner sanitizes untrusted fixture and product failures", async (t) => {
   for (const secret of Object.values(secretValues)) assert.doesNotMatch(errorText(fixtureFailure), new RegExp(secret, "u"));
 
   const productFailure = await runBlackBoxScenario({
-    envPath,
+    fixtureEnvironment: requiredEnvironment,
     startProduct: async () => {
       throw new Error(`spawn rejected ${secretValues.codex}`);
     },
@@ -316,14 +179,12 @@ test("runner sanitizes untrusted fixture and product failures", async (t) => {
 
 test("fixture cleanup still runs when product shutdown fails", async (t) => {
   const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
   const configPath = path.join(directory, "conductor.json");
-  await writeFile(envPath, envSource(), { mode: 0o600 });
   await writeFile(configPath, "{}", { mode: 0o600 });
   let fixtureCleaned = false;
 
   const failure = await runBlackBoxScenario({
-    envPath,
+    fixtureEnvironment: requiredEnvironment,
     startProduct: async () => ({
       stop: async () => { throw new Error(`stop rejected ${secretValues.product}`); },
     }),
@@ -343,14 +204,12 @@ test("fixture cleanup still runs when product shutdown fails", async (t) => {
 
 test("product health monitor reports a sanitized runtime failure", async (t) => {
   const directory = await temporaryDirectory(t);
-  const envPath = path.join(directory, ".env");
   const configPath = path.join(directory, "conductor.json");
-  await writeFile(envPath, envSource(), { mode: 0o600 });
   await writeFile(configPath, "{}", { mode: 0o600 });
   let productStopped = false;
 
   const failure = await runBlackBoxScenario({
-    envPath,
+    fixtureEnvironment: requiredEnvironment,
     startProduct: async () => ({
       stop: async () => { productStopped = true; },
       waitForFailure: async () => { throw new Error(`runtime rejected ${secretValues.codex}`); },
@@ -418,12 +277,95 @@ test("Conductor terminal Root and runtime failures stop the health monitor", () 
 
 test("diagnostic projection drops every untrusted event field", () => {
   assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_tool_call_denied",
+    reason_code: "capability_denied",
+    tool: secretValues.codex,
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_tool_call_denied",
+    reason_code: "capability_denied",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_task_tool_diagnostic",
+    code: "other",
+    category: "invalid_root_issue_id",
+    tool: secretValues.codex,
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_task_tool_diagnostic",
+    reason_code: "invalid_root_issue_id",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_task_authorization_diagnostic",
+    category: "draft_not_observed",
+    tool: secretValues.codex,
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_task_authorization_diagnostic",
+    reason_code: "draft_not_observed",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_task_authorization_diagnostic",
+    category: "cycle_approval_invalid:cycle_identity_derivation_mismatch",
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_task_authorization_diagnostic",
+    reason_code: "cycle_approval_invalid:cycle_identity_derivation_mismatch",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "fresh_route_selected",
+    selected_route: "WF-ROUTE-004",
+    consumer: "cycle_machine",
+    root_id: secretValues.codex,
+  }), {
+    diagnostic: "conductor_event",
+    event: "fresh_route_selected",
+    selected_route: "WF-ROUTE-004",
+    consumer: "cycle_machine",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_tool_call_accepted",
+    tool: "create_issue",
+    arguments: { secret: secretValues.codex },
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_tool_call_accepted",
+    tool: "create_issue",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_turn_completed",
+    outcome: "quiescent",
+    root_id: secretValues.codex,
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_turn_completed",
+    outcome: "quiescent",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
     event: "root_turn_failed",
     cause_code: secretValues.product,
     tool: secretValues.codex,
   }), {
     diagnostic: "conductor_event",
     event: "root_turn_failed",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "root_observation_failed",
+    reason_code: "runtime_preparation_failed",
+    cause_code: "root_local_only_tool_denied",
+  }), {
+    diagnostic: "conductor_event",
+    event: "root_observation_failed",
+    reason_code: "root_local_only_tool_denied",
+  });
+  assert.deepEqual(conductorDiagnosticFromEvent({
+    event: "code_inspection_diagnostic",
+    tool: secretValues.codex,
+    category: "boundary_invalid_contract",
+  }), {
+    diagnostic: "conductor_event",
+    event: "code_inspection_diagnostic",
+    reason_code: "boundary_invalid_contract",
   });
   assert.equal(conductorDiagnosticFromEvent({ event: `root_turn_${secretValues.product}` }), undefined);
 });
@@ -440,5 +382,6 @@ test("runner source stays outside Conductor and internal operation boundaries", 
   assert.equal(source.match(/process\.stderr\.write/gu)?.length, 1);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN/u);
   assert.doesNotMatch(source, /SYMPHONY_CODEX_API_KEY/u);
-  assert.match(source, /SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET/u);
+  assert.doesNotMatch(source, /SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET/u);
+  assert.match(source, /process\.send/u);
 });

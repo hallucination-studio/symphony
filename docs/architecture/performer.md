@@ -2,73 +2,92 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| Phase 1 target | Plan/Work/Verify process、context、thread、permission、typed candidate | Stage lifecycle、persistence policy |
+| target proposal | mechanical Agent CLI launch, process lifecycle, and bounded final-response capture | prompts, role semantics, Linear, routing, normalization, or trust |
 
-## Context topology
+Performer is deliberately a thin command-line wrapper. It receives a complete
+launch request, starts exactly one fresh Agent process, always captures process
+facts, and captures one bounded final response only when requested. It does not
+know what a Root, Cycle, Execute, Audit, or successful task means.
 
-```mermaid
-%% source-rules: WF-PERSIST-002 WF-PERSIST-003 WF-PERSIST-004 WF-PERSIST-007
-%% source-rules: PF-CTX-001 PF-CTX-002 PF-CTX-003 PF-CTX-004
-%% source-rules: PF-THREAD-001 PF-THREAD-002
-flowchart TD
-  Cycle[Sealed Cycle]
-  Cycle --> Plan[Fresh Plan context]
-  Cycle --> WorkThread[One live Work thread]
-  WorkThread --> W1[Work turn 1]
-  WorkThread --> W2[Work turn 2]
-  WorkThread --> WN[Work turn N]
-  Cycle --> Verify[Fresh Verify context at exact revision]
-  Plan -. no sharing .- WorkThread
-  WorkThread -. no sharing .- Verify
-  Plan -. no sharing .- Verify
+## Launch contract
+
+```text
+PerformerLaunchRequest {
+  agent: codex,
+  model,
+  reasoning_effort,
+  prompt,
+  working_directory,
+  sandbox: no_workspace | read_only | workspace_write,
+  final_response_path?,
+  timeout
+}
+
+PerformerProcessResult {
+  launch_status: exited | timed_out | start_failed | interrupted,
+  exit_code?,
+  duration_ms,
+  final_response_ref?,
+  sanitized_reason?
+}
 ```
 
-## Context authority table
+| Rule | Required behavior | Forbidden behavior |
+|---|---|---|
+| `PF-LAUNCH-001` | start one new process/session for every request | resume or share a prior conversation |
+| `PF-LAUNCH-002` | map the selected Agent to its CLI and pass supplied model, prompt, working directory, and sandbox mechanically | compose or enrich role prompts |
+| `PF-LAUNCH-003` | always capture process facts; capture one bounded final response only at an optional supplied path | require or expose a complete trajectory |
+| `PF-LAUNCH-004` | apply timeout, cancellation, and bounded stream handling | indefinite hidden retry |
+| `PF-LAUNCH-005` | sanitize errors and exclude credentials from returned values and logs | expose environment values or authorization data |
 
-| Rule | Role | Explicit input | Context lifetime | Excluded input |
+The caller owns semantic parsing and validation. Root Reconciler and Audit
+launches supply a final-response path for their required parsers. Execute does
+not supply one, so its response content is not captured, parsed, or projected.
+A zero exit code is only a process fact; it is never a Cycle success decision.
+
+## Session and permission topology
+
+```mermaid
+%% source-rules: PF-SESSION-001 PF-SESSION-002 PF-SESSION-003 PF-PERM-001 PF-PERM-002
+flowchart LR
+  RR[Root Reconciler] -->|no-workspace launch request| P1[Fresh process]
+  CR[Cycle Runner] -->|workspace-write Execute request| P2[Fresh process]
+  CR -->|read-only Audit request| P3[Fresh process]
+```
+
+| Rule | Caller role | Session | Workspace sandbox | Excluded context |
 |---|---|---|---|---|
-| `PF-CTX-001` | Plan | sealed Cycle and Root knowledge<br>sealed directives/groups<br>static role contract | one fresh Plan process/thread | code write capability、sibling Stage、prior Result/Handoff |
-| `PF-CTX-002` | Work | sealed Cycle specification and current Work Instruction | one Cycle-bound process/thread reused only for ordered Work turns | Plan/Verify thread、sibling Issue/Result、injected previous raw value |
-| `PF-CTX-003` | Verify | sealed Cycle specification、current Verify Instruction、exact revision | one fresh process/thread | Plan/Work context、Work continuation、write capability |
-| `PF-CTX-004` | every role | current role request only | never forked | Root transcript、other Cycle context、Task Manager payload |
+| `PF-SESSION-001` | Root Reconcile | fresh process for each decision | no workspace mount or tools | workspace facts and Execute/Audit transcripts |
+| `PF-SESSION-002` | Execute | one fresh process per Cycle | workspace-write | Reconcile transcript, prior Cycle transcripts, and Audit history |
+| `PF-SESSION-003` | Audit | a distinct fresh process after Execute terminates | read-only | Execute transcript, hidden state, and prior Audit history |
+| `PF-PERM-001` | every process | only the configured workspace and role sandbox | supplied by the caller, not inferred by Performer | Linear capability |
+| `PF-PERM-002` | every process | no secrets by default | explicit allowlist only when the frozen task boundary requires it | `.env*`, keychains, tokens, credential stores |
 
-## Thread table
+Performer does not enforce workflow order. Conductor and Cycle Runner ensure that
+Audit starts only after Execute is terminal and that a failed Execute still gets
+an Audit attempt.
 
-| Rule | Thread fact | Allowed behavior | Forbidden behavior |
-|---|---|---|---|
-| `PF-THREAD-001` | all Work Items in one Cycle | sequential turns in one live Work thread following persisted order | parallel Work、Work subagent、thread fork |
-| `PF-THREAD-002` | prior Work assistant turn remains in the same live thread | same live provider thread transport may carry it<br>next Work may naturally recall it | Symphony re-injection into next user input<br>recovery from repository、Linear、logs or saved rollout |
-| `PF-THREAD-003` | Work thread is lost | host reports absence; workflow applies `WF-RESTART-003` or `WF-RESTART-004` | reconstruct or start replacement thread as continuity |
-| `PF-THREAD-004` | Plan or Verify | always fresh and role-specific | reuse Work/Root/other-role thread |
+## Boundary ownership
 
-## Result table
+| Concern | Owner |
+|---|---|
+| Reconcile prompt and decision schema | Root Reconciler |
+| Execute and Audit prompts | Cycle Runner |
+| Cycle result interpretation | Cycle Runner |
+| trusted Root State promotion | Conductor's fixed `accepted`-Audit update |
+| Linear Issue and comment projection | private rendering helpers behind Linear Gateway calls |
+| raw process start, stop, bounded final response, exit code, duration | Performer |
 
-| Rule | Role | Candidate | Conductor normalization | Durable destination |
-|---|---|---|---|---|
-| `PF-RESULT-001` | Plan | closed Work-group order/validation candidate over sealed IDs | validate exact Work-group cover<br>compose sealed Verify directives<br>build identities/manifest | `WF-PERSIST-002` |
-| `PF-RESULT-002` | Work | closed outcome/checks plus optional ephemeral continuation | fresh-read worktree parent/diff and build normalized handoff | `WF-PERSIST-003` |
-| `PF-RESULT-003` | Verify | `passed,failed,inconclusive,canceled` plus checks/evidence at exact revision | validate revision and closed evidence | `WF-PERSIST-004` |
-| `PF-RESULT-004` | any role | raw assistant/tool stream | never a workflow fact | nowhere |
+`--agent` selects one thin CLI adapter for the complete Root run. V1's closed
+`AgentKind` contains only `codex`; a future `claude` value may add another thin
+adapter without changing Root Reconciler or Cycle Runner. There is no dynamic
+plugin discovery, registry, or per-role Agent selection.
 
-| Work turn field | Allowed lifetime | Validation | Forbidden path |
-|---|---|---|---|
-| `completion_candidate` | current call, then normalized under `WF-PERSIST-003` | closed `WorkResult` only | raw assistant continuation |
-| `ephemeral_continuation_markdown` | completed non-final Work turn in the same live thread | absent from candidate<br>host drops it before Symphony-owned serialization | record、event、log、audit、next user input |
+Performer never constructs, truncates, repairs, or interprets a prompt. Root
+Reconciler owns the Manager prompt; Cycle Runner owns the frozen Execute and
+Audit prompts and their bounded context selection.
 
-## Home and persistence table
-
-| Rule | Location | Allowed data | Required setting | Forbidden data |
-|---|---|---|---|---|
-| `PF-HOME-001` | application `CODEX_HOME` | installation/configuration needed to start app-server | read-only to Performer | task transcript、workflow evidence |
-| `PF-HOME-002` | isolated Performer Home | minimal runtime files only | every thread uses `ephemeral: true` | Codex session/rollout/SQLite turn text |
-| `PF-HOME-003` | process memory | current request、live handles and allowed Work prior turns | destroyed with process/thread | durable accepted result or next action |
-| `PF-HOME-004` | logs/audit | sanitized identity/correlation/digests only | no raw/reversible content | prompts、assistant text、tool payloads、E7 raw value |
-
-## Permission table
-
-| Rule | Role | Read | Write | Explicit denial |
-|---|---|---|---|---|
-| `PF-PERM-001` | Plan | sealed Task documents only | none outside scratch if required | Task Manager、user code mutation、Git delivery |
-| `PF-PERM-002` | Work | current Cycle disposable worktree and closed request | that worktree only | Task Manager、other worktrees、Root Home |
-| `PF-PERM-003` | Verify | exact revision and scratch | scratch only | user-code repair、Task Manager、delivery |
-| `PF-PERM-004` | every role | non-sensitive allowlist | role-scoped only | `.env*`, keys, credential stores, remote auth config |
+Complete trajectories are outside the required architecture. A concrete Agent
+adapter may retain one as optional local diagnostics, but no caller may depend
+on its presence, no public value references it, and it is never uploaded to
+Linear or used for routing, trust, restart, or publication.

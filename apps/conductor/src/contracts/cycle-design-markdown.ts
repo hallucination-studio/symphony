@@ -91,7 +91,10 @@ function inlineCodeList(node: Node, allowNone: boolean): readonly string[] {
     const paragraph = item.children?.[0];
     const value = paragraph?.children?.[0];
     if (item.type !== "listItem" || item.children?.length !== 1 || paragraph?.type !== "paragraph") return fail();
-    if (value?.type === "inlineCode" && paragraph.children?.length === 1 && value.value !== undefined) return value.value;
+    if (value?.type === "inlineCode" && paragraph.children?.length === 1 && value.value !== undefined) {
+      if (allowNone && value.value === "None") return null;
+      return value.value;
+    }
     if (allowNone && value?.type === "text" && paragraph.children?.length === 1 && value.value === "None") return null;
     return fail();
   });

@@ -1,101 +1,141 @@
-# Phase 1 Roadmap
+# V1 Roadmap
 
 | Status | Owns | Does not own |
 |---|---|---|
-| Phase 1 target | approved implementation order、black-box acceptance gates | product scope、workflow meaning |
+| target proposal | deletion-first implementation order and observable gates | workflow rules or compatibility architecture |
 
-## 阅读规则
+The implementation must hard-cut from the superseded design. Do not build the
+new serial loop beside revision, graph, app-server, recovery, or delivery
+finalizer code and attempt to keep both paths valid.
 
-| Normative | Reference only | Forbidden |
-|---|---|---|
-| tables with a `Rule` column | `Architecture rules` owner links、Mermaid projections | task-created product capability |
+## Ordered implementation
 
-## Hard-cut sequence
+| Order | Slice | Required outcome | Check |
+|---|---|---|---|
+| 1 | delete obsolete implementation and tests | remove every system listed in the permanent subtraction gate and its field-shaped tests | removed-symbol and dependency search |
+| 2 | minimal contracts | introduce only Root snapshot/state, CycleSpec, Execute process facts, Audit result, mechanical Cycle summary, Performer launch, Gateway, Root workspace, and PR result values | focused contract tests |
+| 3 | Linear boundary and CLI | injectable Gateway, GraphQL adapter, and one Root-run command | fake Gateway and built CLI scenarios |
+| 4 | supplied Root resources | validate and bind one caller-supplied workspace and external run directory | real Git and filesystem boundary scenario |
+| 5 | Root Reconcile and Cycle projection | one frozen small-step contract and exact Root/Cycle/Execute/Audit hierarchy | semantic and fake Linear tests |
+| 6 | Execute and Audit | fresh workspace-write Execute with no semantic output, then distinct fresh read-only Audit as sole semantic authority, including failed Execute inspection | real Agent CLI boundary tests |
+| 7 | Root State and Inbox | promote only `accepted` Audits; checkpoint supplied paths, task state, pending finding, and comment cursor | focused transaction scenarios |
+| 8 | terminal PR function | final Inbox check, one commit, one push, one PR, then Root Done; no subsystem or recovery logic | temporary remote and fake PR CLI scenario |
+| 9 | scenario suite and docs | rebuild tests around reusable business scenarios and prove the complete manual single-machine flow | black-box suite |
 
-```mermaid
-%% source-rules: RM-SEQ-001 RM-SEQ-002 RM-SEQ-003 RM-SEQ-004 RM-SEQ-005 RM-SEQ-006 RM-SEQ-007 RM-SEQ-008 RM-SEQ-009
-flowchart LR
-  Model[Rule model] --> Contracts[Closed contracts]
-  Contracts --> Linear[Linear boundary]
-  Linear --> Root[Root semantics]
-  Root --> Roles[Isolated roles]
-  Roles --> Cycle[Mechanical Cycle]
-  Cycle --> Delivery[Exact delivery]
-  Delivery --> Runtime[Single-Root runtime]
-  Runtime --> E2E[Public-boundary E2E]
-```
+Root comment injection starts only after frozen Cycle projection and role
+isolation pass. The PR function starts only after Root completion and trusted
+Root State gates pass.
 
-| Rule | Slice | Authorized outcome | Architecture rules | Exit evidence |
-|---|---|---|---|---|
-| `RM-SEQ-001` | architecture rule model | one table-authoritative workflow model、diagram projections and semantic guards | `WF-AUTH-001` through `WF-PERSIST-007` | rule/link/semantic architecture audit passes |
-| `RM-SEQ-002` | contracts and capabilities | closed public types and caller-owned capability boundaries | `CT-CLOSED-001` through `CT-READ-006` | contract tests and typecheck pass |
-| `RM-SEQ-003` | Linear boundary | complete fresh observations、exact deterministic mutations/read-back and no in-memory workflow mirror | `TM-OBS-001` through `TM-PROVIDER-007` | focused real-provider capability evidence |
-| `RM-SEQ-004` | Root semantic boundaries | Define、Draft review/approval、Acceptance and successor only | `RR-LOOP-001` through `RR-OUT-004` | Root permission and boundary tests |
-| `RM-SEQ-005` | Performer isolation | fresh Plan/Verify、one live ordered Work thread and Markdown-only persisted results | `PF-CTX-001` through `PF-PERM-004` | real app-server context evidence |
-| `RM-SEQ-006` | mechanical Cycle | manifest-first graph materialization、record-first Stage advancement、restart/failure closure | `CO-EXEC-001` through `CO-RESTART-004` | focused Cycle/restart tests |
-| `RM-SEQ-007` | exact revision delivery | per-Cycle worktree and commit proof<br>fresh Verify、leased push、unique PR<br>bounded convergence proof | `GD-WT-001` through `GD-DELIVERY-006` | real Git/PR boundary evidence |
-| `RM-SEQ-008` | serial runtime | one process bound to one Root<br>write/wake decoupling<br>closure before exit | `WF-AUTH-004`, `WF-AUTH-006`, `CO-LOOP-001` through `CO-CLEAN-003` | bound-Root routing and cleanup tests |
-| `RM-SEQ-009` | black-box E2E | public Linear/Git/PR observations prove the approved business flow | `RM-E2E-001` through `RM-E2E-009` | built-process external-only scenarios pass |
+## Permanent subtraction gate
+
+These are permanent v1 boundaries, not temporarily deferred implementation.
+No roadmap slice may reintroduce them under a new name, compatibility wrapper,
+generic interface, optional mode, or hidden fallback. Production code, tests,
+and target documentation must no longer depend on:
+
+- Task revisions, canonical hashes, seals, digests, historical comparison, or
+  mutation detection;
+- Plan-stage children, execution graphs, relations, multiple Work nodes, or continued
+  role threads;
+- accepted-revision delivery, delivery interfaces/records, convergence,
+  finalizers, Git-commit identity as authority, or automatic merge;
+- Root runtime registries, generations, family quarantine, restart routes, or
+  cross-process session/workspace recovery;
+- Codex app-server session protocol, dynamic tool bridge, or Root tool surface;
+- generic Task Manager capability issuers, MCP schemas, or provider-neutral
+  mutation records;
+- Dashboard, product-level local task mode, or any second operator control plane;
+- `spec_digest`, mutable `task_state`, executor route, or Audit-reference
+  selection in the Cycle contract; task state remains Root-owned context;
+- model access to the complete Root tree, descendant content, old role
+  transcripts, or the Reconcile workspace;
+- regex-heavy interpretation of free-form role status, a second model call to
+  repair output format, or Performer-owned prompt construction;
+- per-Cycle workspace creation, repository snapshots, patch stores, commit-hash
+  authority, or Agent-owned commit/push/PR commands;
+- Root claiming, workspace/run-directory allocation, or resource cleanup inside
+  Conductor;
+- automatic retry, rollback, reset, cleanup, branch repair, PR adoption,
+  unknown-outcome reconciliation, or silent Linear-to-local fallback;
+- concurrent Cycles, multiple Roots per process, subagents, webhooks, child
+  comments as instructions, partial Root-comment consumption, or custom Linear
+  topology configuration;
+- manual-edit detection for frozen child descriptions or full Agent trajectories
+  uploaded to Linear.
+- a standalone Trusted State service/ledger, a public Linear Projector service,
+  an exactly-once PR claim, or local evidence stored inside the Root workspace.
+- dynamic Agent plugin discovery/registry, per-role Agent or model selection,
+  legacy round aliases, a shared error taxonomy, or public types for internal
+  Inbox/workspace helpers.
+- unbounded Harness feedback history or a background wait/retry loop.
+- a one-shot Execute/Audit CLI or any public role-level Linear mutation path;
+- semantic parsing, projection, or trust of Execute model output;
+- required complete Agent trajectories or trajectory references in public
+  contracts and Linear comments;
+- a Cycle Result that copies Audit evidence or acts as a second judgment; the
+  surviving Cycle Result is only a mechanical operator summary.
+
+Only these direct replacements are allowed:
+
+| Removed complexity | V1 replacement |
+|---|---|
+| revision, seal, digest, mutation comparison | none; Root description plus audited Root State |
+| execution graph, Plan, multi-Work | one serial immutable Cycle with Execute then Audit |
+| recovery, registry, generation, quarantine | cancel unfinished descendants, add Harness feedback, run fresh Reconcile |
+| delivery subsystem and finalizer | one fixed Conductor commit/push/create-PR function |
+| app-server, tool bridge, session resume | one fresh process from the run-selected thin Agent CLI adapter per role |
+| generic Task Manager and capabilities | one injectable `LinearGateway` with the listed operations |
+| Reconcile workspace inspection | audited task state, one pending finding, and Harness feedback |
+| Trusted State subsystem | one task-state field and one pending finding updated mechanically in Root State |
+| PR exactly-once/recovery protocol | one ordered attempt; ambiguous restart becomes `NeedsHuman` |
+| per-role Agent/model configuration | one required `--agent` and one model/reasoning configuration for the complete Root run |
+
+Any proposed exception changes the target architecture and requires explicit
+user approval before code or tests are written.
+
+Temporary local artifact names such as `round_001` and `rounds.jsonl` may remain
+only as evidence-path compatibility. They are not target domain concepts.
 
 ## Black-box acceptance
 
-```mermaid
-%% source-rules: RM-E2E-001 RM-E2E-002 RM-E2E-003 RM-E2E-004 RM-E2E-005 RM-E2E-006 RM-E2E-007 RM-E2E-008 RM-E2E-009
-sequenceDiagram
-  actor User
-  participant Linear
-  participant Conductor
-  participant Work as Same Work thread
-  participant Git
-  participant Verify as Fresh Verify
-  participant PR
-  User->>Linear: Todo Root with repository business requirement
-  User->>Linear: Delegate Root
-  Conductor->>Linear: Root definition, Cycle and approval records
-  Conductor->>Linear: Plan manifest, two Work Issues and one Verify Issue
-  Conductor->>Work: Work 1 then Work 2
-  Work->>Git: digest then recalled identifier
-  Conductor->>Git: exact commit
-  Conductor->>Verify: repository-only pair check
-  Conductor->>Linear: accepted Cycle record
-  Conductor->>PR: leased exact-revision delivery
-  Conductor->>Linear: delivery proof and In Review
-```
+| Scenario | Observable pass condition |
+|---|---|
+| minimal launch | the only public execution command requires `--agent codex`, one Root, one supplied workspace, and one supplied external run directory |
+| exact topology | Linear shows `Root -> Cycle -> Execute + Audit`; at most one Cycle is active |
+| frozen input | a Root comment arriving during Execute/Audit appears only in the next Cycle |
+| role isolation | Execute can write; Audit is a different fresh session and cannot write |
+| failed Execute | Audit still runs against the real residual workspace; Execute output is neither parsed nor supplied as evidence |
+| trust gate | only an `accepted` Audit adopts the Auditor-supported task state and optional pending finding; Execute exit facts cannot pre-judge the result |
+| comment transaction | failed family creation does not consume selected Root comments or start Execute |
+| final delivery | completion with no new Root input creates one commit, pushes one branch, creates one PR, records its URL, then sets Root Done |
+| PR failure | any commit/push/PR error leaves Root open and workspace intact; no automatic retry or recovery runs |
 
-| Rule | Scenario obligation | Observable pass condition | Architecture rules |
-|---|---|---|---|
-| `RM-E2E-001` | credential-isolated runner | fixture actor mutates fixtures<br>runner lacks production mutation credentials<br>opaque launcher starts built Conductor | `TM-PROVIDER-004`, `TM-PROVIDER-006` |
-| `RM-E2E-002` | real business input | `Todo` Root requests a committed release ID and lowercase SHA-256<br>consumer recomputes and rejects mismatch | `WF-TR-001`, `RR-DEFINE-001` through `RR-DEFINE-005` |
-| `RM-E2E-003` | exact approved graph | Linear shows `Root -> Cycle -> Plan + Work x2 + Verify`<br>Work order follows dependencies<br>each terminal Stage owns a record | `WF-TOPO-001` through `WF-TOPO-007`, `WF-PERSIST-001` through `WF-PERSIST-005` |
-| `RM-E2E-004` | two-turn Work continuity | Work 1 creates `e7-[0-9a-f]{32}` and persists only its digest<br>Work 2 recalls the prior turn and writes one trailing newline | `WF-PERSIST-003`, `WF-PERSIST-007`, `PF-THREAD-001` through `PF-THREAD-003` |
-| `RM-E2E-005` | context separation | Plan and Verify are fresh<br>Work gets no sibling Result or injected value<br>raw value is absent before the Work 2 output file | `PF-CTX-001` through `PF-CTX-004`, `PF-HOME-001` through `PF-HOME-004` |
-| `RM-E2E-006` | repository-only verification | fresh Verify reads the exact committed pair<br>identifier format matches<br>value hashes to the committed digest | `GD-VERIFY-001`, `GD-VERIFY-002`, `WF-PERSIST-004` |
-| `RM-E2E-007` | semantic acceptance and delivery | fresh facts prove Verify = accepted = ref = PR revision<br>PR is unique<br>two convergence rounds match | `RR-ACCEPT-001` through `RR-ACCEPT-004`, `GD-PR-001` through `GD-DELIVERY-006` |
-| `RM-E2E-008` | immutable failure/successor | scenarios cover Plan、Work、Verify and sealed-fact failure<br>only a policy-allowed deterministic successor executes | `WF-FAIL-002` through `WF-FAIL-015`, `RI-SUCC-001` |
-| `RM-E2E-009` | single-Root cleanup | launch binds one Root<br>`Done` follows closure<br>matching runtime/Home is removed<br>process exits | `WF-ROUTE-011` through `WF-ROUTE-013`, `WF-RESTART-011`, `CO-CLEAN-001` |
+## V2 Podium
 
-| E7.2 aspect | In scope | Out of scope |
+V1 stops at a manually launched Conductor on one machine with one explicitly
+supplied Root, workspace, and run directory. It does not contain a scheduler.
+
+V2 introduces Podium above Conductor with this fixed ownership boundary:
+
+| Owner | Responsibility | Must not own |
 |---|---|---|
-| business claim | repository-pair consistency and accidental-corruption detection | adversarial rewrite of both committed files、signature、external trust anchor |
-| two-turn Work | context-isolation evidence | Root business requirement |
+| Podium | claim eligible Root Issues, allocate workspace/run-directory pairs, launch and observe one bound Conductor, and own resource lifecycle | Cycle semantics, role prompts, Audit judgment, Root State promotion, or PR publication |
+| Conductor | execute one already-bound Root or one selected Cycle role using supplied paths | Root discovery/claiming, workspace selection, directory allocation, or fleet scheduling |
 
-## Scope exclusions
-
-| Rule | Excluded capability | Reason / owner |
-|---|---|---|
-| `RM-NON-001` | second-Root adoption<br>multi-Root orchestration<br>fairness scheduling inside one Conductor | `WF-AUTH-006`, `CO-LOOP-001` |
-| `RM-NON-002` | cross-provider atomic snapshot or shared transaction | `GD-NON-001` |
-| `RM-NON-003` | signatures、external trust anchors or adversarial repository integrity | not required by `RM-E2E-002` |
-| `RM-NON-004` | compatibility、migration、fallback provider or dual path | `GD-NON-005` |
-| `RM-NON-005` | automatic merge、review handling、replacement PR or redelivery policy | `GD-NON-003`, `GD-NON-004` |
-| `RM-NON-006` | E2E imports/calls into private Conductor modules or performs product mutations for Conductor | public-boundary evidence only |
+Podium has Client and Web surfaces that share the same application boundary.
+V2 first verifies and integrates the existing Client surface, whose
+implementation is outside this repository, then adds the Web surface. V1 does
+not add placeholder APIs, storage, daemon state, or Web code. Before production
+implementation, V2 must define claim leases, multi-process ownership, resource
+retention, authentication, and recovery.
 
 ## Completion gates
 
-| Rule | Gate | Required evidence |
-|---|---|---|
-| `RM-GATE-001` | architecture | rule/link/authority audits、stale-term scan and fresh zero-skill adversarial review are clean |
-| `RM-GATE-002` | implementation | focused tests、Conductor tests、lint、typecheck and build pass |
-| `RM-GATE-003` | external behavior | all `RM-E2E-*` obligations pass against built Conductor and real provider boundaries |
-| `RM-GATE-004` | repository | `make test-all`、secret scan and scoped diff review pass |
-| `RM-GATE-005` | release | residual risks are reported and human approval occurs before merge/deploy |
+| Gate | Required evidence |
+|---|---|
+| architecture | links and vocabulary checks pass; every target rule has one owner |
+| subtraction | forbidden-system symbol/dependency search passes and every surviving abstraction maps to a v1 requirement |
+| implementation | focused tests, Conductor tests, lint, typecheck, and build pass |
+| real boundaries | Linear, Agent CLI, Git workspace, push, and PR tests prove actual permissions and ordering |
+| end to end | fake Linear plus temporary Git remote proves Rejected repair Cycle, Succeeded Cycle, final Inbox check, and PR creation |
+| repository | full test suite, secret scan, scoped diff review, and human review pass |

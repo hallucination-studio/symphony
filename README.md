@@ -1,7 +1,11 @@
 # Symphony
 
-Symphony turns a Linear Root Issue into a verified pull request. Phase 1 is one
-closed loop: plan, work, verify an exact commit, then create the PR.
+Symphony advances one explicitly selected Linear Root Issue through small
+Cycles. Each Cycle contains one workspace-write Execute session followed by an
+independent read-only Audit session. V1 runs manually on one machine with one
+caller-supplied workspace and external run directory, and creates one pull
+request only after Root completion is independently verified. A one-shot Cycle
+mode runs one existing Execute or Audit for focused testing and debugging.
 
 ## Architecture
 
@@ -18,7 +22,7 @@ Key documents:
 - [Conductor](docs/architecture/conductor.md)
 - [Root Reconciliation](docs/architecture/root-reconciliation.md)
 - [Performer](docs/architecture/performer.md)
-- [Git worktree and delivery](docs/architecture/git-worktree-delivery.md)
+- [Root Workspace and Pull Request](docs/architecture/workspace.md)
 - [Contracts](docs/architecture/contracts.md)
 - [Roadmap](docs/architecture/roadmap.md)
 

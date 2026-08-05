@@ -21,7 +21,10 @@ import {
   parseTaskIssueId,
   parseThreadId,
 } from "../../contracts/identity.js";
-import { deriveCycleUuid } from "../../contracts/cycle-identities.js";
+import {
+  CYCLE_IDENTITY_DERIVATION_VERSION,
+  deriveCycleUuid,
+} from "../../contracts/cycle-identities.js";
 import {
   parseGitSnapshot,
   parseRootBootstrap,
@@ -74,6 +77,15 @@ import {
 
 const rootId = parseRootIssueId("LIN-1");
 const generation = parseRuntimeGeneration(1);
+const cycleIdentityVersion = CYCLE_IDENTITY_DERIVATION_VERSION;
+const firstCycleId = parseTaskIssueId(deriveCycleUuid(
+  cycleIdentityVersion,
+  "cycle_issue",
+  rootId,
+  "first_cycle",
+  "first_cycle",
+));
+const derivedCycleId = (kind: string) => deriveCycleUuid(cycleIdentityVersion, kind, firstCycleId);
 const workflow = parseTaskWorkflowIdentities({
   labels: {
     root: "label:root", cycle: "label:cycle", plan: "label:plan",
@@ -185,9 +197,57 @@ const cycleDraftDescription = [
   "",
   "## Acceptance Mapping",
   "",
-  "- Root sections: assert the applied Root resource and subsequent exact Root read.",
-  "- Draft correction: assert the fresh Draft Markdown before and after correction.",
-  "- Approval: assert the exact corrected revision becomes In Progress and returns a non-null seal digest.",
+  "### Execution Anchors",
+  "",
+  `- Cycle ID: \`${firstCycleId}\``,
+  "- Predecessor Cycle ID: None",
+  "- Predecessor Terminal Record ID: `first_cycle`",
+  `- Approval Record ID: \`${derivedCycleId("cycle_approval_record")}\``,
+  `- Plan Issue ID: \`${derivedCycleId("plan_issue")}\``,
+  `- Plan Completion Record ID: \`${derivedCycleId("plan_completion_record")}\``,
+  `- Plan Invalidation Record ID: \`${derivedCycleId("plan_invalidation_record")}\``,
+  `- Cycle Completion Record ID: \`${derivedCycleId("cycle_completion_record")}\``,
+  `- Cycle Invalidation Record ID: \`${derivedCycleId("cycle_invalidation_record")}\``,
+  `- Delivery Completion Record ID: \`${derivedCycleId("delivery_completion_record")}\``,
+  `- Delivery Invalidation Record ID: \`${derivedCycleId("delivery_invalidation_record")}\``,
+  `- Identity Derivation Version: \`${cycleIdentityVersion}\``,
+  `- Workspace Base Revision: \`${"e".repeat(64)}\``,
+  "",
+  "### Execution Directives",
+  "",
+  "#### Directive: `directive:runtime`",
+  "",
+  "Implement the approved Root runtime.",
+  "",
+  "##### Dependencies",
+  "",
+  "- None",
+  "",
+  "##### Acceptance Criteria",
+  "",
+  "- `acceptance:runtime`",
+  "",
+  "### Approved Work Groups",
+  "",
+  "#### Work Group: `group:runtime`",
+  "",
+  "##### Directives",
+  "",
+  "- `directive:runtime`",
+  "",
+  "##### Dependencies",
+  "",
+  "- None",
+  "",
+  "### Verification Directives",
+  "",
+  "#### Verification Directive: `verify:runtime`",
+  "",
+  "Verify the approved Root runtime.",
+  "",
+  "##### Acceptance Criteria",
+  "",
+  "- `acceptance:runtime`",
   "",
   "## Failure Strategy",
   "",
@@ -2270,7 +2330,7 @@ test("tool-call budget abort cannot accept while an earlier effect is in flight"
 });
 
 test("controlled app-server resumes from complete Root Markdown by creating the Draft directly", async () => {
-  const cycleId = parseTaskIssueId("33333333-3333-4333-8333-333333333333");
+  const cycleId = firstCycleId;
   const responses: Array<ReturnType<typeof toolResponse>> = [];
   const appServer = controlledAppServer((message, server) => {
     if (initializeResponse(message, server) || message.method === "initialized") return;
@@ -2381,47 +2441,14 @@ test("controlled app-server resumes from complete Root Markdown by creating the 
 
 test("controlled app-server completes fresh Define, Draft review, correction, and one-way seal", async () => {
   const rootTaskIssueId = parseTaskIssueId(rootId);
-  const identityVersion = "symphony-identity:v1";
-  const cycleId = parseTaskIssueId(deriveCycleUuid(
-    identityVersion,
-    "cycle_issue",
-    rootId,
-    "first_cycle",
-    "first_cycle",
-  ));
+  const cycleId = firstCycleId;
   const rootRevision = rootRevisionOf(taskAtRootRevision("revision:root:2", reconciledRootDescription));
   let cycleCreatedRevision: string | undefined;
   let cycleCorrectedRevision: string | undefined;
   let cycleApprovedRevision: string | undefined;
-  const executionDesign = [
-    "### Execution Anchors", "",
-    `- Cycle ID: \`${cycleId}\``,
-    "- Predecessor Cycle ID: None",
-    "- Predecessor Terminal Record ID: `first_cycle`",
-    `- Approval Record ID: \`${deriveCycleUuid(identityVersion, "cycle_approval_record", cycleId)}\``,
-    `- Plan Issue ID: \`${deriveCycleUuid(identityVersion, "plan_issue", cycleId)}\``,
-    `- Plan Completion Record ID: \`${deriveCycleUuid(identityVersion, "plan_completion_record", cycleId)}\``,
-    `- Plan Invalidation Record ID: \`${deriveCycleUuid(identityVersion, "plan_invalidation_record", cycleId)}\``,
-    `- Cycle Completion Record ID: \`${deriveCycleUuid(identityVersion, "cycle_completion_record", cycleId)}\``,
-    `- Cycle Invalidation Record ID: \`${deriveCycleUuid(identityVersion, "cycle_invalidation_record", cycleId)}\``,
-    `- Delivery Completion Record ID: \`${deriveCycleUuid(identityVersion, "delivery_completion_record", cycleId)}\``,
-    `- Delivery Invalidation Record ID: \`${deriveCycleUuid(identityVersion, "delivery_invalidation_record", cycleId)}\``,
-    `- Identity Derivation Version: \`${identityVersion}\``,
-    `- Workspace Base Revision: \`${"e".repeat(64)}\``, "",
-    "### Execution Directives", "", "#### Directive: `directive:runtime`", "",
-    "Implement the approved Root runtime.", "", "##### Dependencies", "", "- None", "",
-    "##### Acceptance Criteria", "", "- `acceptance:runtime`", "",
-    "### Approved Work Groups", "", "#### Work Group: `group:runtime`", "",
-    "##### Directives", "", "- `directive:runtime`", "", "##### Dependencies", "", "- None", "",
-    "### Verification Directives", "", "#### Verification Directive: `verify:runtime`", "",
-    "Verify the approved Root runtime.", "", "##### Acceptance Criteria", "", "- `acceptance:runtime`",
-  ].join("\n");
   const cycleDraftDescription = cycleDraftDescriptionForTest().replace(
     "`revision:root:2`",
     `\`${rootRevision}\``,
-  ).replace(
-    "## Failure Strategy",
-    `${executionDesign}\n\n## Failure Strategy`,
   );
   const correctedCycleDraftDescription = cycleDraftDescription.replace(
     "Validate closed Markdown and exact revisions at the Root boundary.",

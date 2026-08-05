@@ -51,9 +51,9 @@ const TEMPORARY_STATES = Object.freeze([
   { name: "Awaiting Acceptance", type: "started", color: "#5E6AD2" },
   { name: "Rejected", type: "canceled", color: "#D05B5B" },
 ]);
-const COMMAND_TIMEOUT_MS = 5 * 60_000;
-const SCENARIO_TIMEOUT_MS = 55 * 60_000;
-const NODE_TEST_TIMEOUT_MS = 60 * 60_000;
+const COMMAND_TIMEOUT_MS = 30_000;
+const SCENARIO_TIMEOUT_MS = 4 * 60_000;
+const NODE_TEST_TIMEOUT_MS = 4 * 60_000;
 const POLL_INTERVAL_MS = 5_000;
 const MAX_CONSECUTIVE_TRANSIENT_READ_FAILURES = 3;
 const TRANSIENT_LINEAR_ERROR_TYPES = new Set([
@@ -181,15 +181,39 @@ function initialRootDescription(runId, fixtureDirectory) {
   return [
     `# Accepted Root E2E ${runId}`,
     "",
-    `Create an isolated two-turn continuity proof under \`${fixtureDirectory}/\` without changing any other path.`,
+    "## Requirement",
     "",
-    "The approved execution graph must contain exactly two ordered Work items and one Verify:",
+    `Deliver an isolated two-turn continuity proof under \`${fixtureDirectory}/\` without changing any other path.`,
+    "",
+    "The approved execution graph must contain exactly two ordered Work items and one fresh Verify:",
     "",
     `1. Work 1 generates a fresh value matching \`e7-[0-9a-f]{32}\`, writes only the lowercase SHA-256 of the exact value to \`${fixtureDirectory}/context-proof.sha256\`, and returns the raw value only in its final Work summary. It must not persist the raw value anywhere.`,
     `2. Work 2 depends on Work 1, recalls that exact raw value from the preceding turn in the same Work thread, and writes it with one trailing newline to \`${fixtureDirectory}/context-proof.txt\`. It must not generate a replacement value or recover the value from repository content.`,
     `3. Verify runs in a fresh context and uses only the exact committed repository files to prove that \`context-proof.txt\` matches the required format and hashes to the digest in \`context-proof.sha256\`.`,
     "",
-    "Do not combine the two Work items. Do not add dependencies or modify existing files. Fail closed if the prior-turn value is unavailable or the repository-only verification does not match.",
+    "Authorized scope is one Cycle with one Plan, two ordered Work items, and one Verify, followed by exact Git and PR delivery.",
+    "Required consequences are same-thread two-turn continuity, fresh Verify context, exact committed files, and public revision convergence.",
+    "Out of scope are extra Work items, extra dependencies, unrelated repository changes, replacement values, and automatic repair.",
+    "No approval-blocking assumptions remain: the fixture directory, repository, and external provider identities are supplied as current facts.",
+    "",
+    "## Domain Knowledge",
+    "",
+    "Linear is the durable workflow authority; Git and the public pull request are the delivery authorities.",
+    "Work 1 and Work 2 use one live Work thread across two turns; Plan and Verify use fresh contexts.",
+    "Verify may inspect only the exact committed repository files and may not mutate the workspace.",
+    "",
+    "## Root ADR",
+    "",
+    "Root owns semantic scope and acceptance; Conductor owns the approved Cycle mechanics and never reinterprets this document.",
+    "The raw continuity value may exist only in the Work 1 final summary and the Work 2 output file; the digest is the only Work 1 file evidence.",
+    "Acceptance requires the unchanged verified revision to match the remote ref and the unique pull request in two public convergence rounds.",
+    "",
+    "## Acceptance",
+    "",
+    "- Linear contains exactly Root -> Cycle -> Plan + two ordered Work items + Verify, with Work 1 blocking Work 2 and both Work items blocking Verify.",
+    `- The committed files under \`${fixtureDirectory}/\` contain the lowercase digest and the exact \`e7-[0-9a-f]{32}\` value with one trailing newline, and the digest matches.`,
+    "- Plan and Verify are fresh contexts, Work 2 uses the preceding Work turn's exact value, and no extra repository path changes occur.",
+    "- Verify, the accepted Cycle, the remote branch, and the unique pull request all identify the same exact revision in two matching convergence rounds.",
   ].join("\n");
 }
 
@@ -870,7 +894,7 @@ function registerAcceptedRootScenario() {
       });
 
       const baseline = await fixtures.operate((access) => readRootTree(access, linear));
-      assert.equal(baseline.root.description, linear.initialDescription);
+      assertClosedMarkdown(baseline.root.description, ROOT_SECTIONS);
       assert.equal(baseline.root.delegateId, null);
       assert.equal(baseline.root.state, "In Progress");
       assert.deepEqual(baseline.cycles, []);

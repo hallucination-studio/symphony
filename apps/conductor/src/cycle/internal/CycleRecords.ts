@@ -53,7 +53,11 @@ export function appliedTaskIssueRecord(
 ): UnknownRecord {
   const comment = result.output.fresh_comment;
   if (result.output.outcome !== "applied" || comment === null) {
-    throw new Error("record_mutation_not_applied");
+    const reason = result.output.sanitized_reason;
+    const reasonCode = typeof reason === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(reason)
+      ? reason
+      : "unknown";
+    throw new Error(`record_mutation_not_applied:${reasonCode}`);
   }
   if (comment.actor_id !== expectedActorId) throw new Error("record_actor_mismatch");
   return projectTaskIssueRecord(call.input.body_markdown, comment);

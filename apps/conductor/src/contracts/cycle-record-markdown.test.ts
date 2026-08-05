@@ -49,7 +49,7 @@ test("fresh immutable provider evidence materializes the full canonical record",
     comment_id: "record:plan:completion:1",
     issue_id: "issue:plan:1",
     provider_created_at: "2026-08-02T01:00:00.000Z",
-    provider_updated_at: "2026-08-02T01:00:00.000Z",
+    provider_updated_at: "2026-08-02T00:59:59.962Z",
     provider_edited_at: null,
     provider_archived_at: null,
     actor_id: "actor:symphony",
@@ -59,10 +59,11 @@ test("fresh immutable provider evidence materializes the full canonical record",
   assert.equal(record.record_id, "record:plan:completion:1");
   assert.match(record.revision as string, /^symphony:v1:[0-9a-f]{64}$/u);
   assert.equal(record.created_at, "2026-08-02T01:00:00.000Z");
+  assert.equal(record.updated_at, "2026-08-02T00:59:59.962Z");
   assert.equal(record.archived_at, null);
 
   for (const invalid of [
-    { provider_updated_at: "2026-08-02T01:00:01.000Z" },
+    { provider_updated_at: "not-a-timestamp" },
     { provider_edited_at: "2026-08-02T01:00:01.000Z" },
     { provider_archived_at: "2026-08-02T01:00:01.000Z" },
     { actor_id: null },

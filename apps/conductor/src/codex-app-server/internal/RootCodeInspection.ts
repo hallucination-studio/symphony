@@ -119,6 +119,7 @@ function specs(target: RuntimeTarget): readonly RootToolSpec[] {
     minLength: 1,
     maxLength: MAX_CODE_PATH_LENGTH,
     pattern: "^[^\\\\\\r\\n\\u0000]+$",
+    description: "Workspace-relative POSIX path; use . for the workspace root; never use null, an empty path, . / segments, or an absolute path.",
   });
   return deepFreeze([
     {

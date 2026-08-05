@@ -75,6 +75,21 @@ test("applied and restarted records use the same exact immutable provider projec
     },
   }, call);
 
+  const notApplied = parseTaskMcpResult({
+    ...result,
+    output: {
+      ...result.output,
+      outcome: "not_applied",
+      effect_may_have_occurred: false,
+      fresh_comment: null,
+      sanitized_reason: "fresh_precondition_unavailable",
+    },
+  }, call);
+  assert.throws(
+    () => appliedTaskIssueRecord(call, notApplied, "actor:symphony"),
+    /record_mutation_not_applied:fresh_precondition_unavailable/u,
+  );
+
   const applied = appliedTaskIssueRecord(call, result, "actor:symphony");
   const restarted = readExactTaskIssueRecord([{
     ...comment,

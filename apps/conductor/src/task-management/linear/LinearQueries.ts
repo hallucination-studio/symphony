@@ -562,7 +562,7 @@ function recordObservation(comment: CommentRecord): TaskIssueRecordObservation |
   } catch {
     const observationKind = comment.provider_archived_at !== null
       ? "archived" as const
-      : comment.provider_edited_at !== null || comment.provider_updated_at !== comment.provider_created_at
+      : comment.provider_edited_at !== null
         ? "updated" as const
         : "malformed" as const;
     return Object.freeze({

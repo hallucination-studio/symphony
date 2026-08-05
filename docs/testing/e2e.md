@@ -1,75 +1,105 @@
 # E2E Testing
 
-The public-boundary E2E suite runs the built Conductor against real Linear,
-Git, GitHub, and the locally installed Codex app-server. The test runner never
-imports Conductor internals and never receives the product mutation token.
+The target test suite is rebuilt from business scenarios. Existing tests that
+encode revision, Plan/DAG, Work/Verify, app-server, capability, delivery, or
+runtime-registry fields are deleted with those systems; they are not translated
+field by field into the new architecture.
 
-## Commands
+## Test contract
 
-Build the process before running the provider test:
+Every scenario declares four things:
+
+```text
+given: public Linear, workspace, run-directory, and provider state
+when: one CLI action (`run` or `cycle`)
+then: public Linear, workspace, process, and PR outcomes
+cleanup: resources owned by that scenario
+```
+
+Assertions target observable outcomes, not private classes, method calls,
+serialized implementation fields, log ordering, or intermediate parser shapes.
+A scenario may contain several coherent assertions when together they prove one
+business result.
+
+## Shared scenario kit
+
+Reuse setup and boundary mechanics, not expected business behavior:
+
+| Shared part | Responsibility |
+|---|---|
+| `ScenarioWorld` | create one Root, isolated workspace, external run directory, temporary remote, and deterministic clock/IDs |
+| `LinearDriver` | fake or real provider setup and public observation |
+| `AgentDriver` | scripted or real CLI role outcomes behind the production Performer contract |
+| `ProcessDriver` | launch the built `run` or `cycle` command and capture sanitized termination |
+| `EvidenceReader` | read public Issue/comments/status, workspace diff, PR result, and bounded run evidence |
+| `ScenarioCleanup` | remove only resources explicitly owned by the scenario and report every cleanup failure |
+
+Scenario files remain readable end to end. They may use the shared world and
+drivers, but each keeps its own given/when/then values and outcome assertions.
+Do not introduce a generic assertion DSL, snapshot the entire Root tree, or
+hide business expectations in fixtures.
+
+## Layers
+
+| Layer | Boundary | Purpose |
+|---|---|---|
+| contract | pure values and parsers | closed CLI, CycleSpec, Root State, and role-result variants only |
+| scenario | fake Linear/Agent plus real filesystem/Git | complete Root and one-shot role behavior with fast deterministic feedback |
+| boundary | one real Linear, Agent CLI, Git, GitHub, or permission edge | prove each external integration with the smallest scenario |
+| golden | built process with real boundaries | one manual single-machine Root reaches one PR and `Done` |
+
+Focused production debugging uses the same built entry:
 
 ```bash
-make build
-npm run test:e2e:runner
-npm run test:e2e
+lh-harness cycle \
+  --issue ENG-128 \
+  --workspace /absolute/root-workspace \
+  --dir /absolute/root-run-directory \
+  --agent codex \
+  --model gpt-5.6-luna \
+  --reasoning-effort max
 ```
 
-`test:e2e:runner` is deterministic and checks configuration, credential
-separation, launcher framing, cleanup, and sanitized diagnostics. `test:e2e`
-also runs the accepted Root scenario in
-`tests/e2e/accepted-root.test.mjs`.
+This command is itself scenario-covered: it runs only the selected existing
+Execute or eligible Audit, writes only that role result/status, starts no poll,
+does not close the Cycle or promote Root State, and never publishes a PR.
 
-## Configuration
+## Required scenarios
 
-Create a local `.env` that is not committed. The runner requires:
+| Scenario | Observable result |
+|---|---|
+| manual launch | one Root binds to the supplied workspace/run directory and uses Root title/description as its only requirement |
+| exact topology | Linear shows `Root -> Cycle -> Execute + Audit`, with at most one active Cycle |
+| frozen input | a Root comment arriving during Execute/Audit enters only the next Cycle |
+| successful Cycle | completed Execute plus `accepted` Audit adopts its task state and optional pending finding |
+| rejected Cycle | `incomplete` Audit records one pending finding and the next Reconcile creates a repair Cycle |
+| failed Execute | Execute error is recorded and a fresh read-only Audit still inspects residual workspace state |
+| integrity failure | `violation` fails the Cycle and never promotes task state |
+| process failure | `process_error` fails closed with sanitized evidence |
+| family transaction | partial family creation consumes no Root comments and starts no Agent |
+| restart abandonment | unfinished descendants are canceled and the supplied paths are reused exactly |
+| one-shot Execute | `cycle` runs one Execute and exits without dispatching Audit |
+| one-shot Audit | `cycle` rejects active, terminal, or otherwise ineligible input and runs an eligible waiting Audit without closing its Cycle |
+| final Inbox fence | new Root input cancels completion and returns to Reconcile |
+| final publication | empty Inbox produces one commit, push, PR URL, then Root `Done` |
+| publication failure | failed commit/push/PR leaves Root open and workspace/run evidence intact without retry |
 
-```dotenv
-SYMPHONY_E2E_LINEAR_HUMAN_TOKEN=...
-SYMPHONY_E2E_LINEAR_SETUP_AUTHORIZED=true
-SYMPHONY_E2E_PROJECT_SLUG_ID=...
-SYMPHONY_E2E_CONDUCTOR_LAUNCHER_SOCKET=/absolute/path/to/launcher.sock
-```
+Add a focused unit case only when a parser or deterministic transition has an
+independent contract that these scenarios cannot diagnose precisely. Do not
+recreate one test per field, branch, error code, Markdown line, or private
+helper.
 
-The socket must be served by the local deployment launcher. It starts
-`apps/conductor/dist/main.js` with the product-only environment, including
-`SYMPHONY_LINEAR_TOKEN`, `SYMPHONY_CODEX_API_KEY`,
-`SYMPHONY_CODEX_MODEL`, `SYMPHONY_CODEX_BASE_URL`, and the three acknowledged
-Linear provider capability attestations. The runner sends only an absolute
-config path and receives sanitized JSONL lifecycle events.
+## Execution
 
-Set `SYMPHONY_E2E_DIAGNOSTIC_EVENTS=1` only when needed. The optional output
-contains event names and bounded reason codes, never credentials or raw agent
-values.
+The repository-owned supervisor starts the built Conductor, partitions fixture
+and product credentials, enforces one wall-clock deadline, waits for every
+started child, and performs ownership-aware cleanup. It contains no workflow
+logic or expected business values.
 
-## Fixture Ownership
+The deterministic scenario suite runs before real-boundary and golden tests.
+Independent scenarios may run concurrently with isolated Roots, workspaces, and
+run directories. One failure does not cancel peers; the final report lists all
+violations, blocked observations, retained resources, and cleanup failures.
 
-The fixture actor uses the human Linear token to create temporary workflow
-states and one delegated Root. It observes public Linear facts and archives
-the issue tree and any states it created. The Git fixture uses the local `gh`
-login to clone the repository, inspect the public PR/ref, and remove its
-temporary branch, open PRs, and local directory.
-
-The product is started only through the launcher after the fixture config is
-written. Product shutdown runs before fixture cleanup. A failed cleanup is a
-test failure; inspect the reported fixture identity before retrying.
-
-## Codex Boundary
-
-Conductor production roles start `codex app-server` through `CodexProcess`.
-The native Work and Verify permission probes use the same app-server process
-and its `command/exec` request with the role permission profile. They do not
-invoke `codex sandbox`, start a second Codex surface, or require a model turn.
-
-## Troubleshooting
-
-- `invalid_e2e_configuration`: check the four required values, the absolute
-  socket path, and that no production Linear token is in the runner environment.
-- `conductor_start_failed` or `conductor_start_timeout`: confirm the launcher
-  is listening and starts the freshly built `apps/conductor/dist` process.
-- `fixture_operation_failed`: verify Linear access, project ownership, and the
-  configured Symphony actor; verify `gh auth status` for the Git fixture.
-- `conductor_runtime_failed`: inspect only sanitized diagnostics, then query
-  Linear, the branch, and the PR using the fixture identities.
-
-Never place tokens, cookies, API keys, or raw continuity values in command
-output, checked-in fixtures, or this document.
+Never place tokens, cookies, API keys, prompts, raw model streams, or file
+contents in scenario names, fixtures, diagnostics, or final reports.

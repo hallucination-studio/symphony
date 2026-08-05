@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 
 import { parseCycleDesignMarkdown } from "../../contracts/cycle-design-markdown.js";
-import { deriveCycleUuid } from "../../contracts/cycle-identities.js";
+import {
+  deriveCycleAnchorIds,
+  deriveCycleUuid,
+  FIRST_CYCLE_PREDECESSOR,
+} from "../../contracts/cycle-identities.js";
 import {
   parseCycleSpecification,
   type CycleSpecification,
@@ -34,10 +38,6 @@ function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function derived(version: string, kind: string, cycleId: TaskIssueId): string {
-  return deriveCycleUuid(version, kind, cycleId);
-}
-
 function seal(value: unknown): string {
   return canonicalTaskRevision(value).slice("symphony:v1:".length);
 }
@@ -58,20 +58,11 @@ export function prepareCycleApproval(input: CycleApprovalInput): PreparedCycleAp
     version,
     "cycle_issue",
     rootId,
-    anchors.predecessor_cycle_issue_id ?? "first_cycle",
+    anchors.predecessor_cycle_issue_id ?? FIRST_CYCLE_PREDECESSOR,
     anchors.predecessor_terminal_record_id,
   );
   if (cycleId !== expectedCycleId) throw new Error("cycle_identity_derivation_mismatch");
-  const expectedAnchors = {
-    approval_record_id: derived(version, "cycle_approval_record", cycleId),
-    plan_issue_id: derived(version, "plan_issue", cycleId),
-    plan_completion_record_id: derived(version, "plan_completion_record", cycleId),
-    plan_invalidation_record_id: derived(version, "plan_invalidation_record", cycleId),
-    cycle_completion_record_id: derived(version, "cycle_completion_record", cycleId),
-    cycle_invalidation_record_id: derived(version, "cycle_invalidation_record", cycleId),
-    delivery_completion_record_id: derived(version, "delivery_completion_record", cycleId),
-    delivery_invalidation_record_id: derived(version, "delivery_invalidation_record", cycleId),
-  };
+  const expectedAnchors = deriveCycleAnchorIds(version, cycleId);
   if (Object.entries(expectedAnchors).some(([key, value]) => anchors[key as keyof typeof expectedAnchors] !== value)) {
     throw new Error("cycle_anchor_derivation_mismatch");
   }

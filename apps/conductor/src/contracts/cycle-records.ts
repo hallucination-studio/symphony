@@ -301,7 +301,7 @@ const COMMON_RECORD_KEYS = [
 function parseRecordCommon(record: UnknownRecord): TaskIssueRecordCommon {
   const createdAt = parseTimestamp(record.created_at, "invalid_record_created_at");
   const updatedAt = parseTimestamp(record.updated_at, "invalid_record_updated_at");
-  if (createdAt !== updatedAt || record.archived_at !== null) throw new Error("record_not_write_once");
+  if (record.archived_at !== null) throw new Error("record_not_write_once");
   return Object.freeze({
     record_id: parseIdentifier(record.record_id, "invalid_record_id"),
     revision: parseCanonicalRevision(record.revision),
@@ -1388,7 +1388,7 @@ export function parseRootFamilyInvalidationRecord(value: unknown): RootFamilyInv
   ]);
   const createdAt = parseTimestamp(record.created_at, "invalid_record_created_at");
   const updatedAt = parseTimestamp(record.updated_at, "invalid_record_updated_at");
-  if (createdAt !== updatedAt || record.archived_at !== null) throw new Error("record_not_write_once");
+  if (record.archived_at !== null) throw new Error("record_not_write_once");
   const issueId = parseTaskIssueId(record.issue_id);
   const rootId = parseRootIssueId(record.root_id);
   if (String(issueId) !== String(rootId)) throw new Error("root_family_invalidation_owner_mismatch");

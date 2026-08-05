@@ -97,7 +97,7 @@ function cycleMarkdown(acceptanceMapping = mapping): string {
 }
 
 test("visible Cycle design Markdown projects exact directives, groups, dependencies, and anchors", () => {
-  const markdown = cycleMarkdown();
+  const markdown = cycleMarkdown(mapping.replaceAll("- None", "- `None`"));
   const design = parseCycleDesignMarkdown(markdown);
   assert.deepEqual(design.execution_directives.map(({ directive_id }) => directive_id), ["directive:one", "directive:two"]);
   assert.deepEqual(design.approved_work_groups.map(({ work_group_id }) => work_group_id), ["group:one", "group:two"]);

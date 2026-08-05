@@ -318,6 +318,7 @@ const rootIssue = () => issue(
 function snapshot(
   cycles: readonly TaskIssueSnapshot[] = [],
   relations: readonly unknown[] = [],
+  root: TaskIssueSnapshot = rootIssue(),
 ): TaskSnapshot {
   return parseTaskSnapshot({
     root_id: rootId,
@@ -330,7 +331,7 @@ function snapshot(
       succeeded_state_id: workflow.cycle_states.succeeded, rejected_state_id: workflow.cycle_states.rejected,
       failed_state_id: workflow.cycle_states.failed, canceled_state_id: workflow.cycle_states.canceled,
     },
-    issues: [rootIssue(), ...cycles], relations,
+    issues: [root, ...cycles], relations,
     resource_creation_evidence: [], issue_history: [], issue_record_observations: [],
   });
 }
@@ -662,17 +663,20 @@ function listChildren(parentId: string): ListChildrenCall {
   };
 }
 
-function createDraft(): CreateIssueCall {
+function createDraft(
+  issueId: string = cycleTaskId,
+  description: string = cycleDescription,
+): CreateIssueCall {
   return {
     ...envelope("create_issue"),
     function: "create_issue",
     input: {
-      issue_id: parseTaskIssueId("11111111-1111-4111-8111-111111111111"),
+      issue_id: parseTaskIssueId(issueId),
       parent_issue_id: parseTaskIssueId("ROOT-A"),
       expected_parent_revision: parseTaskRevision(canonicalRootRevision),
       desired: {
         title: "Cycle draft",
-        description: cycleDescription,
+        description,
         state_id: workflow.cycle_states.draft,
         label_ids: [workflow.labels.cycle],
         delegate_id: null,
@@ -680,6 +684,21 @@ function createDraft(): CreateIssueCall {
       },
     },
   };
+}
+
+function successorDraft(): CreateIssueCall {
+  const issueId = deriveCycleUuid(
+    identityVersion,
+    "cycle_issue",
+    rootId,
+    cycleTaskId,
+    "terminal_record",
+  );
+  const description = cycleDescription
+    .replace(`- Cycle ID: \`${cycleTaskId}\``, `- Cycle ID: \`${issueId}\``)
+    .replace("- Predecessor Cycle ID: None", `- Predecessor Cycle ID: \`${cycleTaskId}\``)
+    .replace("- Predecessor Terminal Record ID: `first_cycle`", "- Predecessor Terminal Record ID: `terminal_record`");
+  return createDraft(issueId, description);
 }
 
 function update(
@@ -935,6 +954,126 @@ test("Root permits only exact Define, Draft, approval, acceptance, and successor
       ? ["get_issue", ...approvalWrite, entry.call.function]
       : [...approvalWrite, entry.call.function]);
   }
+});
+
+test("Root approves a Draft after a child mutation advances only the parent provider revision", async () => {
+  let current = snapshot(
+    [draftCycle()],
+    [],
+    changedIssue(rootIssue(), {}, "root-provider-time-drift"),
+  );
+  const effects: string[] = [];
+  const manager = recordingManager(effects);
+  manager.get_issue = async (call) => {
+    effects.push("get_issue");
+    return parseTaskMcpResult({
+      ...envelope("get_issue"),
+    function: "get_issue",
+    output: { issue: current.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null },
+    }, call);
+  };
+  manager.update_issue = async (call) => {
+    effects.push("update_issue");
+    const approved = changedIssue(draftCycle(), {
+      status_id: workflow.cycle_states.in_progress,
+      status: "In Progress",
+    }, "cycle:sealed-after-parent-drift");
+    current = snapshot(
+      [approved],
+      [],
+      changedIssue(rootIssue(), {}, "root-provider-time-drift-after-approval"),
+    );
+    return parseTaskMcpResult({
+      ...envelope("update_issue"),
+      function: "update_issue",
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: approved,
+        concrete_diff: [{
+          kind: "field_changed",
+          issue_id: call.input.issue_id,
+          field: "status",
+          before: workflow.cycle_states.draft,
+          after: workflow.cycle_states.in_progress,
+        }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+
+  const bound = bind(() => current, manager);
+  await bound.get_issue(getIssue(cycleTaskId), execution);
+  const result = await bound.update_issue(
+    update(cycleTaskId, draftCycle().revision, { state_id: workflow.cycle_states.in_progress }),
+    execution,
+  );
+
+  assert.equal(result.output.outcome, "applied");
+  assert.equal(result.seal_digest, expectedApprovalSeal());
+  assert.deepEqual(effects, ["get_issue", "create_issue_comment", "update_issue"]);
+});
+
+test("Root refreshes a Draft revision after its approval record advances the provider revision", async () => {
+  let current = snapshot([draftCycle()]);
+  const effects: string[] = [];
+  const manager = recordingManager(effects);
+  manager.get_issue = async (call) => {
+    effects.push("get_issue");
+    return parseTaskMcpResult({
+      ...envelope("get_issue"),
+      function: "get_issue",
+      output: { issue: current.issues.find(({ issue_id }) => issue_id === call.input.issue_id) ?? null },
+    }, call);
+  };
+  const createRecord = manager.create_issue_comment;
+  assert.ok(createRecord);
+  manager.create_issue_comment = async (call, providerExecution) => {
+    const result = await createRecord(call, providerExecution);
+    current = snapshot([changedIssue(draftCycle(), {}, "cycle:approval-record-write")]);
+    return result;
+  };
+  manager.update_issue = async (call) => {
+    effects.push("update_issue");
+    const before = current.issues.find(({ issue_id }) => issue_id === call.input.issue_id);
+    assert.ok(before);
+    assert.equal(call.input.expected_revision, before.revision);
+    const approved = changedIssue(before, {
+      status_id: workflow.cycle_states.in_progress,
+      status: "In Progress",
+    }, "cycle:sealed-after-record-write");
+    current = snapshot([approved]);
+    return parseTaskMcpResult({
+      ...envelope("update_issue"),
+      function: "update_issue",
+      output: {
+        outcome: "applied",
+        effect_may_have_occurred: true,
+        target: { kind: "issue", issue_id: call.input.issue_id },
+        fresh_resource: approved,
+        concrete_diff: [{
+          kind: "field_changed",
+          issue_id: call.input.issue_id,
+          field: "status",
+          before: workflow.cycle_states.draft,
+          after: workflow.cycle_states.in_progress,
+        }],
+        sanitized_reason: null,
+      },
+    }, call);
+  };
+
+  const bound = bind(() => current, manager);
+  await bound.get_issue(getIssue(cycleTaskId), execution);
+  const result = await bound.update_issue(
+    update(cycleTaskId, draftCycle().revision, { state_id: workflow.cycle_states.in_progress }),
+    execution,
+  );
+
+  assert.equal(result.output.outcome, "applied");
+  assert.equal(result.seal_digest, expectedApprovalSeal());
+  assert.deepEqual(effects, ["get_issue", "create_issue_comment", "update_issue"]);
 });
 
 test("Root requires a current-turn exact acceptance view before Succeeded or Rejected", async () => {
@@ -1198,6 +1337,26 @@ test("Root validates Define and Cycle Draft Markdown before mutation provider ef
       desired: { ...createDraft().input.desired, description: "## Draft\n\nIncomplete Cycle." },
     },
   };
+  const invalidDesignCreate = {
+    ...createDraft(),
+    input: {
+      ...createDraft().input,
+      desired: {
+        ...createDraft().input.desired,
+        description: cycleDescription.replace(
+          "### Execution Directives",
+          "The execution directives are described below.",
+        ),
+      },
+    },
+  };
+  const invalidIdentityCreate = {
+    ...createDraft(),
+    input: {
+      ...createDraft().input,
+      issue_id: parseTaskIssueId("11111111-1111-4111-8111-111111111111"),
+    },
+  };
   const invalidCorrection = update(cycleTaskId, canonicalDraftRevision, {
     description: cycleDescription.replace(
       "Only exact role-owned mutations reach the provider.",
@@ -1207,6 +1366,13 @@ test("Root validates Define and Cycle Draft Markdown before mutation provider ef
 
   await assert.rejects(bind(() => snapshot(), manager).update_issue(invalidDefine, execution), denied);
   await assert.rejects(bind(() => snapshot(), manager).create_issue(invalidCreate, execution), denied);
+  await assert.rejects(bind(() => snapshot(), manager).create_issue(invalidDesignCreate, execution), denied);
+  await assert.rejects(
+    bind(() => snapshot(), manager).create_issue(invalidIdentityCreate, execution),
+    (error: unknown) => denied(error)
+      && error instanceof RootTaskManageBindingError
+      && error.diagnostic_code === "cycle_identity_derivation_mismatch",
+  );
   const correctionBinding = bind(() => snapshot([draftCycle()]), manager);
   await correctionBinding.get_issue(getIssue(cycleTaskId), execution);
   await assert.rejects(
@@ -1656,13 +1822,13 @@ test("Root creates a successor Draft only after a current-turn exact terminal pr
   };
   const bound = bind(() => current, manager);
   await bound.get_issue(getIssue(cycleTaskId), execution);
-  const result = await bound.create_issue(createDraft(), execution);
+  const result = await bound.create_issue(successorDraft(), execution);
 
   assert.equal(result.output.outcome, "applied");
   assert.equal(result.output.target.kind, "issue");
   assert.equal(
     result.output.target.kind === "issue" ? result.output.target.issue_id : null,
-    createDraft().input.issue_id,
+    successorDraft().input.issue_id,
   );
   assert.deepEqual(effects, ["get_issue", "create_issue"]);
 });

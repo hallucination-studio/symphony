@@ -393,7 +393,7 @@ test("complete Root snapshots preserve normalized history, creation evidence, an
     id: "record:work:invalidation:1",
     issue_id: "work-1",
     created_at: "2026-07-30T00:00:00.000Z",
-    updated_at: "2026-07-30T00:00:00.000Z",
+    updated_at: "2026-07-29T23:59:59.962Z",
     edited_at: null,
     archived_at: null,
     actor_id: ACTOR_ID,

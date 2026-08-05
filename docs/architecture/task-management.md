@@ -1,130 +1,113 @@
-# Task Management
+# Linear Boundary
 
 | Status | Owns | Does not own |
 |---|---|---|
-| Phase 1 target | provider-neutral observation/command boundary、Linear limits | consumer selection、semantic/mechanical workflow decision |
+| target proposal | small injectable Linear Gateway, GraphQL implementation, Issue projection, Root State, and Root comment cursor | semantic routing, full-tree reconstruction, Agent context, or generic capabilities |
 
-## Observation flow
+`LinearGateway` is the only Linear boundary. There is no generic Task Manager,
+MCP schema, caller capability, mutation basis, resource revision, or provider
+SDK value in public contracts.
 
-```mermaid
-%% source-rules: WF-AUTH-001 WF-AUTH-003 WF-AUTH-004
-%% source-rules: WF-ROUTE-001 WF-ROUTE-004 WF-ROUTE-009 WF-ROUTE-013 WF-ROUTE-016
-%% source-rules: WF-FAIL-013 WF-FAIL-017
-%% source-rules: TM-OBS-001 TM-OBS-002 TM-OBS-003 TM-OBS-004 TM-OBS-005
-flowchart TD
-  Tick[Bounded scheduled tick] --> Inventory[All-team Issue inventory]
-  Inventory --> Family[Select only exact launch-bound Root family]
-  Family --> Closure[Read identity closure, records and history]
-  Closure --> Observation[One TaskSnapshotObservation]
-  Observation --> Scan[Fresh actionability scan]
-  Observation --> Diff[Compare notification baseline]
-  Diff --> Notification[Optional changed-only notification]
-  Scan --> Router[WF routing table]
+## Minimal implementation
+
+| Part | Owns | Must not own |
+|---|---|---|
+| Gateway protocol and GraphQL implementation | typed calls, response validation, timeouts, secret redaction | workflow decisions or Markdown policy |
+| projector/templates | create Cycle family, append results, update statuses and Root State | direct HTTP or Agent invocation |
+| Inbox helper | read comments after Root State cursor and filter Harness markers | active-Cycle injection or old-comment replay |
+
+Only `LinearGateway` is an architectural interface. Projection, templates, and
+Inbox filtering are private functions and may share files; they must not become
+services, plugin points, or public interfaces.
+
+## Gateway protocol
+
+```text
+LinearGateway {
+  get_issue(issue_ref) -> LinearIssue
+  list_team_states(team_id) -> LinearWorkflowState[]
+  list_root_comments_after(root_id, cursor?) -> LinearComment[]
+  find_root_state_comment(root_id) -> LinearComment?
+  list_unfinished_descendants(root_id) -> { id, status }[]
+  create_issue(request) -> LinearIssue
+  update_issue_status(issue_id, status_id) -> void
+  create_comment(issue_id, body) -> LinearComment
+  update_comment(comment_id, body) -> void
+}
 ```
 
-## Observation authority table
-
-| Rule | Input | Required output | Baseline effect | Failure behavior |
-|---|---|---|---|---|
-| `TM-OBS-001` | exact launch Root ID, startup immediate poll and bounded scheduled ticks | fully paginated all-team inventory including archived、trashed、de-labeled and reparented Issues | none | inventory overflow or page failure fails the whole poll visibly |
-| `TM-OBS-002` | exact launch-bound Root family | one fresh `TaskSnapshotObservation` with complete current/known identity facts | none | never return a partial valid snapshot or another Root family |
-| `TM-OBS-003` | successful complete poll | optional changed-only `TaskObservationEvent` plus the fresh bound-Root observation for actionability | advance notification baseline only after success | baseline never controls workflow action |
-| `TM-OBS-004` | provider-proven permanent known-Issue loss or incomplete known identity evidence | sanitized reason-discriminated `InvalidTaskSnapshot` with Root/failing identity | baseline may describe observation change | Router selects `WF-ROUTE-016`; observation never preselects disposition |
-| `TM-OBS-005` | expected exact record is missing or malformed/updated/archived | sanitized `InvalidTaskIssueRecord` in an otherwise routable snapshot | notification only | select by absence/corruption、record kind and phase |
-| `TM-OBS-006` | no notification change | same fresh bound-Root observation still enters actionability scan | no notification | actionable projection/restart/delivery cannot park on unchanged facts |
-
-| Observation path | Included | Excluded |
-|---|---|---|
-| Phase 1 | scheduled Linear polling | public ingress、webhook、provider replay、incremental workflow cursor、fallback path |
-
-| Invalid record observation | Failure selection |
+| Contract | Constraint |
 |---|---|
-| missing | `WF-FAIL-001` through `WF-FAIL-003` |
-| malformed、updated or archived | record kind and phase select `WF-FAIL-008`, `WF-FAIL-009`, `WF-FAIL-011` or `WF-FAIL-015` |
+| every call | async typed normalized values with bounded production timeout |
+| response | validate external GraphQL shape before returning |
+| error | bounded operation/resource identity; no key, auth header, or raw secret payload |
+| tests | pure in-memory fake, no credentials or network |
+| orchestration | depends only on Gateway, never concrete GraphQL or SDK objects |
 
-An external terminal Stage is valid only when fresh normalized facts establish
-one last legal nonterminal status.
+There is intentionally no `readRootFamily` operation. Unfinished descendant
+listing exposes only the fields required for mechanical cancellation.
 
-The snapshot and grouped history provide `last_valid_basis_status` for the
-typed Stage invalidation basis.
+## Discovery
 
-If it is not unique, keep the observation invalid; never fabricate
-`invalid_terminal`.
+| Input | Required result |
+|---|---|
+| Root identifier such as `TEAM-123` | one exact existing Root and its team |
+| Root UUID | the same normalized Root shape |
+| Root team | four semantic states: waiting, active, completed, canceled |
+| Root State marker | zero or one Harness-owned State comment |
 
-## Discovery table
+Caller-provided team, project, state, label, and template IDs are not inputs.
+State resolution uses provider state types; it does not require ten custom
+workflow names.
 
-| Rule | Resource class | Discovery anchor | Required follow-up | Unsupported claim |
-|---|---|---|---|---|
-| `TM-DISC-001` | launch-bound Root/Cycle family | exact launch Root ID<br>current/historical kind labels<br>parent and predecessor anchors | read current and complete grouped history | current Root-label query is complete inventory or another Root is schedulable |
-| `TM-DISC-002` | Plan | Cycle description or intact approval `plan_issue_id` | exact read regardless current ancestry/archive | current children alone prove absence |
-| `TM-DISC-003` | Work/Verify/relation | intact Plan manifest identities | exact read current resource, history and creation evidence | detached/reparented resource is irrelevant |
-| `TM-DISC-004` | attached record | deterministic exact record identity | read exact comment and complete owner comment set | latest comment page is complete |
-| `TM-DISC-005` | unknown create-then-detach before manifest | no provider enumeration exists | never execute or admit it into sealed graph | proving such an object never existed |
+## Projection
 
-## Snapshot table
+| Operation | Required behavior |
+|---|---|
+| initialize Root | create first Root State comment after supplied paths pass validation |
+| startup abandonment | cancel every item returned by `list_unfinished_descendants` |
+| create family | create Cycle, Execute, Audit in order with correct parents |
+| append results | write Execute process facts, the Audit report, or the mechanical Cycle summary to the matching Issue |
+| update role status | use one of four discovered semantic states |
+| update Root State | mutate only the marked Harness State comment |
 
-| Rule | Fact | Normalized fields | Excluded fields | Authority use |
-|---|---|---|---|---|
-| `TM-SNAP-001` | Issue | identity/revision/times/creator/status<br>document/parent/labels/delegate/archive/trash | SDK object、raw metadata、credential | current workflow fact |
-| `TM-SNAP-002` | relation | exact ID/endpoints/type, canonical revision, provider times, creation evidence | mutation receipt | sealed graph check |
-| `TM-SNAP-003` | grouped Issue history | actor/origin, changed fields, endpoints, parent/label/archive changes, provider times | raw provider payload | conflict and lifecycle evidence, never per-mutation ordering |
-| `TM-SNAP-004` | record/terminal observation | valid closed record set with precedence<br>or external terminal with no matching record<br>and validated `last_valid_basis_status` (`Todo` or `In Progress`) | fabricated completed document<br>guessed status basis or strict mutation-order inference | transition evidence or pre-effect mechanical route<br>ambiguous basis is an invalid observation |
-| `TM-SNAP-005` | canonical revision | versioned deterministic digest of all normalized fields and provider times | `updatedAt` alias or CAS claim | fresh basis and change detection |
-| `TM-SNAP-006` | workflow state map | exact team and active ID per required status<br>IDs are distinct within each map | name inference、cached/default state | validate every Issue status pair and status mutation |
+Cycle, Execute, and Audit titles/descriptions are never updated after creation.
+Agent sessions never receive a Gateway.
 
-## Command surface
+## Root State policy
 
-```mermaid
-%% source-rules: WF-AUTH-001 WF-AUTH-007 TM-CMD-001 TM-CMD-002 TM-CMD-003 TM-CONFLICT-001 TM-CONFLICT-002
-sequenceDiagram
-  participant Caller as Capability-scoped caller
-  participant Boundary as TaskManageCommand
-  participant Linear
-  Caller->>Boundary: typed generic call plus fresh basis
-  Boundary->>Linear: fresh pre-effect read
-  Boundary->>Linear: one provider operation
-  Boundary->>Linear: fresh exact read-back and history
-  Boundary-->>Caller: typed result with effect ambiguity
-```
+Root State is the durable runtime checkpoint and contains only:
 
-| Rule | Surface | Allowed shape | Forbidden shape | Read-back |
-|---|---|---|---|---|
-| `TM-CMD-001` | query | Issue get/list/children/history/comments<br>relation/state/label lists | workflow-specific `StartCycle` or semantic advice | complete pagination and normalization |
-| `TM-CMD-002` | mutation | Issue create/update/archive/comment<br>relation create/delete | SDK objects、credentials、arbitrary metadata、caller timestamps | exact target/resource/history read-back |
-| `TM-CMD-003` | caller capability | exact Root/Cycle phase, target kinds, fields and record kinds | ambient provider mutation access | boundary rejects mismatch before provider call |
-| `TM-CMD-004` | performer access | none | every Task Manager call | not applicable |
+- Root workspace path, external run directory, and branch;
+- current phase or `NeedsHuman` reason;
+- current task state and one pending finding;
+- at most one current Harness warning;
+- Root comment cursor;
+- final PR URL when created.
 
-## Capability table
+If Root State is missing for a new Root, initialize it. If it is duplicated or
+malformed, stop as `NeedsHuman`; do not reconstruct it from descendants. If the
+saved workspace is missing, stop rather than creating a conflicting workspace.
 
-| Rule | Caller | Permitted effects | Workflow references | Explicit denial |
-|---|---|---|---|---|
-| `TM-CAP-001` | `RootBoundary` | Root Define fields, deterministic Cycle Draft, approval/semantic terminal/successor records | `WF-TR-001`, `WF-TR-005`, `WF-TR-006`, `WF-TR-009`, `WF-TR-010` | Stage execution、sealed graph mutation |
-| `TM-CAP-002` | `CycleMachine` | exact Cycle-record projection<br>graph/Stage mechanics<br>phase-owned Cycle closure | `WF-ROUTE-003`, `WF-ROUTE-011`, `WF-ROUTE-015`, `WF-ROUTE-017`, `WF-ROUTE-018`<br>`WF-TR-007`, `WF-TR-008`, `WF-TR-011` through `WF-TR-015` | semantic acceptance、successor |
-| `TM-CAP-003` | `FamilyGuard` | deterministic Root-attached family invalidation only | `WF-FAIL-010` | select owner/winner、modify Cycle |
-| `TM-CAP-004` | `DeliveryFinalizer` | Root delivery records/status and closed Git/PR calls | `WF-TR-002`, `WF-TR-003`, `WF-FAIL-011` | semantic accept、automatic redelivery |
-| `TM-CAP-005` | `Cleanup` | delete exact matching Root runtime/Home after cleanup-ready | `WF-ROUTE-013` | delete workflow Issues、other Homes、user code |
+## Comment policy
 
-## Conflict table
+| Fact | Behavior |
+|---|---|
+| comment is after saved cursor and lacks Harness marker | new Reconcile input |
+| comment carries Harness marker | operational output, never model input |
+| comment belongs to descendant | display-only, never fetched for Reconcile |
+| selected new comment | cursor remains unchanged until complete Cycle family is recorded |
+| completion recommendation | perform one final after-cursor read before PR function |
 
-| Rule | Observation | Typed result | Effect guarantee | Next authority |
-|---|---|---|---|---|
-| `TM-CONFLICT-001` | basis mismatch before provider call | `stale_before_effect` | provider operation not invoked | fresh `WF-ROUTE-*` evaluation |
-| `TM-CONFLICT-002` | provider call started, then unexpected delta or unknown result | `conflict_observed` with `effect_may_have_occurred: true` | no rollback claim | exact fresh read and matching failure/invalidation rule |
-| `TM-CONFLICT-003` | effect read-back exactly matches closed expected delta | success | only observed provider fact is authoritative | corresponding `WF-TR-*` projection |
-| `TM-CONFLICT-004` | Linear has no atomic compare-and-swap | one field per update plus pre/read-back evidence | no CAS claim | client mutex、memory lock、rollback and blind retry are non-authoritative |
+## Failure policy
 
-## Linear provider gates
+| Condition | Behavior |
+|---|---|
+| any provider failure | expose and stop; no alternate task mode or provider fallback |
+| partial family | start no Agent; next process cancels unfinished pieces |
+| unknown write outcome | stop; do not guess, duplicate, or read back into a recovery protocol |
+| Root already `Done` | no provider mutation |
+| manual edit to frozen child description | v1 does not detect or repair it |
 
-| Rule | Provider fact | Phase 1 requirement | If unproven or violated |
-|---|---|---|---|
-| `TM-PROVIDER-001` | Issue create accepts caller exact UUID and exposes creator/provider time | public schema supplies exact ID but rejects caller `createdAt` | materialization disabled |
-| `TM-PROVIDER-002` | relation create can accept exact identity but SDK permits `overrideCreatedAt` | public schema rejects override; real provider audit proves exact relation creator/time | materialization disabled |
-| `TM-PROVIDER-003` | comment create accepts deterministic exact ID; comments remain provider-mutable | fresh observation requires actor、unarchived and `updated_at == created_at` | invalid-record path |
-| `TM-PROVIDER-004` | mutation actor may be grouped in history | dedicated non-human service actor credential is externally exclusive | deployment capability disabled |
-| `TM-PROVIDER-005` | Issue permanent delete exists<br>comment hard delete has no tombstone | policy、permissions and audit prohibit both before cleanup | proven Issue loss -> `WF-FAIL-013`<br>missing comment -> `WF-FAIL-001` through `WF-FAIL-003` |
-| `TM-PROVIDER-006` | startup API can read actor identity but not prove all credential copies or human permissions | provisioning、secret isolation、rotation and operator audit provide the external gate | fail closed before production mutation |
-| `TM-PROVIDER-007` | Linear workflow states are team-specific IDs and may omit a required semantic state | exact map covers every semantic state<br>each ID is present、active<br>IDs are distinct within each semantic map<br>fresh `list_states` validates before admission/mutation | observation/admission/mutation boundary stays unavailable<br>visible sanitized capability error |
-
-| Provider response | Boundary action | Default |
-|---|---|---|
-| every Linear response | validate against [Contracts](contracts.md) | missing evidence fails closed |
+`LINEAR_API_KEY` is read only by the production GraphQL factory. It never enters
+Agent requests, browser responses, logs, fixtures, errors, or final reports.

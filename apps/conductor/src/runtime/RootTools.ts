@@ -13,6 +13,12 @@ import {
 } from "../contracts/identity.js";
 import type { RuntimeTarget } from "../contracts/runtime.js";
 import { asRecord, parseBoundedString } from "../contracts/validation.js";
+import {
+  CYCLE_IDENTITY_DERIVATION_VERSION,
+  deriveCycleAnchorIds,
+  deriveFirstCycleIssueId,
+  FIRST_CYCLE_PREDECESSOR,
+} from "../contracts/cycle-identities.js";
 import type { TaskManageBoundaryExecution } from "../task-management/api/TaskManageCommandInterface.js";
 import {
   TASK_MCP_CAPABILITIES,
@@ -90,20 +96,22 @@ const PAGE_PROPERTIES = Object.freeze({
 });
 
 const CREATE_ISSUE_JSON_SHAPE_GUIDANCE = [
-  "Emit this exact nested JSON shape.",
+  "Exact JSON shape; replace placeholders with current facts.",
+  "Use description/state_id, never snapshot description_markdown/status_id.",
   'Valid: {"issue_id":"11111111-1111-4111-8111-111111111111","parent_issue_id":"ROOT","expected_parent_revision":"REVISION","desired":{"title":"TITLE","description":"MARKDOWN","state_id":"STATE_ID","label_ids":["LABEL_ID"],"delegate_id":null,"priority":null}}.',
   "Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input.",
+  "For a Cycle Draft, every exact Execution Directive ID must appear exactly once across Approved Work Groups Directives lists; omit no ID, duplicate no ID, and invent no ID. Cross-group directive dependencies must be covered by group dependencies.",
 ].join(" ");
 
 const UPDATE_ISSUE_JSON_SHAPE_GUIDANCE = [
-  "Use this exact nested JSON shape (replace placeholders with current facts).",
+  "Input keys are exactly issue_id, expected_revision, and desired; desired has exactly one canonical field: title, description, state_id, parent_id, label_ids, delegate_id, or priority.",
+  "Snapshot fields are not mutation fields; desired uses description, state_id, and parent_id.",
   'Valid: {"issue_id":"ISSUE_ID","expected_revision":"REVISION","desired":{"title":"TITLE"}}.',
-  'Valid tool arguments: {"schema_version":1,"function":"update_issue","root_id":"ROOT","runtime_generation":1,"correlation_id":"CORR","capability":"task_manage:update_issue","input":{"issue_id":"ISSUE_ID","expected_revision":"REVISION","desired":{"title":"TITLE"}}}.',
-  "The input object contains exactly issue_id, expected_revision, and desired. The desired object contains exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority. Put no other keys anywhere in the input object.",
 ].join(" ");
 
 const UPDATE_ISSUE_DESIRED_GUIDANCE = [
   "Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside this desired object; do not place any of those fields beside desired in the parent input object.",
+  "Use canonical names only: never description_markdown, status_id, or parent_issue_id.",
   '{"title":"TITLE"} is a valid desired object.',
   "The desired object contains exactly one field.",
   "Emit one field only.",
@@ -112,7 +120,12 @@ const UPDATE_ISSUE_DESIRED_GUIDANCE = [
 const CREATE_ISSUE_ID_GUIDANCE = "issue_id must be a fresh UUIDv4; never a name or placeholder.";
 
 function cycleCreateIdentityGuidance(taskContract: RootTaskManageToolContract): string {
-  return `For this Root, state_id must be exactly ${taskContract.cycle_draft_state_id} and label_ids must be [${taskContract.cycle_label_id}]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders.`;
+  const firstCycleIssueId = deriveFirstCycleIssueId(taskContract.root_id);
+  const anchorIds = deriveCycleAnchorIds(CYCLE_IDENTITY_DERIVATION_VERSION, firstCycleIssueId);
+  const anchorText = Object.entries(anchorIds)
+    .map(([kind, id]) => `${kind}=${id}`)
+    .join(", ");
+  return `First Cycle on WF-ROUTE-001: issue_id and Mapping Cycle ID=${firstCycleIssueId}; predecessor cycle=None; terminal record=${FIRST_CYCLE_PREDECESSOR}; ${anchorText}. Workspace Base Revision is the host-provided lowercase SHA-256 digest of the current Git head revision; copy it exactly, never the raw revision. Use state_id=${taskContract.cycle_draft_state_id}, label_ids=[${taskContract.cycle_label_id}], and these exact IDs; never randomize or use placeholders.`;
 }
 
 function objectSchema(properties: JsonSchema, required = Object.keys(properties), extra: JsonSchema = {}): JsonSchema {
@@ -133,14 +146,14 @@ function taskInputSchema(
     case "create_issue": return objectSchema({
       issue_id: {
         ...UUID_V4_SCHEMA,
-        description: "Use a fresh UUIDv4 for issue_id; never use an issue name or placeholder.",
+        description: `Use the exact host-derived first Cycle ID on WF-ROUTE-001; otherwise use a derived UUIDv4 for issue_id; never use an issue name or placeholder. ${cycleCreateIdentityGuidance(taskContract)}`,
       },
       parent_issue_id: { enum: [taskContract.root_id] },
       expected_parent_revision: IDENTITY_SCHEMA,
       desired: objectSchema({
         title: { type: "string", minLength: 1, maxLength: 1024, pattern: "^[^\\r\\n\\u0000]+$" },
         description: {
-          description: "For a Cycle Draft target, use at most one level-1 title followed by exactly these level-2 headings in order: Root Definition Revision, Requirement, Domain Knowledge, Root ADR, Acceptance, Architecture, Feature Design, Code Design, Boundaries, Acceptance Mapping, Failure Strategy. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase.",
+          description: "For a Cycle Draft target, use the key description, not description_markdown; use at most one level-1 title followed by exactly these level-2 headings in order: Root Definition Revision, Requirement, Domain Knowledge, Root ADR, Acceptance, Architecture, Feature Design, Code Design, Boundaries, Acceptance Mapping, Failure Strategy. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase. Every exact Execution Directive ID must appear exactly once across Approved Work Groups Directives lists; omit no ID, duplicate no ID, and invent no ID.",
           type: "string",
           maxLength: 100_000,
           pattern: "^[^\\u0000]*$",
@@ -160,7 +173,7 @@ function taskInputSchema(
         delegate_id: { enum: [null] },
         priority: { enum: [null] },
       }, ["title", "description", "state_id", "label_ids", "delegate_id", "priority"], {
-        description: "This desired object contains exactly title, description, state_id, label_ids, delegate_id, and priority; all six fields belong inside desired and none may be placed beside desired in the parent input object. " + cycleCreateIdentityGuidance(taskContract),
+        description: "This desired object contains exactly title, description, state_id, label_ids, delegate_id, and priority; use canonical names only: description, not description_markdown; state_id, not status_id; all six fields belong inside desired and none may be placed beside desired in the parent input object. " + cycleCreateIdentityGuidance(taskContract),
         maxProperties: 6,
       }),
     }, ["issue_id", "parent_issue_id", "expected_parent_revision", "desired"], {
@@ -255,7 +268,7 @@ function taskSpec(
     type: "function" as const,
     name: functionName,
     description: functionName === "create_issue"
-      ? `${TASK_DESCRIPTIONS[functionName]} ${CREATE_ISSUE_JSON_SHAPE_GUIDANCE} ${CREATE_ISSUE_ID_GUIDANCE} ${cycleCreateIdentityGuidance(taskContract)}`
+      ? `${TASK_DESCRIPTIONS[functionName]} ${cycleCreateIdentityGuidance(taskContract)}`
       : TASK_DESCRIPTIONS[functionName],
     inputSchema: objectSchema({
       ...commonProperties(target, capability),
@@ -307,11 +320,16 @@ function diagnosticTaskFailure(
   error: unknown,
 ): void {
   if (hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS !== "1") return;
+  const diagnosticCode = error instanceof RootTaskManageBindingError
+    && typeof error.diagnostic_code === "string"
+    && /^[a-z][a-z0-9_]{0,63}(?::[a-z][a-z0-9_]{0,63})?$/u.test(error.diagnostic_code)
+    ? { category: error.diagnostic_code }
+    : {};
   const mapped = error instanceof RootTaskManageBindingError
-    ? { code: error.code, fatal: error.fatal }
+    ? { code: error.code, fatal: error.fatal, ...diagnosticCode }
     : error instanceof RootToolCallError || error instanceof RootToolFatalError
       ? { code: error.code }
-      : error instanceof Error && /^[a-z][a-z0-9_]{0,63}$/u.test(error.message)
+      : error instanceof Error && /^[a-z][a-z0-9_]{0,63}(?::[a-z][a-z0-9_]{0,63})?$/u.test(error.message)
         ? { code: "other", category: error.message }
         : { code: "other" };
   hostProcess.stderr.write(`${JSON.stringify({
@@ -625,6 +643,14 @@ export class RootTools {
 
   #observeTaskResult(call: TaskMcpCall, result: RootTaskToolResult): void {
     if ("outcome" in result.output && result.output.outcome === "conflict_observed") {
+      if (hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS === "1") {
+        hostProcess.stderr.write(`${JSON.stringify({
+          event: "root_task_tool_diagnostic",
+          tool: call.function,
+          stage: "result_validation",
+          code: "conflict_observed",
+        })}\n`);
+      }
       const target = result.output.target;
       if (target.kind === "comment") throw new RootToolFatalError("invalid_contract");
       this.#unknownAcceptance = target.kind === "issue"

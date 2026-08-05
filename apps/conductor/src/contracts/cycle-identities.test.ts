@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveCycleUuid } from "./cycle-identities.js";
+import {
+  CYCLE_IDENTITY_DERIVATION_VERSION,
+  deriveCycleAnchorIds,
+  deriveCycleUuid,
+  deriveFirstCycleIssueId,
+  FIRST_CYCLE_PREDECESSOR,
+} from "./cycle-identities.js";
 
 test("cycle identities are stable UUIDv4 values with length-safe domain separation", () => {
   const first = deriveCycleUuid("symphony-identity:v1", "plan", "cycle:1");
@@ -26,4 +32,28 @@ test("cycle identity derivation rejects empty, oversized, and malformed inputs",
     () => deriveCycleUuid("symphony-identity:v1", "plan", "cycle\0one"),
     /invalid_identity_derivation_part/u,
   );
+});
+
+test("cycle identity helpers expose one deterministic first-cycle anchor contract", () => {
+  const cycleId = deriveFirstCycleIssueId("ROOT-1");
+  const anchors = deriveCycleAnchorIds(CYCLE_IDENTITY_DERIVATION_VERSION, cycleId);
+  assert.equal(
+    cycleId,
+    deriveCycleUuid(
+      CYCLE_IDENTITY_DERIVATION_VERSION,
+      "cycle_issue",
+      "ROOT-1",
+      FIRST_CYCLE_PREDECESSOR,
+      FIRST_CYCLE_PREDECESSOR,
+    ),
+  );
+  assert.equal(
+    anchors.approval_record_id,
+    deriveCycleUuid(CYCLE_IDENTITY_DERIVATION_VERSION, "cycle_approval_record", cycleId),
+  );
+  assert.equal(
+    anchors.delivery_invalidation_record_id,
+    deriveCycleUuid(CYCLE_IDENTITY_DERIVATION_VERSION, "delivery_invalidation_record", cycleId),
+  );
+  assert.equal(Object.isFrozen(anchors), true);
 });

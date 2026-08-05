@@ -2,114 +2,174 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| Phase 1 target | semantic reasoning at `RootBoundary` rows | `CycleMachine` rows、accepted workflow state、durable thread/Home facts |
+| target proposal | next-Cycle reasoning and completion recommendation from Root-owned inputs | child-tree interpretation, workspace mutation, Linear calls, or PR publication |
 
-## Semantic boundary
+Root Reconcile is the Manager's only semantic decision boundary. It runs in a
+fresh Agent session with no workspace access before the first Cycle, after every
+terminal Cycle, and after startup abandonment of unfinished child Issues.
+If Root is already `Done`, return no-op without starting a Reconcile session or changing any resource.
 
-```mermaid
-%% source-rules: WF-AUTH-003 WF-AUTH-005
-%% source-rules: WF-ROUTE-001 WF-ROUTE-002 WF-ROUTE-005 WF-ROUTE-007 WF-ROUTE-008
-%% source-rules: RR-LOOP-001 RR-LOOP-002 RR-LOOP-003
-sequenceDiagram
-  participant Router
-  participant Root as Root Reconcill
-  participant Task as Task Manager boundary
-  participant Code as Read-only code view
-  Router->>Root: one fresh semantic-boundary snapshot
-  Root->>Code: inspect non-sensitive code
-  Root->>Task: one capability-scoped semantic mutation
-  Task-->>Root: typed result plus fresh read-back
-  Root-->>Router: quiescent or bounded turn outcome
+## Rebuild boundary
+
+Root Reconcile receives only:
+
+```text
+Root title and description
++ Root State current task state
++ one current pending finding
++ optional current Harness warning
++ new Root comments after the saved cursor
 ```
 
-## Boundary table
-
-| Rule | Boundary | Required input | Allowed semantic output | Forbidden output |
-|---|---|---|---|---|
-| `RR-LOOP-001` | Define | fresh admitted Root and read-only code facts | complete Requirement、Domain Knowledge、Root ADR、Acceptance | code write、Stage design hidden outside Linear |
-| `RR-LOOP-002` | Draft review | exact Cycle Draft and Root snapshot copied into it | sealed directives、fixed Work groups、approval or Draft terminal record | Plan dispatch、mutable post-approval design |
-| `RR-LOOP-003` | Acceptance | sealed Cycle, every Stage record/revision, exact Git facts and convergence basis | accepted/rejected/canceled Cycle record | implementation repair、status-only accept |
-| `RR-LOOP-004` | Successor | terminal predecessor and complete known graph/history proof | deterministic new Cycle Draft if policy allows | reopen predecessor、reuse thread/worktree |
-| `RR-LOOP-005` | external Root semantic edit during active Cycle | fresh Root edit plus frozen active Cycle | observe as a future requirement<br>keep current acceptance bound to the sealed snapshot<br>quiesce | change active Cycle<br>reject current acceptance for the newer edit<br>inject edit into Stage context |
-
-## Define table
-
-| Rule | Step | Durable effect | Fresh check | Rule dependency |
-|---|---|---|---|---|
-| `RR-DEFINE-001` | admit delegated `Todo` Root before Define | Root `In Progress` projection | exact Root read-back | `WF-TR-001`; restart gap is `WF-RESTART-012` |
-| `RR-DEFINE-002` | inspect code | none; capability is read-only and excludes secret paths | code boundary result | `RR-PERM-001` |
-| `RR-DEFINE-003` | write Root definition | closed Root Markdown sections | exact document/history read-back | `RI-DOC-001` |
-| `RR-DEFINE-004` | prepare first or successor Cycle | derive exact Cycle ID before create | exact-read same ID and direct parent | `RI-ID-001`, `WF-FAIL-014` |
-| `RR-DEFINE-005` | write Cycle Draft | complete decision snapshot and predecessor basis | exact Cycle document read-back | `RI-DOC-002` |
-
-## Draft review table
-
-| Rule | Check | Required result | Rejection condition | Durable boundary |
-|---|---|---|---|---|
-| `RR-DRAFT-001` | requirement/ADR/design/acceptance completeness | one independently reviewable Cycle snapshot | missing or implicit decision | keep Draft or close under `WF-TR-006` |
-| `RR-DRAFT-002` | implementation/verification directives | every directive has identity、text、dependencies and acceptance map<br>verification set is non-empty | unbounded、unmapped or unconstructible Verify | keep Draft or close |
-| `RR-DRAFT-003` | Work partition | exact-cover groups and dependency DAG | overlap、omission、cycle or Plan-owned grouping | keep Draft or close |
-| `RR-DRAFT-004` | approval | exact record satisfies every `RI-MANIFEST-003` anchor equality | basis conflict or read-back mismatch | `WF-TR-005` only after record read-back |
-| `RR-DRAFT-005` | approval record exists while Cycle is `Draft` | no semantic re-review | approval record absent or invalid | `CycleMachine` projects through `WF-ROUTE-003` |
-
-| Draft review boundary | Allowed | Forbidden |
-|---|---|---|
-| before `RI-SEAL-001` | semantic review、revision、approval | independent-adversarial-review claim |
-| after `RI-SEAL-001` | quiesce until a Root boundary | Plan/Work/Verify call、Cycle/Stage mutation、ready-Work selection |
-
-## Acceptance table
+It never receives the complete Root Issue tree, old Cycle descriptions, old
+role comments, raw trajectories, or canceled child content. Conductor may list
+unfinished descendants to cancel them mechanically, but those values do not
+cross the model boundary.
 
 ```mermaid
-%% source-rules: WF-ROUTE-003 WF-ROUTE-007 WF-TR-009 WF-TR-010 RI-SEAL-004
-%% source-rules: GD-CONVERGE-001 GD-CONVERGE-002
-%% source-rules: RR-ACCEPT-001 RR-ACCEPT-002 RR-ACCEPT-003
-flowchart TD
-  Snapshot[Complete execution snapshot plus Git] --> Round1[Convergence round 1]
-  Round1 --> Round2[Convergence round 2]
-  Round2 --> Match{Stable decision basis?}
-  Match -->|no| Invalidate[invalid_record_basis]
-  Match -->|yes and satisfies design| Accept[Persist accepted record]
-  Match -->|yes but mismatch| Reject[Persist rejected record]
-  Accept --> Project[CycleMachine record projection]
-  Reject --> Project
-  Project --> ProjectSuccess[Project Succeeded or Rejected]
+%% source-rules: WF-AUTH-001 WF-AUTH-002 WF-AUTH-003 WF-AUTH-005 WF-AUTH-007
+flowchart LR
+  Requirement[Root title and description] --> Reconcile[Fresh Root Reconcile]
+  State[Root State] --> Reconcile
+  Comments[New Root comments] --> Reconcile
+  Reconcile --> Choice{One decision}
+  Choice --> Cycle[One frozen CycleSpec]
+  Choice --> Complete[Completion recommendation]
+  Choice --> Human[NeedsHuman]
 ```
 
-| Rule | Decision | Evidence required | Durable write | Status projection |
-|---|---|---|---|---|
-| `RR-ACCEPT-001` | satisfies sealed design | specification/graph seals and acceptance basis<br>all Stage revisions/record digests<br>exact revision and convergence proof | accepted Cycle Result/Handoff with `successor_policy: not_applicable` | `WF-ROUTE-003` then `WF-TR-009` |
-| `RR-ACCEPT-002` | does not satisfy sealed design or the approved requirement in the sealed Cycle snapshot | same complete evidence plus bounded reason | rejected Cycle Result/Handoff with `successor_policy: allowed` | `WF-ROUTE-003` then `WF-TR-010`; a newer external Root edit is future-only under `RR-LOOP-005` |
-| `RR-ACCEPT-003` | cancellation | same complete evidence and cancel reason | canceled Cycle Result/Handoff with `successor_policy: allowed` | `WF-ROUTE-003` then `WF-TR-010` |
-| `RR-ACCEPT-004` | evidence incomplete or changes between rounds | observed conflict | no semantic terminal record | fresh router selects mechanical invalidation; never accept |
+## Root State input
 
-| Acceptance input | Sufficient | Insufficient / excluded |
+| Field | Meaning | Excluded |
 |---|---|---|
-| delivered design and code | complete evidence in `RR-ACCEPT-*` plus `GD-CONVERGE-*` | Verify status/identity alone、cross-provider atomic-instant claim |
+| workspace, run directory, and Root branch | Conductor validates supplied paths after process restart; values are not prompt input | allocation, snapshot, or revision identity |
+| Task State | compact rolling task state derived only from Succeeded Cycles | Executor claims, Audit history, or unaudited workspace inference |
+| Pending Finding | one current Rejected/Failed summary that the next Cycle must address | a finding ledger or inferred child state |
+| Harness Feedback | one current runtime warning, including possible unaudited residual changes after startup abandonment | trusted progress or a replacement requirement |
+| Root comment cursor | boundary after which comments are new input | full consumed-comment history |
+| Current | idle, active Cycle reference, `NeedsHuman`, or PR URL | hidden route or process handle |
 
-## Successor table
+Root State is a Harness-owned comment on Root and the durable runtime checkpoint.
+It is not a requirement source: generated state cannot alter or replace the
+Root title and description.
 
-| Rule | Gate | Action | No action when |
-|---|---|---|---|
-| `RR-SUCC-001` | Root freshly delegated<br>predecessor record and identity closure intact<br>`successor_policy: allowed` | create one `RI-SUCC-001` Cycle | admission absent、delivery effect、partial graph、lost authoritative record、family quarantine |
-| `RR-SUCC-002` | predecessor ended through external terminal invalidation | allow only if Stage-first closure and intact proof explicitly permit | `WF-FAIL-005` remains incomplete |
-| `RR-SUCC-003` | newer Root requirement/ADR observed under `RR-LOOP-005` must apply | wait until current Cycle terminal<br>copy into one new Draft<br>never apply to current acceptance | active Cycle still non-terminal |
+Root Reconcile has no workspace mount or workspace tools. It reasons from the
+independently audited state above. When that state warns that an abandoned
+process may have left unaudited changes, it can choose an inspect, repair, or
+continue Cycle; it cannot inspect those changes during Reconcile itself.
 
-## Permission table
+## Reconcile prompt
 
-| Rule | Resource | Access | Enforcement |
-|---|---|---|---|
-| `RR-PERM-001` | non-sensitive user code and exact revision | read/search/compare only | filesystem and tool allowlist |
-| `RR-PERM-002` | Root Home | read/write runtime fence only | exact Root-owned path |
-| `RR-PERM-003` | Linear | generic Task calls constrained by `TM-CAP-001` | private capability schema |
-| `RR-PERM-004` | Git/Delivery | read-only inspection and closed accepted delivery authorization | no worktree write、commit or arbitrary shell |
-| `RR-PERM-005` | secrets | no access to `.env*`, keys, credential stores or remote credential config | deny before process/tool call |
-| `RR-PERM-006` | Performer roles | no Plan/Work/Verify invocation | no role tool exposed |
+The prompt is built by Root Reconciler, not Performer, in this fixed order:
 
-## Turn outcome table
+```text
+fixed Manager instructions
++ Root title and description
++ task_state_markdown
++ optional pending_finding
++ optional harness_feedback
++ all new Root comments after comment_cursor
+```
 
-| Rule | Outcome | Boundary behavior | Workflow meaning |
-|---|---|---|---|
-| `RR-OUT-001` | `quiescent` | return to router after fresh read | no hidden next action |
-| `RR-OUT-002` | `draft_closed` or `acceptance_closed` | route fixes legal closure status before return | CycleMachine later projects the exact record |
-| `RR-OUT-003` | no effect before Define/delivery call | next tick may reschedule same fresh fact | not a durable failure or consumed event |
-| `RR-OUT-004` | effect started but result unknown | exact provider read resolves effect | never retry from transcript or memory |
+The fixed instructions require exactly one small-step decision and forbid
+claims based on workspace state that is absent from the prompt. The response
+uses a small validated control header plus bounded Markdown, not a broad tool
+schema or natural-language status inference:
+
+```text
+decision: cycle | complete | needs_human
+
+## Objective / Summary / Reason
+...
+```
+
+A Cycle body also contains Acceptance and Boundaries. The caller assigns the
+next Cycle number and all after-cursor comment IDs; the model cannot partially
+consume the batch or select an executor route.
+
+## Decision contract
+
+```text
+RootReconcileDecision =
+  | {
+      kind: create_cycle,
+      cycle: {
+        objective,
+        acceptance,
+        boundaries
+      }
+    }
+  | { kind: complete, summary }
+  | { kind: needs_human, reason, question? }
+```
+
+The caller validates the decision, assigns `cycle_number`, attaches every
+after-cursor comment ID, and freezes the `CycleSpec`. Root Reconciler does not
+call Linear, render Linear Markdown, create a PR, or change Root State directly.
+
+## Small-step rule
+
+| Rule | Required | Rejected |
+|---|---|---|
+| `RR-STEP-001` | one observable objective that one Execute session can attempt | broad multi-feature milestone |
+| `RR-STEP-002` | explicit boundaries and concrete read-only acceptance checks | executor routing or acceptance based on Executor confidence |
+| `RR-STEP-003` | every Root comment after the saved cursor enters the next Cycle together | partial consumption or historical replay |
+| `RR-STEP-004` | inspect, repair, or cleanup when the pending finding or Harness feedback requires it | reopen or continue a canceled Cycle |
+
+Input arriving after family creation remains outside that Cycle and waits for a
+later Reconcile.
+
+## Trusted Root State
+
+| State | Derivation |
+|---|---|
+| Pending Finding | replace with the newest Rejected/Failed summary, or with the Auditor-supported optional value after a Succeeded Cycle |
+| Task State | replace with the new Auditor-supported state only after a Succeeded Cycle |
+| phase and Harness Feedback | keep at most one current operational warning; only a clean full-diff Audit may clear a workspace warning |
+| comment cursor | advance only after all after-cursor comments are committed to a complete Cycle family |
+
+There is no separate Trusted State service or entry ledger. The promotion
+condition is an Audit verdict of `accepted` after any terminal Execute process
+outcome. Execute model output and exit status never establish or veto semantic
+success. Root State is updated after that result and becomes the input to future
+or restarted Reconcile sessions.
+
+## Comment transaction
+
+```text
+fetch after cursor -> Reconcile all new comments -> create Cycle/Execute/Audit
+                   -> record family locally -> advance cursor to newest included comment
+```
+
+| Boundary | Requirement |
+|---|---|
+| startup | read the saved cursor from Root State; do not replay older comments |
+| active Cycle | retain newer comments as pending and keep them out of Execute/Audit |
+| Reconcile cannot incorporate all new comments | return `NeedsHuman`; do not advance cursor |
+| family creation failure | do not advance cursor and start no Agent process |
+| successful family record | advance to newest comment because the full after-cursor batch was included |
+| completion recommendation | fetch once again; new input cancels the recommendation and triggers Reconcile |
+
+User instructions in Linear mode are Root comments. There is no Dashboard or
+second local injection path. Descendant comments are display-only.
+
+## Completion
+
+| Condition | Effect |
+|---|---|
+| requirement and new input are satisfied by verified Root State, with no unresolved finding or Harness warning | recommend completion; publication separately requires a non-empty diff |
+| open finding or new input requires work | create smallest next Cycle |
+| decision needs user input or this process reaches its Cycle bound | set Root State `NeedsHuman` and stop |
+| final Inbox check finds new input | discard completion recommendation and Reconcile again |
+| terminal PR function returns a URL | record URL in Root State, then set Root `Done` |
+
+Root Reconcile never marks Root `Done` itself.
+
+## Permissions
+
+| Capability | Allowed | Forbidden |
+|---|---|---|
+| workspace | no mount and no tools | read, write, inspect, commit, reset, clean, or delete |
+| Linear | none directly; caller supplies Root, Root State, and new comments | GraphQL, child-tree read, Issue mutation, or comment rendering |
+| context | original requirement, trusted task state, current pending finding, Harness feedback, and new comments | full Root tree, Audit history, workspace facts, prior role transcripts, arbitrary metadata |
+| secrets | none | `.env*`, keychains, tokens, Git or provider credentials |

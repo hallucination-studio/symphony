@@ -68,6 +68,13 @@ test("Root code inspection lists, reads, and searches fresh non-sensitive code w
   for (const spec of inspection.specs) {
     assert.equal(spec.description.includes("flat schema"), true);
     assert.equal(spec.description.includes("never add function or input"), true);
+    const properties = spec.inputSchema.properties;
+    assert.ok(properties && typeof properties === "object" && !Array.isArray(properties));
+    const pathSchema = (properties as Record<string, unknown>).path;
+    assert.ok(pathSchema && typeof pathSchema === "object" && !Array.isArray(pathSchema));
+    const pathDescription = (pathSchema as Record<string, unknown>).description;
+    assert.equal(typeof pathDescription, "string");
+    assert.equal((pathDescription as string).includes("use . for the workspace root"), true);
   }
 
   const listed = await binding(inspection, "list_code_directory").execute({

@@ -113,7 +113,6 @@ export function projectTaskIssueRecord(
     ? createHash("sha256").update(bodyMarkdown, "utf8").digest("hex") : null;
   if (
     projection.issue_id !== issueId
-    || createdAt !== updatedAt
     || evidence.provider_edited_at !== null
     || evidence.provider_archived_at !== null
     || actorId === null

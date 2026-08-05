@@ -17,12 +17,19 @@ import {
 } from "../contracts/identity.js";
 import {
   parseCycleDraftForRoot,
+  parseCycleDraftMarkdown,
   parseRootDefinition,
   parseRootDefinitionMarkdown,
   type CycleExecutionSnapshot,
   type CycleSealDigest,
   type RootDefinition,
 } from "../contracts/cycle.js";
+import { parseCycleDesignMarkdown } from "../contracts/cycle-design-markdown.js";
+import {
+  deriveCycleUuid,
+  deriveFirstCycleIssueId,
+  FIRST_CYCLE_PREDECESSOR,
+} from "../contracts/cycle-identities.js";
 import { parseCycleApprovalRecord } from "../contracts/cycle-records.js";
 import { prepareCycleApproval, type PreparedCycleApproval } from "../cycle/internal/CycleApproval.js";
 import {
@@ -36,6 +43,7 @@ import {
   type ConcreteTaskChange,
 } from "../contracts/observation.js";
 import { parseTaskSnapshot, type TaskIssueSnapshot, type TaskSnapshot } from "../contracts/task-management.js";
+import { markdownSemanticallyEqual } from "../contracts/validation.js";
 import { taskSnapshotDigest, taskStringSetsEqual } from "../observation/TaskFacts.js";
 import type {
   TaskManageBoundaryExecution,
@@ -124,6 +132,7 @@ export class RootTaskManageBindingError extends Error {
   constructor(
     readonly code: "invalid_contract" | "capability_denied" | "boundary_unavailable",
     readonly fatal: boolean,
+    readonly diagnostic_code?: string,
   ) {
     super(code);
     this.name = "RootTaskManageBindingError";
@@ -191,7 +200,7 @@ function diagnosticAuthorizationFailure(tool: string, category: string): never {
       category,
     })}\n`);
   }
-  return callDenied();
+  throw new RootTaskManageBindingError("capability_denied", false, category);
 }
 
 function rootMarkdownDiagnostic(value: unknown): string {
@@ -224,8 +233,44 @@ function rootMarkdownDiagnostic(value: unknown): string {
   return "root_markdown_content_invalid";
 }
 
+function cycleDraftDiagnostic(error: unknown): string {
+  const code = error instanceof Error ? error.message : "";
+  return {
+    invalid_cycle_draft_markdown: "shape",
+    invalid_cycle_design_markdown: "design",
+    cycle_root_revision_snapshot_mismatch: "revision",
+    cycle_requirement_snapshot_mismatch: "requirement",
+    cycle_root_adr_snapshot_mismatch: "root_adr",
+    cycle_acceptance_snapshot_mismatch: "acceptance",
+  }[code] ?? "unknown";
+}
+
 function invalidBoundary(): never {
   throw new RootTaskManageBindingError("invalid_contract", true);
+}
+
+function invalidBoundaryWithDiagnostic(diagnosticCode: string): never {
+  throw new RootTaskManageBindingError("invalid_contract", true, diagnosticCode);
+}
+
+function createdIssueDescriptionDiagnostic(actual: string, expected: string): string {
+  if (actual === `${expected}\n`) return "created_issue_description_trailing_newline_added";
+  if (actual.trim() === expected.trim() && actual !== expected) return "created_issue_description_outer_whitespace_normalized";
+  if (actual.trimEnd() === expected.trimEnd() && actual !== expected) return "created_issue_description_trailing_whitespace_normalized";
+  if (actual.replaceAll("\r\n", "\n") === expected.replaceAll("\r\n", "\n")) {
+    return "created_issue_description_line_endings_normalized";
+  }
+  if (actual.replace(/\s+/gu, " ").trim() === expected.replace(/\s+/gu, " ").trim()) {
+    return "created_issue_description_whitespace_normalized";
+  }
+  if (actual.startsWith(expected)) return `created_issue_description_suffix_added_${actual.length - expected.length}`;
+  if (expected.startsWith(actual)) return `created_issue_description_suffix_removed_${expected.length - actual.length}`;
+  if (actual.length !== expected.length) {
+    const actualLines = (actual.match(/\n/gu) ?? []).length;
+    const expectedLines = (expected.match(/\n/gu) ?? []).length;
+    return `created_issue_description_length_${expected.length}_${actual.length}_lines_${expectedLines}_${actualLines}`;
+  }
+  return "created_issue_description_content_mismatch";
 }
 
 function invalidCall(): never {
@@ -614,24 +659,44 @@ export class RootTaskManageCommandBinding {
     const preparedApproval = authorization.approval_definition === null
       ? null
       : await this.#persistCycleApproval(
-          scope,
-          call,
-          authorization.approval_definition,
-          execution,
-        );
+        scope,
+        call,
+        authorization.approval_definition,
+        execution,
+      );
+    let mutationScope = scope;
+    let mutationCall = call;
+    if (authorization.approval_definition !== null) {
+      const refreshedScope = await this.#scope(call, "update_issue", execution);
+      const draft = scope.issues.get(call.input.issue_id);
+      const refreshedDraft = refreshedScope.issues.get(call.input.issue_id);
+      if (
+        draft === undefined
+        || refreshedDraft === undefined
+        || !this.#sameIssueContent(draft, refreshedDraft)
+      ) diagnosticAuthorizationFailure("update_issue", "draft_not_observed");
+      mutationScope = refreshedScope;
+      mutationCall = Object.freeze({
+        ...call,
+        input: Object.freeze({
+          ...call.input,
+          expected_revision: refreshedDraft.revision,
+        }),
+      });
+    }
     const value = await this.#callProvider(() => this.taskManager.update_issue(
-      call, this.#providerExecution(call, execution, authorization.caller_cycle),
+      mutationCall, this.#providerExecution(mutationCall, execution, authorization.caller_cycle),
     ));
     execution.assertActive();
     const result = await this.#validateIssueMutationResult<UpdateIssueResult>(
-      scope,
-      call,
+      mutationScope,
+      mutationCall,
       value,
       execution,
     );
     const approvalScope = authorization.approval_definition !== null
       && result.output.outcome === "applied"
-      ? await this.#scope(call, "update_issue", execution)
+      ? await this.#scope(mutationCall, "update_issue", execution)
       : null;
     const sealDigest = this.#approvalSeal(
       result,
@@ -642,18 +707,18 @@ export class RootTaskManageCommandBinding {
       authorization.approval_definition !== null
       && result.output.outcome === "conflict_observed"
     ) {
-      const draft = scope.issues.get(call.input.issue_id);
-      const existing = this.#pendingCycleApprovals.get(call.input.issue_id);
+      const draft = mutationScope.issues.get(mutationCall.input.issue_id);
+      const existing = this.#pendingCycleApprovals.get(mutationCall.input.issue_id);
       if (
         draft === undefined
         || (this.#pendingCycleApprovals.size >= 1
-          && !this.#pendingCycleApprovals.has(call.input.issue_id))
+          && !this.#pendingCycleApprovals.has(mutationCall.input.issue_id))
         || (
           existing !== undefined
-          && existing.definition.correlation_id !== call.correlation_id
+          && existing.definition.correlation_id !== mutationCall.correlation_id
         )
       ) invalidBoundary();
-      this.#pendingCycleApprovals.set(call.input.issue_id, Object.freeze({
+      this.#pendingCycleApprovals.set(mutationCall.input.issue_id, Object.freeze({
         definition: authorization.approval_definition,
         draft,
         prepared: preparedApproval ?? invalidBoundary(),
@@ -663,20 +728,20 @@ export class RootTaskManageCommandBinding {
       authorization.acceptance_view !== null
       && result.output.outcome === "conflict_observed"
     ) {
-      const awaitingCycle = scope.issues.get(call.input.issue_id);
-      const desiredStateId = call.input.desired.state_id;
+      const awaitingCycle = mutationScope.issues.get(mutationCall.input.issue_id);
+      const desiredStateId = mutationCall.input.desired.state_id;
       const callerCycle = authorization.caller_cycle;
-      const existing = this.#pendingCycleAcceptances.get(call.input.issue_id);
+      const existing = this.#pendingCycleAcceptances.get(mutationCall.input.issue_id);
       if (
         awaitingCycle === undefined
         || desiredStateId === undefined
         || callerCycle === null
         || (this.#pendingCycleAcceptances.size >= 1
-          && !this.#pendingCycleAcceptances.has(call.input.issue_id))
-        || (existing !== undefined && existing.correlation_id !== call.correlation_id)
+          && !this.#pendingCycleAcceptances.has(mutationCall.input.issue_id))
+        || (existing !== undefined && existing.correlation_id !== mutationCall.correlation_id)
       ) invalidBoundary();
-      this.#pendingCycleAcceptances.set(call.input.issue_id, Object.freeze({
-        correlation_id: call.correlation_id,
+      this.#pendingCycleAcceptances.set(mutationCall.input.issue_id, Object.freeze({
+        correlation_id: mutationCall.correlation_id,
         awaiting_cycle: awaitingCycle,
         desired_state_id: desiredStateId,
         authorization: Object.freeze({
@@ -856,11 +921,16 @@ export class RootTaskManageCommandBinding {
     }
     const description = call.input.desired.description;
     if (description === null) diagnosticAuthorizationFailure("create_issue", "description_missing");
+    let design: ReturnType<typeof parseCycleDesignMarkdown>;
     try {
       this.#assertCycleDraft(description, this.#rootDefinition(scope));
+      design = this.#assertCycleDesign(description);
     } catch (error) {
       if (error instanceof RootTaskManageBindingError && !error.fatal) {
-        diagnosticAuthorizationFailure("create_issue", "cycle_draft_invalid");
+        diagnosticAuthorizationFailure(
+          "create_issue",
+          `cycle_draft_invalid:${error.diagnostic_code ?? "unknown"}`,
+        );
       }
       throw error;
     }
@@ -874,6 +944,29 @@ export class RootTaskManageCommandBinding {
         || !this.#sameIssue(predecessor, current)
       ) diagnosticAuthorizationFailure("create_issue", "terminal_predecessor_missing");
       this.#terminalPredecessor = null;
+    }
+    const expectedCycleId = deriveCycleUuid(
+      design.anchors.identity_derivation_version,
+      "cycle_issue",
+      this.root_id,
+      design.anchors.predecessor_cycle_issue_id ?? FIRST_CYCLE_PREDECESSOR,
+      design.anchors.predecessor_terminal_record_id,
+    );
+    if (design.anchors.cycle_id !== expectedCycleId || call.input.issue_id !== expectedCycleId) {
+      const mismatchParts = [
+        ...(design.anchors.cycle_id === expectedCycleId ? [] : ["anchor"]),
+        ...(call.input.issue_id === expectedCycleId ? [] : ["call"]),
+      ];
+      if (cycles.length === 0 && expectedCycleId !== deriveFirstCycleIssueId(this.root_id)) mismatchParts.push("basis");
+      const diagnosticCode = mismatchParts.length === 0
+        ? "cycle_identity_derivation_mismatch"
+        : `cycle_identity_derivation_mismatch:${mismatchParts.join("_")}`;
+      diagnosticAuthorizationFailure(
+        "create_issue",
+        hostProcess.env.SYMPHONY_E2E_DIAGNOSTIC_EVENTS === "1"
+          ? diagnosticCode
+          : "cycle_identity_derivation_mismatch",
+      );
     }
   }
 
@@ -937,17 +1030,10 @@ export class RootTaskManageCommandBinding {
       if (typeof description !== "string") {
         diagnosticAuthorizationFailure("update_issue", "draft_description_missing");
       }
-      try {
-        this.#assertCycleDraft(description, definition);
-      } catch (error) {
-        if (error instanceof RootTaskManageBindingError && !error.fatal) {
-          diagnosticAuthorizationFailure("update_issue", "draft_markdown_invalid");
-        }
-        throw error;
-      }
+      const reviewDefinition = this.#draftReviewDefinition(issue, description, definition);
       return Object.freeze({
         caller_cycle: null,
-        approval_definition: draftApproval ? definition : null,
+        approval_definition: draftApproval ? reviewDefinition : null,
         acceptance_view: null,
       });
     }
@@ -1002,9 +1088,61 @@ export class RootTaskManageCommandBinding {
   #assertCycleDraft(description: string, definition: RootDefinition): void {
     try {
       parseCycleDraftForRoot(description, definition);
-    } catch {
-      callDenied();
+    } catch (error) {
+      throw new RootTaskManageBindingError("capability_denied", false, cycleDraftDiagnostic(error));
     }
+  }
+
+  #assertCycleDesign(description: string): ReturnType<typeof parseCycleDesignMarkdown> {
+    try {
+      return parseCycleDesignMarkdown(description);
+    } catch (error) {
+      throw new RootTaskManageBindingError("capability_denied", false, cycleDraftDiagnostic(error));
+    }
+  }
+
+  #draftReviewDefinition(
+    issue: TaskIssueSnapshot,
+    description: string,
+    currentDefinition: RootDefinition,
+  ): RootDefinition {
+    let candidate;
+    try {
+      candidate = parseCycleDraftMarkdown(description);
+    } catch (error) {
+      throw new RootTaskManageBindingError("capability_denied", false, cycleDraftDiagnostic(error));
+    }
+
+    let existingRevision: TaskIssueSnapshot["revision"] | undefined;
+    try {
+      existingRevision = parseCycleDraftMarkdown(issue.description_markdown).root_definition_revision;
+    } catch {
+      // A malformed existing Draft can be rebuilt from the current Root definition.
+    }
+    if (
+      candidate.root_definition_revision !== currentDefinition.root_revision
+      && candidate.root_definition_revision !== existingRevision
+    ) {
+      throw new RootTaskManageBindingError(
+        "capability_denied",
+        false,
+        "revision",
+      );
+    }
+
+    const definition = candidate.root_definition_revision === currentDefinition.root_revision
+      ? currentDefinition
+      : Object.freeze({
+        ...currentDefinition,
+        root_revision: candidate.root_definition_revision,
+    });
+    try {
+      parseCycleDraftForRoot(description, definition);
+      parseCycleDesignMarkdown(description);
+    } catch (error) {
+      throw new RootTaskManageBindingError("capability_denied", false, cycleDraftDiagnostic(error));
+    }
+    return definition;
   }
 
   #approvalSeal(
@@ -1039,7 +1177,10 @@ export class RootTaskManageCommandBinding {
       || issue.revision === draft.revision
       || issue.issue_id !== draft.issue_id
       || issue.title !== draft.title
-      || issue.description_markdown !== draft.description_markdown
+      || (
+        issue.description_markdown !== draft.description_markdown
+        && !markdownSemanticallyEqual(issue.description_markdown, draft.description_markdown)
+      )
       || issue.parent_issue_id !== draft.parent_issue_id
       || !this.#sameValues(issue.label_ids, draft.label_ids)
       || issue.delegate_id !== draft.delegate_id
@@ -1078,7 +1219,10 @@ export class RootTaskManageCommandBinding {
       || issue.status_id !== pending.desired_state_id
       || !this.#isTerminalCycle(issue)
       || issue.title !== awaiting.title
-      || issue.description_markdown !== awaiting.description_markdown
+      || (
+        issue.description_markdown !== awaiting.description_markdown
+        && !markdownSemanticallyEqual(issue.description_markdown, awaiting.description_markdown)
+      )
       || issue.parent_issue_id !== awaiting.parent_issue_id
       || !this.#sameValues(issue.label_ids, awaiting.label_ids)
       || issue.delegate_id !== awaiting.delegate_id
@@ -1122,8 +1266,11 @@ export class RootTaskManageCommandBinding {
         cycle_description_markdown: draft.description_markdown,
         root_definition: definition,
       });
-    } catch {
-      return callDenied();
+    } catch (error) {
+      const reason = error instanceof Error && /^[a-z][a-z0-9_]{0,63}$/u.test(error.message)
+        ? error.message
+        : "unknown";
+      return diagnosticAuthorizationFailure("update_issue", `cycle_approval_invalid:${reason}`);
     }
     const recordCall = createTaskIssueRecordCall(statusCall, {
       record_id: prepared.specification.approval_record_id,
@@ -1430,7 +1577,14 @@ export class RootTaskManageCommandBinding {
       fresh.issue_id !== before.issue_id
       || fresh.status_id !== (desired.state_id === undefined ? before.status_id : desired.state_id)
       || fresh.title !== (desired.title === undefined ? before.title : desired.title)
-      || fresh.description_markdown !== (desired.description === undefined ? before.description_markdown : desired.description)
+      || (
+        fresh.description_markdown !== (desired.description === undefined ? before.description_markdown : desired.description)
+        && (
+          desired.description === undefined
+          || desired.description === null
+          || !markdownSemanticallyEqual(fresh.description_markdown, desired.description)
+        )
+      )
       || fresh.parent_issue_id !== (desired.parent_id === undefined ? before.parent_issue_id : desired.parent_id)
       || !this.#sameValues(fresh.label_ids, desired.label_ids ?? before.label_ids)
       || fresh.delegate_id !== (desired.delegate_id === undefined ? before.delegate_id : desired.delegate_id)
@@ -1445,9 +1599,20 @@ export class RootTaskManageCommandBinding {
       || change.issue_id !== call.input.issue_id
       || change.field !== field
     ) invalidBoundary();
-    const beforeValue = field === "status" ? before.status_id : before.description_markdown;
-    const afterValue = field === "status" ? fresh.status_id : fresh.description_markdown;
-    if (change.before !== beforeValue || change.after !== afterValue) invalidBoundary();
+    if (change.field === "status") {
+      if (change.before !== before.status_id || change.after !== fresh.status_id) invalidBoundary();
+    } else if (change.field === "description") {
+      if (
+        (change.before !== before.description_markdown
+          && (change.before === null
+            || !markdownSemanticallyEqual(change.before, before.description_markdown)))
+        || (change.after !== fresh.description_markdown
+          && (change.after === null
+            || !markdownSemanticallyEqual(change.after, fresh.description_markdown)))
+      ) invalidBoundary();
+    } else {
+      invalidBoundary();
+    }
   }
 
   #assertCreatedIssue(call: CreateIssueCall, issue: TaskIssueSnapshot): void {
@@ -1459,15 +1624,33 @@ export class RootTaskManageCommandBinding {
     issue: TaskIssueSnapshot,
   ): void {
     const desired = input.desired;
+    if (desired.description === null) {
+      invalidBoundaryWithDiagnostic("created_issue_description_missing");
+    }
+    if (issue.parent_issue_id !== input.parent_issue_id) {
+      invalidBoundaryWithDiagnostic("created_issue_parent_mismatch");
+    }
+    if (issue.status_id !== desired.state_id) {
+      invalidBoundaryWithDiagnostic("created_issue_state_mismatch");
+    }
+    if (issue.title !== desired.title) {
+      invalidBoundaryWithDiagnostic("created_issue_title_mismatch");
+    }
     if (
-      issue.parent_issue_id !== input.parent_issue_id
-      || issue.status_id !== desired.state_id
-      || issue.title !== desired.title
-      || issue.description_markdown !== desired.description
-      || !this.#sameValues(issue.label_ids, desired.label_ids)
-      || issue.delegate_id !== desired.delegate_id
-      || issue.priority !== desired.priority
-    ) invalidBoundary();
+      issue.description_markdown !== desired.description
+      && !markdownSemanticallyEqual(issue.description_markdown, desired.description)
+    ) {
+      invalidBoundaryWithDiagnostic(createdIssueDescriptionDiagnostic(issue.description_markdown, desired.description));
+    }
+    if (!this.#sameValues(issue.label_ids, desired.label_ids)) {
+      invalidBoundaryWithDiagnostic("created_issue_labels_mismatch");
+    }
+    if (issue.delegate_id !== desired.delegate_id) {
+      invalidBoundaryWithDiagnostic("created_issue_delegate_mismatch");
+    }
+    if (issue.priority !== desired.priority) {
+      invalidBoundaryWithDiagnostic("created_issue_priority_mismatch");
+    }
   }
 
   #assertSameIssue(left: TaskIssueSnapshot, right: TaskIssueSnapshot): void {
@@ -1475,12 +1658,18 @@ export class RootTaskManageCommandBinding {
   }
 
   #sameIssue(left: TaskIssueSnapshot, right: TaskIssueSnapshot): boolean {
+    return left.revision === right.revision && this.#sameIssueContent(left, right);
+  }
+
+  #sameIssueContent(left: TaskIssueSnapshot, right: TaskIssueSnapshot): boolean {
     return (
       left.issue_id !== right.issue_id
-      || left.revision !== right.revision
       || left.status_id !== right.status_id
       || left.title !== right.title
-      || left.description_markdown !== right.description_markdown
+      || (
+        left.description_markdown !== right.description_markdown
+        && !markdownSemanticallyEqual(left.description_markdown, right.description_markdown)
+      )
       || left.parent_issue_id !== right.parent_issue_id
       || !this.#sameValues(left.label_ids, right.label_ids)
       || left.delegate_id !== right.delegate_id

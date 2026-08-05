@@ -248,6 +248,23 @@ test("Stage records are exact-slot, source-status-owned, and keep Work continuat
   assert.equal(stageCompletionTerminalStatus(completed.completion), "Done");
   assert.equal("ephemeral_continuation_markdown" in completed.completion, false);
 
+  const providerClockSkew = parseStageCompletionRecord({
+    ...commonRecord("record:work:completion:clock-skew"),
+    updated_at: "2026-08-02T02:00:00.037Z",
+    record_kind: "stage_completion",
+    stage_id: "issue:work:1",
+    completion: {
+      outcome: "completed",
+      instruction_digest: digest("4"),
+      workspace_parent_revision: digest("5"),
+      workspace_diff_digest: digest("6"),
+      checks_markdown: "Checks passed.",
+      normalized_handoff_markdown: "Implemented the contract.",
+    },
+  }, "work");
+  assert.equal(providerClockSkew.created_at, "2026-08-02T02:00:00.000Z");
+  assert.equal(providerClockSkew.updated_at, "2026-08-02T02:00:00.037Z");
+
   assert.throws(() => parseStageCompletionRecord({
     ...completed,
     completion: { ...completed.completion, ephemeral_continuation_markdown: "Continue." },
@@ -327,7 +344,7 @@ test("Root family invalidation deterministically quarantines multiple non-termin
     root_id: "issue:root:1",
     actor_id: "actor:symphony",
     created_at: "2026-08-02T03:00:00.000Z",
-    updated_at: "2026-08-02T03:00:00.000Z",
+    updated_at: "2026-08-02T03:00:00.037Z",
     archived_at: null,
     record_kind: "root_family_invalidation",
     identity_derivation_version: "symphony-identity:v1",

@@ -13,6 +13,27 @@ interface MarkdownNode {
   readonly children?: readonly MarkdownNode[];
 }
 
+function markdownSyntaxTree(value: string): unknown {
+  const stripPosition = (entry: unknown): unknown => {
+    if (Array.isArray(entry)) return entry.map(stripPosition);
+    if (typeof entry !== "object" || entry === null) return entry;
+    return Object.fromEntries(
+      Object.entries(entry)
+        .filter(([key]) => key !== "position" && key !== "spread")
+        .map(([key, child]) => [key, stripPosition(child)]),
+    );
+  };
+  return stripPosition(fromMarkdown(value));
+}
+
+export function markdownSemanticallyEqual(left: string, right: string): boolean {
+  try {
+    return JSON.stringify(markdownSyntaxTree(left)) === JSON.stringify(markdownSyntaxTree(right));
+  } catch {
+    return false;
+  }
+}
+
 const CREDENTIAL_MATERIAL = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
   /\bAuthorization\s*[:=]\s*[A-Za-z][A-Za-z0-9_-]{1,31}\s+[A-Za-z0-9._~+/-]{8,}={0,2}/iu,

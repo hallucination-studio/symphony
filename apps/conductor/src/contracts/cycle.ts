@@ -27,6 +27,7 @@ import {
   parseArray,
   parseBoundedString,
   parseEnum,
+  markdownSemanticallyEqual,
   parseMarkdownText,
   type MarkdownText,
   type UnknownRecord,
@@ -431,13 +432,13 @@ export function parseCycleDraftForRoot(
   if (draft.root_definition_revision !== rootDefinition.root_revision) {
     throw new Error("cycle_root_revision_snapshot_mismatch");
   }
-  if (draft.requirement_markdown !== rootDefinition.requirement_markdown) {
+  if (!markdownSemanticallyEqual(draft.requirement_markdown, rootDefinition.requirement_markdown)) {
     throw new Error("cycle_requirement_snapshot_mismatch");
   }
-  if (draft.root_adr_markdown !== rootDefinition.root_adr_markdown) {
+  if (!markdownSemanticallyEqual(draft.root_adr_markdown, rootDefinition.root_adr_markdown)) {
     throw new Error("cycle_root_adr_snapshot_mismatch");
   }
-  if (draft.acceptance_markdown !== rootDefinition.acceptance_markdown) {
+  if (!markdownSemanticallyEqual(draft.acceptance_markdown, rootDefinition.acceptance_markdown)) {
     throw new Error("cycle_acceptance_snapshot_mismatch");
   }
   return draft;

@@ -9,7 +9,11 @@ import {
   parseTaskIssueId,
   parseTaskRevision,
 } from "../contracts/identity.js";
-import { deriveCycleUuid } from "../contracts/cycle-identities.js";
+import {
+  CYCLE_IDENTITY_DERIVATION_VERSION,
+  deriveCycleAnchorIds,
+  deriveCycleUuid,
+} from "../contracts/cycle-identities.js";
 import { prepareCycleApproval } from "../cycle/internal/CycleApproval.js";
 import {
   parseRootDefinition,
@@ -46,11 +50,14 @@ import {
 import { RootToolCallError, RootToolFatalError } from "./RootToolBoundary.js";
 
 const rootId = parseRootIssueId("LIN-1");
-const identityVersion = "symphony-identity:v1";
+const identityVersion = CYCLE_IDENTITY_DERIVATION_VERSION;
 const cycleTaskId = parseTaskIssueId(deriveCycleUuid(
   identityVersion, "cycle_issue", rootId, "first_cycle", "first_cycle",
 ));
 const derivedCycleId = (kind: string) => deriveCycleUuid(identityVersion, kind, cycleTaskId);
+const firstCycleAnchorText = Object.entries(deriveCycleAnchorIds(identityVersion, cycleTaskId))
+  .map(([kind, id]) => `${kind}=${id}`)
+  .join(", ");
 const generation = parseRuntimeGeneration(3);
 const correlationId = parseCorrelationId("corr:turn:1");
 const callerAuthority = createTaskManageCallerAuthority();
@@ -552,7 +559,7 @@ function createIssueCall(expectedParentRevision: string): Record<string, unknown
     correlation_id: correlationId,
     capability: TASK_MCP_CAPABILITIES.create_issue,
     input: {
-      issue_id: "11111111-1111-4111-8111-111111111111",
+      issue_id: cycleTaskId,
       parent_issue_id: "LIN-1",
       expected_parent_revision: expectedParentRevision,
       desired: {
@@ -704,14 +711,14 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
 
   const createIssue = tools.specs.find(({ name }) => name === "create_issue");
   assert.ok(createIssue);
+  const cycleCreateGuidance = `First Cycle on WF-ROUTE-001: issue_id and Mapping Cycle ID=${cycleTaskId}; predecessor cycle=None; terminal record=first_cycle; ${firstCycleAnchorText}. Workspace Base Revision is the host-provided lowercase SHA-256 digest of the current Git head revision; copy it exactly, never the raw revision. Use state_id=${workflow.cycle_states.draft}, label_ids=[${workflow.labels.cycle}], and these exact IDs; never randomize or use placeholders.`;
   assert.ok(createIssue.description.length <= 1_024);
-  assert.equal(createIssue.description.includes("issue_id must be a fresh UUIDv4; never a name or placeholder"), true);
-  assert.equal(createIssue.description.includes(`state_id must be exactly ${workflow.cycle_states.draft}`), true);
-  assert.equal(createIssue.description.includes(`label_ids must be [${workflow.labels.cycle}]`), true);
-  assert.equal(createIssue.description.includes("never use state or label names, aliases, or placeholders"), true);
+  assert.equal(createIssue.description.includes(`Use state_id=${workflow.cycle_states.draft}`), true);
+  assert.equal(createIssue.description.includes(`label_ids=[${workflow.labels.cycle}]`), true);
+  assert.equal(createIssue.description.includes("these exact IDs; never randomize"), true);
   assert.equal(
     createIssue.description,
-    "Create one Cycle Draft under the exact Root. Emit this exact nested JSON shape. Valid: {\"issue_id\":\"11111111-1111-4111-8111-111111111111\",\"parent_issue_id\":\"ROOT\",\"expected_parent_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\",\"description\":\"MARKDOWN\",\"state_id\":\"STATE_ID\",\"label_ids\":[\"LABEL_ID\"],\"delegate_id\":null,\"priority\":null}}. Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input. issue_id must be a fresh UUIDv4; never a name or placeholder. For this Root, state_id must be exactly state:draft and label_ids must be [label:cycle]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders.",
+    `Create one Cycle Draft under the exact Root. ${cycleCreateGuidance}`,
   );
   const inputSchema = (createIssue.inputSchema as {
     properties: Record<string, { description?: unknown; properties?: Record<string, unknown> }>;
@@ -719,7 +726,7 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   assert.ok(inputSchema);
   assert.equal(
     (inputSchema as { description?: unknown }).description,
-    "This input contains exactly issue_id, parent_issue_id, expected_parent_revision, and desired; put exactly title, description, state_id, label_ids, delegate_id, and priority inside desired. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, preserving headings and Markdown; never paraphrase. issue_id must be a fresh UUIDv4; never a name or placeholder. For this Root, state_id must be exactly state:draft and label_ids must be [label:cycle]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders. Emit this exact nested JSON shape. Valid: {\"issue_id\":\"11111111-1111-4111-8111-111111111111\",\"parent_issue_id\":\"ROOT\",\"expected_parent_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\",\"description\":\"MARKDOWN\",\"state_id\":\"STATE_ID\",\"label_ids\":[\"LABEL_ID\"],\"delegate_id\":null,\"priority\":null}}. Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input.",
+    `This input contains exactly issue_id, parent_issue_id, expected_parent_revision, and desired; put exactly title, description, state_id, label_ids, delegate_id, and priority inside desired. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, preserving headings and Markdown; never paraphrase. issue_id must be a fresh UUIDv4; never a name or placeholder. ${cycleCreateGuidance} Exact JSON shape; replace placeholders with current facts. Use description/state_id, never snapshot description_markdown/status_id. Valid: {"issue_id":"11111111-1111-4111-8111-111111111111","parent_issue_id":"ROOT","expected_parent_revision":"REVISION","desired":{"title":"TITLE","description":"MARKDOWN","state_id":"STATE_ID","label_ids":["LABEL_ID"],"delegate_id":null,"priority":null}}. Input keys are exactly issue_id, parent_issue_id, expected_parent_revision, and desired. Keep exactly title, description, state_id, label_ids, delegate_id, and priority inside desired; put no other keys in input. For a Cycle Draft, every exact Execution Directive ID must appear exactly once across Approved Work Groups Directives lists; omit no ID, duplicate no ID, and invent no ID. Cross-group directive dependencies must be covered by group dependencies.`,
   );
   const createInput = inputSchema.properties as Record<string, {
     description?: unknown;
@@ -741,7 +748,7 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   }>;
   assert.equal(
     createInput.issue_id?.description,
-    "Use a fresh UUIDv4 for issue_id; never use an issue name or placeholder.",
+    `Use the exact host-derived first Cycle ID on WF-ROUTE-001; otherwise use a derived UUIDv4 for issue_id; never use an issue name or placeholder. ${cycleCreateGuidance}`,
   );
   assert.equal(createInput.issue_id?.type, "string");
   assert.match(
@@ -752,13 +759,13 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   const desired = createInput.desired?.properties;
   assert.equal(
     createInput.desired?.description,
-    "This desired object contains exactly title, description, state_id, label_ids, delegate_id, and priority; all six fields belong inside desired and none may be placed beside desired in the parent input object. For this Root, state_id must be exactly state:draft and label_ids must be [label:cycle]; use IDs exactly as supplied; never use state or label names, aliases, or placeholders.",
+    `This desired object contains exactly title, description, state_id, label_ids, delegate_id, and priority; use canonical names only: description, not description_markdown; state_id, not status_id; all six fields belong inside desired and none may be placed beside desired in the parent input object. ${cycleCreateGuidance}`,
   );
   assert.equal(createInput.desired?.maxProperties, 6);
   assert.equal(desired?.description?.type, "string");
   assert.equal(
     desired?.description?.description,
-    "For a Cycle Draft target, use at most one level-1 title followed by exactly these level-2 headings in order: Root Definition Revision, Requirement, Domain Knowledge, Root ADR, Acceptance, Architecture, Feature Design, Code Design, Boundaries, Acceptance Mapping, Failure Strategy. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase.",
+    "For a Cycle Draft target, use the key description, not description_markdown; use at most one level-1 title followed by exactly these level-2 headings in order: Root Definition Revision, Requirement, Domain Knowledge, Root ADR, Acceptance, Architecture, Feature Design, Code Design, Boundaries, Acceptance Mapping, Failure Strategy. Do not add any other level-1 or level-2 heading, preamble, metadata, JSON, or code fence. Copy the Root Requirement, Domain Knowledge, Root ADR, and Acceptance sections verbatim from the current fresh Root read-back, including heading text and Markdown; take the four raw Markdown substrings beginning at the named headings and paste them unchanged; never paraphrase. Every exact Execution Directive ID must appear exactly once across Approved Work Groups Directives lists; omit no ID, duplicate no ID, and invent no ID.",
   );
   assert.deepEqual(desired?.state_id?.enum, [workflow.cycle_states.draft]);
   assert.equal(desired?.label_ids?.minItems, 1);
@@ -800,11 +807,11 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   }).properties.input;
   assert.equal(
     updateInput?.description,
-    "This is the nested input object. It contains exactly issue_id, expected_revision, and desired; put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired. Do not put schema_version, function, root_id, runtime_generation, correlation_id, capability, or any desired field in this object beside desired. Use this exact nested JSON shape (replace placeholders with current facts). Valid: {\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}. Valid tool arguments: {\"schema_version\":1,\"function\":\"update_issue\",\"root_id\":\"ROOT\",\"runtime_generation\":1,\"correlation_id\":\"CORR\",\"capability\":\"task_manage:update_issue\",\"input\":{\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}}. The input object contains exactly issue_id, expected_revision, and desired. The desired object contains exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority. Put no other keys anywhere in the input object.",
+    "This is the nested input object. It contains exactly issue_id, expected_revision, and desired; put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired. Do not put schema_version, function, root_id, runtime_generation, correlation_id, capability, or any desired field in this object beside desired. Input keys are exactly issue_id, expected_revision, and desired; desired has exactly one canonical field: title, description, state_id, parent_id, label_ids, delegate_id, or priority. Snapshot fields are not mutation fields; desired uses description, state_id, and parent_id. Valid: {\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}.",
   );
   assert.equal(
     updateDesired?.description,
-    "Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside this desired object; do not place any of those fields beside desired in the parent input object. {\"title\":\"TITLE\"} is a valid desired object. The desired object contains exactly one field. Emit one field only.",
+    "Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside this desired object; do not place any of those fields beside desired in the parent input object. Use canonical names only: never description_markdown, status_id, or parent_issue_id. {\"title\":\"TITLE\"} is a valid desired object. The desired object contains exactly one field. Emit one field only.",
   );
   assert.equal(updateDesired?.maxProperties, 1);
   const updateFields = [
@@ -824,7 +831,7 @@ test("Root tools generate every generic Task MCP schema with an exact bound func
   }
   assert.equal(
     updateIssue.description,
-    "Update exactly one field on one exact issue revision. The input keys are exactly issue_id, expected_revision, and desired. Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired; parent_id is nested inside desired, never beside desired. Use this exact nested JSON shape (replace placeholders with current facts). Valid: {\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}. Valid tool arguments: {\"schema_version\":1,\"function\":\"update_issue\",\"root_id\":\"ROOT\",\"runtime_generation\":1,\"correlation_id\":\"CORR\",\"capability\":\"task_manage:update_issue\",\"input\":{\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}}. The input object contains exactly issue_id, expected_revision, and desired. The desired object contains exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority. Put no other keys anywhere in the input object.",
+    "Update exactly one field on one exact issue revision. The input keys are exactly issue_id, expected_revision, and desired. Put exactly one of title, description, state_id, parent_id, label_ids, delegate_id, or priority inside desired; parent_id is nested inside desired, never beside desired. Input keys are exactly issue_id, expected_revision, and desired; desired has exactly one canonical field: title, description, state_id, parent_id, label_ids, delegate_id, or priority. Snapshot fields are not mutation fields; desired uses description, state_id, and parent_id. Valid: {\"issue_id\":\"ISSUE_ID\",\"expected_revision\":\"REVISION\",\"desired\":{\"title\":\"TITLE\"}}.",
   );
   assert.equal(
     updateDescription?.description,
@@ -1374,13 +1381,13 @@ test("conflict_observed from create_issue blocks create retries until the caller
     isAcceptanceUnknown,
   );
   await read.execute(
-    getIssueCall({ input: { issue_id: "11111111-1111-4111-8111-111111111111" } }),
+    getIssueCall({ input: { issue_id: cycleTaskId } }),
     { assertActive: () => undefined },
   );
   await create.execute(createIssueCall(canonicalRootRevision), { assertActive: () => undefined });
   assert.deepEqual(effects, [
     "create:1",
-    "read:11111111-1111-4111-8111-111111111111",
+    `read:${cycleTaskId}`,
     "create:2",
   ]);
 });

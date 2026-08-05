@@ -19,7 +19,7 @@ import {
   waitForTree,
 } from "./accepted-root.test.mjs";
 
-const NODE_TEST_TIMEOUT_MS = 60 * 60_000;
+const NODE_TEST_TIMEOUT_MS = 4 * 60_000;
 
 function recordOfKind(records, kind, code) {
   const matches = records.filter((record) => record.record_kind === kind);

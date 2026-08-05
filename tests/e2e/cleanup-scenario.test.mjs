@@ -18,7 +18,7 @@ import {
   waitForInReview,
 } from "./accepted-root.test.mjs";
 
-const NODE_TEST_TIMEOUT_MS = 90 * 60_000;
+const NODE_TEST_TIMEOUT_MS = 4 * 60_000;
 
 async function pathExists(target) {
   try {

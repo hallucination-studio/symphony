@@ -77,6 +77,14 @@ async function runNativeCommand(
   };
 }
 
+function isCodexSandboxSetupUnavailable(result: {
+  readonly exitCode: number;
+  readonly stderr: string;
+}): boolean {
+  return result.exitCode === 71
+    && /^sandbox-exec: sandbox_apply: Operation not permitted\n?$/u.test(result.stderr);
+}
+
 interface FakeAppServer extends SpawnedCodexProcess {
   readonly output: PassThrough;
   send(message: Record<string, unknown>): void;
@@ -610,6 +618,10 @@ test("installed Codex app-server enforces the exact Verify read-only revision pr
       canonicalWorktree,
       "probe:verify-permissions",
     );
+    if (isCodexSandboxSetupUnavailable(executed)) {
+      context.skip("codex_sandbox_unavailable: sandbox_apply_operation_not_permitted");
+      return;
+    }
     assert.equal(executed.exitCode, 0);
     assert.equal(executed.stderr, "");
     const evidence = JSON.parse(executed.stdout) as Record<

@@ -18,7 +18,7 @@ import {
   waitForTree,
 } from "./accepted-root.test.mjs";
 
-const NODE_TEST_TIMEOUT_MS = 60 * 60_000;
+const NODE_TEST_TIMEOUT_MS = 4 * 60_000;
 const FAILURE_CASES = Object.freeze([
   { name: "Plan", kind: "plan" },
   { name: "Work", kind: "work" },

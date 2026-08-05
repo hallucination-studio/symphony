@@ -355,7 +355,7 @@ test("comment creation proves exact absence then fresh-reads one immutable servi
     comment_id: createCommentCall.input.comment_id,
     issue_id: "issue-1",
     provider_created_at: "2026-07-30T00:00:01.000Z",
-    provider_updated_at: "2026-07-30T00:00:01.000Z",
+    provider_updated_at: "2026-07-30T00:00:00.962Z",
     provider_edited_at: null,
     provider_archived_at: null,
     actor_id: "actor:1",
@@ -369,7 +369,7 @@ test("comment creation proves exact absence then fresh-reads one immutable servi
     comment_id: createCommentCall.input.comment_id,
     issue_id: "issue-1",
     provider_created_at: "2026-07-30T00:00:01.000Z",
-    provider_updated_at: "2026-07-30T00:00:01.000Z",
+    provider_updated_at: "2026-07-30T00:00:00.962Z",
     provider_edited_at: null,
     provider_archived_at: null,
     actor_id: "actor:1",
@@ -400,7 +400,7 @@ test("comment creation closes stale, uncertain, and mismatched read-back without
     { name: "stale issue", revision: ISSUE_REVISION_2, revisionToken: "revision:issue:2", before: [], after: [], outcome: "stale_before_effect", effects: 0 },
     { name: "identity present", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [exactComment], after: [], outcome: "stale_before_effect", effects: 0 },
     { name: "external actor", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [], after: [{ ...exactComment, actor_id: "actor:other" }], outcome: "conflict_observed", effects: 1 },
-    { name: "edited timestamp", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [], after: [{ ...exactComment, provider_updated_at: "2026-07-30T00:00:02.000Z" }], outcome: "conflict_observed", effects: 1 },
+    { name: "edited timestamp", revision: ISSUE_REVISION_1, revisionToken: "revision:issue:1", before: [], after: [{ ...exactComment, provider_updated_at: "2026-07-30T00:00:02.000Z", provider_edited_at: "2026-07-30T00:00:02.000Z" }], outcome: "conflict_observed", effects: 1 },
   ] as const;
   for (const entry of cases) {
     const client = new FakeCommandClient();

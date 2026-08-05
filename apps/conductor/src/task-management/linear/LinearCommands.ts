@@ -203,7 +203,6 @@ export class LinearCommands {
       && created.actor_id === this.#serviceActorId
       && created.provider_archived_at === null
       && created.provider_edited_at === null
-      && created.provider_updated_at === created.provider_created_at
       && created.body_digest === expectedDigest
       && this.#onlyExpectedCommentAdded(before, after, call.input.comment_id);
     const fresh = created === undefined ? null : this.#commentResource(created);
