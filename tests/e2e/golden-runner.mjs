@@ -36,15 +36,27 @@ export function goldenConductorFailureReason(error) {
     : "golden_conductor_process_failed";
 }
 
-export function resolveGoldenAgentConfiguration(environment = {}) {
+export function resolveGoldenRoleConfiguration(environment = {}) {
   return Object.freeze({
+    reconcile: Object.freeze({
+      ...(environment.SYMPHONY_GOLDEN_RECONCILE_AGENT === undefined
+        ? {} : { agent: environment.SYMPHONY_GOLDEN_RECONCILE_AGENT }),
+      ...(environment.SYMPHONY_GOLDEN_RECONCILE_MODEL === undefined
+        ? {} : { model: environment.SYMPHONY_GOLDEN_RECONCILE_MODEL }),
+      ...(environment.SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT === undefined
+        ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT }),
+    }),
     execute: Object.freeze({
+      ...(environment.SYMPHONY_GOLDEN_EXECUTE_AGENT === undefined
+        ? {} : { agent: environment.SYMPHONY_GOLDEN_EXECUTE_AGENT }),
       ...(environment.SYMPHONY_GOLDEN_EXECUTE_MODEL === undefined
         ? {} : { model: environment.SYMPHONY_GOLDEN_EXECUTE_MODEL }),
       ...(environment.SYMPHONY_GOLDEN_EXECUTE_REASONING_EFFORT === undefined
         ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_EXECUTE_REASONING_EFFORT }),
     }),
     audit: Object.freeze({
+      ...(environment.SYMPHONY_GOLDEN_AUDIT_AGENT === undefined
+        ? {} : { agent: environment.SYMPHONY_GOLDEN_AUDIT_AGENT }),
       ...(environment.SYMPHONY_GOLDEN_AUDIT_MODEL === undefined
         ? {} : { model: environment.SYMPHONY_GOLDEN_AUDIT_MODEL }),
       ...(environment.SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT === undefined
@@ -55,7 +67,8 @@ export function resolveGoldenAgentConfiguration(environment = {}) {
 
 const GOLDEN_ENVIRONMENT_KEYS = Object.freeze([
   "PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL",
-  "LINEAR_API_KEY", "CODEX_API_KEY", "CODEX_BASE_URL",
+  "LINEAR_API_KEY",
+  "SYMPHONY_RECONCILE_CODEX_API_KEY", "SYMPHONY_RECONCILE_CODEX_BASE_URL",
   "SYMPHONY_EXECUTE_CODEX_API_KEY", "SYMPHONY_EXECUTE_CODEX_BASE_URL",
   "SYMPHONY_AUDIT_CODEX_API_KEY", "SYMPHONY_AUDIT_CODEX_BASE_URL",
   "GH_TOKEN", "GITHUB_TOKEN",
@@ -82,14 +95,6 @@ export function partitionGoldenEnvironment(environment = {}, inherited = process
     const linearToken = environment.SYMPHONY_LINEAR_TOKEN ?? inherited.SYMPHONY_LINEAR_TOKEN;
     if (linearToken !== undefined) result.LINEAR_API_KEY = linearToken;
   }
-  if (result.CODEX_API_KEY === undefined) {
-    const apiKey = environment.SYMPHONY_CODEX_API_KEY ?? inherited.SYMPHONY_CODEX_API_KEY;
-    if (apiKey !== undefined) result.CODEX_API_KEY = apiKey;
-  }
-  if (result.CODEX_BASE_URL === undefined) {
-    const baseUrl = environment.SYMPHONY_CODEX_BASE_URL ?? inherited.SYMPHONY_CODEX_BASE_URL;
-    if (baseUrl !== undefined) result.CODEX_BASE_URL = baseUrl;
-  }
   return result;
 }
 
@@ -99,7 +104,7 @@ export function resolveGoldenLaunchArguments({
   workspace,
   runDirectory,
 } = {}) {
-  const configuration = resolveGoldenAgentConfiguration(environment);
+  const configuration = resolveGoldenRoleConfiguration(environment);
   const args = [
     "run",
     "--linear-root", root,
@@ -107,11 +112,26 @@ export function resolveGoldenLaunchArguments({
     "--dir", runDirectory,
     "--max-cycles", environment.SYMPHONY_GOLDEN_MAX_CYCLES ?? "4",
   ];
+  if (configuration.reconcile.agent !== undefined) {
+    args.push("--reconcile-agent", configuration.reconcile.agent);
+  }
+  if (configuration.reconcile.model !== undefined) {
+    args.push("--reconcile-model", configuration.reconcile.model);
+  }
+  if (configuration.reconcile.reasoning_effort !== undefined) {
+    args.push("--reconcile-reasoning-effort", configuration.reconcile.reasoning_effort);
+  }
+  if (configuration.execute.agent !== undefined) {
+    args.push("--execute-agent", configuration.execute.agent);
+  }
   if (configuration.execute.model !== undefined) {
     args.push("--execute-model", configuration.execute.model);
   }
   if (configuration.execute.reasoning_effort !== undefined) {
     args.push("--execute-reasoning-effort", configuration.execute.reasoning_effort);
+  }
+  if (configuration.audit.agent !== undefined) {
+    args.push("--audit-agent", configuration.audit.agent);
   }
   if (configuration.audit.model !== undefined) {
     args.push("--audit-model", configuration.audit.model);
@@ -134,8 +154,6 @@ export async function runGoldenScenario({
   if (environment.SYMPHONY_RUN_GOLDEN !== "1") return blocked("golden", "golden_not_enabled");
   const linear = boundaryPrerequisite(environment, "linear", { allow: true });
   if (linear !== null) return blocked("golden", linear.reason);
-  const agent = boundaryPrerequisite(environment, "agent", { allow: true });
-  if (agent !== null) return blocked("golden", agent.reason);
   for (const key of ["SYMPHONY_E2E_LINEAR_HUMAN_TOKEN", "SYMPHONY_E2E_PROJECT_SLUG_ID"]) {
     if (typeof environment[key] !== "string" || environment[key].length === 0) {
       return blocked("golden", "golden_fixture_credential_missing");

@@ -2,9 +2,13 @@ const OPTIONS = Object.freeze([
   "--linear-root",
   "--workspace",
   "--dir",
-  "--agent",
+  "--reconcile-agent",
+  "--reconcile-model",
+  "--reconcile-reasoning-effort",
+  "--execute-agent",
   "--execute-model",
   "--execute-reasoning-effort",
+  "--audit-agent",
   "--audit-model",
   "--audit-reasoning-effort",
   "--max-cycles",
@@ -70,7 +74,13 @@ export function runCliSmoke(arguments_) {
   for (const option of ["--linear-root", "--workspace", "--dir", "--max-cycles"]) {
     if (!values.has(option)) throw runnerError("public_option_missing");
   }
-  if (values.has("--agent") && values.get("--agent") !== "codex") throw runnerError("agent_invalid");
+  for (const [role, option] of [
+    ["reconcile", "--reconcile-agent"],
+    ["execute", "--execute-agent"],
+    ["audit", "--audit-agent"],
+  ]) {
+    if (values.has(option) && values.get(option) !== "codex") throw runnerError(`${role}_agent_invalid`);
+  }
   const maxCycles = Number(values.get("--max-cycles"));
   if (!Number.isSafeInteger(maxCycles) || maxCycles < 1) throw runnerError("max_cycles_invalid");
   return passed("contract_cli", {
@@ -79,10 +89,15 @@ export function runCliSmoke(arguments_) {
       linear_root: values.get("--linear-root"),
       workspace_path: values.get("--workspace"),
       run_directory: values.get("--dir"),
-      agent: values.get("--agent") ?? "codex",
+      reconcile_agent: values.get("--reconcile-agent") ?? "codex",
+      ...(values.has("--reconcile-model") ? { reconcile_model: values.get("--reconcile-model") } : {}),
+      ...(values.has("--reconcile-reasoning-effort")
+        ? { reconcile_reasoning_effort: values.get("--reconcile-reasoning-effort") } : {}),
+      execute_agent: values.get("--execute-agent") ?? "codex",
       ...(values.has("--execute-model") ? { execute_model: values.get("--execute-model") } : {}),
       ...(values.has("--execute-reasoning-effort")
         ? { execute_reasoning_effort: values.get("--execute-reasoning-effort") } : {}),
+      audit_agent: values.get("--audit-agent") ?? "codex",
       ...(values.has("--audit-model") ? { audit_model: values.get("--audit-model") } : {}),
       ...(values.has("--audit-reasoning-effort")
         ? { audit_reasoning_effort: values.get("--audit-reasoning-effort") } : {}),

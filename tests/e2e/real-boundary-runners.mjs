@@ -12,6 +12,10 @@ const MAX_VALUE_LENGTH = 4_096;
 const execute = promisify(execFile);
 
 const CODEX_ROLE_KEYS = Object.freeze({
+  reconcile: Object.freeze({
+    api_key: "SYMPHONY_RECONCILE_CODEX_API_KEY",
+    base_url: "SYMPHONY_RECONCILE_CODEX_BASE_URL",
+  }),
   execute: Object.freeze({
     api_key: "SYMPHONY_EXECUTE_CODEX_API_KEY",
     base_url: "SYMPHONY_EXECUTE_CODEX_BASE_URL",
@@ -24,25 +28,25 @@ const CODEX_ROLE_KEYS = Object.freeze({
 
 const BOUNDARY_KEYS = Object.freeze({
   linear: Object.freeze(["LINEAR_API_KEY", "SYMPHONY_LINEAR_TOKEN"]),
-  agent: Object.freeze([
-    "CODEX_API_KEY", "SYMPHONY_CODEX_API_KEY",
-    "CODEX_BASE_URL", "SYMPHONY_CODEX_BASE_URL",
+  codex: Object.freeze([
+    CODEX_ROLE_KEYS.reconcile.api_key, CODEX_ROLE_KEYS.reconcile.base_url,
+    CODEX_ROLE_KEYS.execute.api_key, CODEX_ROLE_KEYS.execute.base_url,
+    CODEX_ROLE_KEYS.audit.api_key, CODEX_ROLE_KEYS.audit.base_url,
+  ]),
+  reconcile: Object.freeze([
+    CODEX_ROLE_KEYS.reconcile.api_key, CODEX_ROLE_KEYS.reconcile.base_url,
   ]),
   execute: Object.freeze([
     CODEX_ROLE_KEYS.execute.api_key, CODEX_ROLE_KEYS.execute.base_url,
-    "CODEX_API_KEY", "SYMPHONY_CODEX_API_KEY",
-    "CODEX_BASE_URL", "SYMPHONY_CODEX_BASE_URL",
   ]),
   audit: Object.freeze([
     CODEX_ROLE_KEYS.audit.api_key, CODEX_ROLE_KEYS.audit.base_url,
-    "CODEX_API_KEY", "SYMPHONY_CODEX_API_KEY",
-    "CODEX_BASE_URL", "SYMPHONY_CODEX_BASE_URL",
   ]),
   git: Object.freeze(["PATH", "HOME"]),
   pr: Object.freeze(["GH_TOKEN", "GITHUB_TOKEN"]),
 });
 
-const CODEX_BOUNDARIES = new Set(["agent", "execute", "audit"]);
+const CODEX_BOUNDARIES = new Set(["codex", "reconcile", "execute", "audit"]);
 
 function hasValue(environment, key) {
   const value = environment?.[key];
@@ -79,14 +83,11 @@ export function partitionBoundaryEnvironment(environment, boundary, inherited = 
   const result = Object.fromEntries(Object.entries(base).filter(([, value]) => value !== undefined));
 
   if (CODEX_BOUNDARIES.has(boundary)) {
-    const role = boundary === "agent" ? undefined : CODEX_ROLE_KEYS[boundary];
+    const role = CODEX_ROLE_KEYS[boundary];
+    if (role === undefined) return Object.freeze(result);
     const source = (key) => environment?.[key] ?? inherited?.[key];
-    const apiKey = (role === undefined ? undefined : source(role.api_key))
-      ?? source("CODEX_API_KEY")
-      ?? source("SYMPHONY_CODEX_API_KEY");
-    const baseUrl = (role === undefined ? undefined : source(role.base_url))
-      ?? source("CODEX_BASE_URL")
-      ?? source("SYMPHONY_CODEX_BASE_URL");
+    const apiKey = source(role.api_key);
+    const baseUrl = source(role.base_url);
     if (apiKey !== undefined) result.CODEX_API_KEY = apiKey;
     if (baseUrl !== undefined) result.CODEX_BASE_URL = baseUrl;
     return Object.freeze(result);
@@ -144,8 +145,10 @@ export async function runLinearBoundary({ environment = process.env, inheritedEn
 }
 
 function resolveRoleConfiguration(environment, role) {
-  const prefix = role === "execute" ? "SYMPHONY_E2E_EXECUTE" : "SYMPHONY_E2E_AUDIT";
+  const prefix = `SYMPHONY_E2E_${role.toUpperCase()}`;
   return Object.freeze({
+    ...(environment[`${prefix}_AGENT`] === undefined
+      ? {} : { agent: environment[`${prefix}_AGENT`] }),
     ...(environment[`${prefix}_MODEL`] === undefined
       ? {} : { model: environment[`${prefix}_MODEL`] }),
     ...(environment[`${prefix}_REASONING_EFFORT`] === undefined
@@ -153,14 +156,15 @@ function resolveRoleConfiguration(environment, role) {
   });
 }
 
-export function resolveAgentBoundaryConfiguration(environment = {}) {
+export function resolveCodexBoundaryConfiguration(environment = {}) {
   return Object.freeze({
+    reconcile: resolveRoleConfiguration(environment, "reconcile"),
     execute: resolveRoleConfiguration(environment, "execute"),
     audit: resolveRoleConfiguration(environment, "audit"),
   });
 }
 
-async function launchAgentProbe({ role, configuration, environment }) {
+async function launchCodexProbe({ role, configuration, environment }) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), `symphony-${role}-boundary-`));
   try {
     await execute("git", ["init", "--quiet"], {
@@ -174,40 +178,41 @@ async function launchAgentProbe({ role, configuration, environment }) {
       environment,
       base_url: environment.CODEX_BASE_URL,
     }).launch({
-      agent: "codex",
+      agent: configuration.agent ?? "codex",
       ...configuration,
-      prompt: role === "execute"
-        ? "Return exactly: symphony-execute-boundary-ok"
-        : "Return exactly: symphony-audit-boundary-ok",
+      prompt: role === "reconcile"
+        ? "Return exactly: symphony-reconcile-boundary-ok"
+        : role === "execute" ? "Return exactly: symphony-execute-boundary-ok"
+          : "Return exactly: symphony-audit-boundary-ok",
       working_directory: temporary,
-      sandbox: role === "execute" ? "workspace_write" : "read_only",
-      ...(role === "audit" ? { final_response_path: responsePath } : {}),
+      sandbox: role === "reconcile" ? "no_workspace" : role === "execute" ? "workspace_write" : "read_only",
+      final_response_path: responsePath,
       timeout_ms: 120_000,
     });
     const succeeded = result.launch_status === "exited"
       && result.exit_code === 0
-      && (role === "execute" || result.final_response_ref === responsePath);
-    if (!succeeded) throw new Error("agent_boundary_failed");
+      && result.final_response_ref === responsePath;
+    if (!succeeded) throw new Error("codex_boundary_failed");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
-export async function runAgentBoundary({
+export async function runCodexBoundary({
   environment = process.env,
   inheritedEnvironment = process.env,
   probe,
 } = {}) {
-  const configuration = resolveAgentBoundaryConfiguration(environment);
-  return runRealBoundary("agent", {
+  const configuration = resolveCodexBoundaryConfiguration(environment);
+  return runRealBoundary("codex", {
     environment,
     inheritedEnvironment,
     operation: async () => {
       let firstError;
-      for (const role of ["execute", "audit"]) {
+      for (const role of ["reconcile", "execute", "audit"]) {
         const roleEnvironment = partitionBoundaryEnvironment(environment, role, inheritedEnvironment);
         try {
-          await (probe ?? launchAgentProbe)({
+          await (probe ?? launchCodexProbe)({
             role,
             configuration: configuration[role],
             environment: roleEnvironment,
@@ -245,7 +250,7 @@ export async function runPullRequestBoundary({ environment = process.env, inheri
 export async function runIndividualBoundaries({ environment = process.env, inheritedEnvironment = process.env } = {}) {
   return Object.freeze(await Promise.all([
     runLinearBoundary({ environment, inheritedEnvironment }),
-    runAgentBoundary({ environment, inheritedEnvironment }),
+    runCodexBoundary({ environment, inheritedEnvironment }),
     runGitBoundary({ environment, inheritedEnvironment }),
     runPullRequestBoundary({ environment, inheritedEnvironment }),
   ]));

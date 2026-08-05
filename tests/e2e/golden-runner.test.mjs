@@ -19,7 +19,7 @@ import {
   goldenConductorFailureReason,
   preserveGoldenFailureContext,
   partitionGoldenEnvironment,
-  resolveGoldenAgentConfiguration,
+  resolveGoldenRoleConfiguration,
   resolveGoldenLaunchArguments,
   runGoldenScenario,
 } from "./golden-runner.mjs";
@@ -61,30 +61,42 @@ test("golden preserves a post-Conductor verification error in existing process c
   assert.equal(preserveGoldenFailureContext(context, new Error("later")), context);
 });
 
-test("golden leaves both roles on local Codex configuration when unset", () => {
-  assert.deepEqual(resolveGoldenAgentConfiguration({}), {
+test("golden leaves all roles on local Codex configuration when unset", () => {
+  assert.deepEqual(resolveGoldenRoleConfiguration({}), {
+    reconcile: {},
     execute: {},
     audit: {},
   });
 });
 
-test("golden resolves independent Execute and Audit model pairs", () => {
-  assert.deepEqual(resolveGoldenAgentConfiguration({
+test("golden resolves independent Reconcile, Execute, and Audit configuration", () => {
+  assert.deepEqual(resolveGoldenRoleConfiguration({
+    SYMPHONY_GOLDEN_RECONCILE_AGENT: "codex",
+    SYMPHONY_GOLDEN_RECONCILE_MODEL: "reconcile-model",
+    SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT: "medium",
+    SYMPHONY_GOLDEN_EXECUTE_AGENT: "codex",
     SYMPHONY_GOLDEN_EXECUTE_MODEL: "execute-model",
     SYMPHONY_GOLDEN_EXECUTE_REASONING_EFFORT: "high",
+    SYMPHONY_GOLDEN_AUDIT_AGENT: "codex",
     SYMPHONY_GOLDEN_AUDIT_MODEL: "audit-model",
     SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT: "xhigh",
   }), {
-    execute: { model: "execute-model", reasoning_effort: "high" },
-    audit: { model: "audit-model", reasoning_effort: "xhigh" },
+    reconcile: { agent: "codex", model: "reconcile-model", reasoning_effort: "medium" },
+    execute: { agent: "codex", model: "execute-model", reasoning_effort: "high" },
+    audit: { agent: "codex", model: "audit-model", reasoning_effort: "xhigh" },
   });
 });
 
-test("golden launch omits --agent and only forwards configured role options", () => {
+test("golden launch omits generic --agent and forwards role options independently", () => {
   const args = resolveGoldenLaunchArguments({
     environment: {
+      SYMPHONY_GOLDEN_RECONCILE_AGENT: "codex",
+      SYMPHONY_GOLDEN_RECONCILE_MODEL: "reconcile-model",
+      SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT: "medium",
+      SYMPHONY_GOLDEN_EXECUTE_AGENT: "codex",
       SYMPHONY_GOLDEN_EXECUTE_MODEL: "execute-model",
       SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT: "xhigh",
+      SYMPHONY_GOLDEN_AUDIT_AGENT: "codex",
       SYMPHONY_GOLDEN_MAX_CYCLES: "3",
     },
     root: "ENG-1",
@@ -97,25 +109,38 @@ test("golden launch omits --agent and only forwards configured role options", ()
     "--workspace", "/tmp/root-workspace",
     "--dir", "/tmp/root-run",
     "--max-cycles", "3",
+    "--reconcile-agent", "codex",
+    "--reconcile-model", "reconcile-model",
+    "--reconcile-reasoning-effort", "medium",
+    "--execute-agent", "codex",
     "--execute-model", "execute-model",
+    "--audit-agent", "codex",
     "--audit-reasoning-effort", "xhigh",
   ]);
   assert.equal(args.includes("--agent"), false);
 });
 
-test("golden forwards role credentials and Codex fallbacks without fixture secrets", () => {
+test("golden forwards only role credentials without fixture or generic secrets", () => {
   const environment = partitionGoldenEnvironment({
+    SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret-never-output",
+    SYMPHONY_RECONCILE_CODEX_BASE_URL: "https://reconcile.example.test/v1",
     SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret-never-output",
     SYMPHONY_EXECUTE_CODEX_BASE_URL: "https://execute.example.test/v1",
     SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret-never-output",
     SYMPHONY_AUDIT_CODEX_BASE_URL: "https://audit.example.test/v1",
+    CODEX_API_KEY: "generic-secret-must-not-forward",
+    CODEX_BASE_URL: "https://generic.example.test/v1",
     SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "fixture-secret-never-output",
     SYMPHONY_E2E_PROJECT_SLUG_ID: "fixture-project",
   }, { PATH: "/usr/bin", HOME: "/tmp/home" });
+  assert.equal(environment.SYMPHONY_RECONCILE_CODEX_API_KEY, "reconcile-secret-never-output");
+  assert.equal(environment.SYMPHONY_RECONCILE_CODEX_BASE_URL, "https://reconcile.example.test/v1");
   assert.equal(environment.SYMPHONY_EXECUTE_CODEX_API_KEY, "execute-secret-never-output");
   assert.equal(environment.SYMPHONY_EXECUTE_CODEX_BASE_URL, "https://execute.example.test/v1");
   assert.equal(environment.SYMPHONY_AUDIT_CODEX_API_KEY, "audit-secret-never-output");
   assert.equal(environment.SYMPHONY_AUDIT_CODEX_BASE_URL, "https://audit.example.test/v1");
+  assert.equal(environment.CODEX_API_KEY, undefined);
+  assert.equal(environment.CODEX_BASE_URL, undefined);
   assert.equal(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
   assert.equal(environment.SYMPHONY_E2E_PROJECT_SLUG_ID, undefined);
 });
@@ -137,7 +162,7 @@ test("golden runner reports blocked when product credentials are present but fix
     environment: {
       SYMPHONY_RUN_GOLDEN: "1",
       LINEAR_API_KEY: "product-linear-token",
-      CODEX_API_KEY: "product-codex-token",
+      SYMPHONY_EXECUTE_CODEX_API_KEY: "product-execute-codex-token",
     },
     operation: async () => "must not run",
   });

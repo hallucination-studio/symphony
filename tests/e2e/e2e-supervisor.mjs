@@ -27,7 +27,9 @@ export function partitionEnvironment(environment, inherited = process.env) {
   return Object.freeze({
     testEnvironment: Object.freeze({ ...base }),
     linearEnvironment: partitionBoundaryEnvironment(environment, "linear", inherited),
-    agentEnvironment: partitionBoundaryEnvironment(environment, "agent", inherited),
+    reconcileEnvironment: partitionBoundaryEnvironment(environment, "reconcile", inherited),
+    executeEnvironment: partitionBoundaryEnvironment(environment, "execute", inherited),
+    auditEnvironment: partitionBoundaryEnvironment(environment, "audit", inherited),
     gitEnvironment: partitionBoundaryEnvironment({ ...inherited, ...environment }, "git", inherited),
     prEnvironment: partitionBoundaryEnvironment(environment, "pr", inherited),
   });

@@ -8,9 +8,13 @@ const valid = [
   "--linear-root", "ENG-1",
   "--workspace", "/tmp/root-workspace",
   "--dir", "/tmp/root-run",
-  "--agent", "codex",
+  "--reconcile-agent", "codex",
+  "--reconcile-model", "reconcile-model",
+  "--reconcile-reasoning-effort", "medium",
+  "--execute-agent", "codex",
   "--execute-model", "execute-model",
   "--execute-reasoning-effort", "high",
+  "--audit-agent", "codex",
   "--audit-model", "audit-model",
   "--audit-reasoning-effort", "xhigh",
   "--max-cycles", "2",
@@ -25,9 +29,13 @@ test("contract CLI smoke accepts the only public Root command", () => {
       linear_root: "ENG-1",
       workspace_path: "/tmp/root-workspace",
       run_directory: "/tmp/root-run",
-      agent: "codex",
+      reconcile_agent: "codex",
+      reconcile_model: "reconcile-model",
+      reconcile_reasoning_effort: "medium",
+      execute_agent: "codex",
       execute_model: "execute-model",
       execute_reasoning_effort: "high",
+      audit_agent: "codex",
       audit_model: "audit-model",
       audit_reasoning_effort: "xhigh",
       max_cycles: 2,
@@ -41,13 +49,14 @@ test("contract CLI smoke defaults to local Codex configuration", () => {
     "--dir", "/tmp/root-run", "--max-cycles", "2",
   ]).request, {
     linear_root: "ENG-1", workspace_path: "/tmp/root-workspace", run_directory: "/tmp/root-run",
-    agent: "codex", max_cycles: 2,
+    reconcile_agent: "codex", execute_agent: "codex", audit_agent: "codex", max_cycles: 2,
   });
 });
 
 test("contract CLI smoke rejects role-level and unknown commands", () => {
   assert.throws(() => runCliSmoke(["cycle", ...valid.slice(1)]), /invalid_public_command/u);
   assert.throws(() => runCliSmoke(["run", "--config", "/tmp/config"]), /unknown_public_option/u);
+  assert.throws(() => runCliSmoke(["run", ...valid.slice(1), "--agent", "codex"]), /unknown_public_option/u);
   assert.throws(() => runCliSmoke(valid.map((value) => value === "2" ? "0" : value)), /max_cycles_invalid/u);
 });
 
