@@ -291,7 +291,7 @@ PerformerLaunchRequest {
   reasoning_effort?,
   prompt,
   working_directory,
-  sandbox: no_workspace | read_only | workspace_write,
+  sandbox: no_workspace | read_only | workspace_write | danger_full_access,
   final_response_path?,
   diagnostic_jsonl_path?,
   diagnostic_stderr_path?,

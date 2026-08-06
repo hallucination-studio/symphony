@@ -91,7 +91,8 @@ function optionalBaseUrl(value: string | undefined): string | undefined {
   return value;
 }
 
-function sandboxArgument(sandbox: PerformerLaunchRequest["sandbox"]): "read-only" | "workspace-write" {
+function sandboxArgument(sandbox: PerformerLaunchRequest["sandbox"]): "read-only" | "workspace-write" | "danger-full-access" {
+  if (sandbox === "danger_full_access") return "danger-full-access";
   return sandbox === "workspace_write" ? "workspace-write" : "read-only";
 }
 

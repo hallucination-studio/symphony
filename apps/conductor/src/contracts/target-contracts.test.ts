@@ -344,6 +344,10 @@ test("Performer and Critic contracts keep process facts separate from semantic v
     timeout_ms: 120_000,
   });
   assert.equal(launch.sandbox, "workspace_write");
+  assert.equal(parsePerformerLaunchRequest({
+    ...launch,
+    sandbox: "danger_full_access",
+  }).sandbox, "danger_full_access");
   assert.ok(Object.isFrozen(launch));
   assert.throws(() => parsePerformerLaunchRequest({
     ...launch,

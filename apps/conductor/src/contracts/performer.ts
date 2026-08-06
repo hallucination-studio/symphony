@@ -16,7 +16,7 @@ import {
   type MarkdownText,
 } from "./validation.js";
 
-export const PERFORMER_SANDBOXES = ["no_workspace", "read_only", "workspace_write"] as const;
+export const PERFORMER_SANDBOXES = ["no_workspace", "read_only", "workspace_write", "danger_full_access"] as const;
 export type PerformerSandbox = typeof PERFORMER_SANDBOXES[number];
 
 export const PERFORMER_LAUNCH_STATUSES = [

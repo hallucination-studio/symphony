@@ -126,6 +126,16 @@ test("no_workspace uses a read-only Codex sandbox and skips Git repository disco
   assert.equal(fake.calls[0]?.args.some((value) => value.startsWith("openai_base_url=")), false);
 });
 
+test("danger_full_access maps mechanically to the Codex Git-capable sandbox", async () => {
+  const fake = fakeSpawn((child) => {
+    child.input.once("finish", () => child.close(0));
+  });
+  const performer = new CodexCliPerformer({ spawn: fake.spawn });
+  await performer.launch(request({ sandbox: "danger_full_access" }));
+  assert.equal(fake.calls[0]?.args.includes("danger-full-access"), true);
+  assert.equal(fake.calls[0]?.args.includes("workspace-write"), false);
+});
+
 test("omitted model and reasoning use the local Codex configuration", async () => {
   const fake = fakeSpawn((child, args) => {
     assert.equal(args.includes("--model"), false);

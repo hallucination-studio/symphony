@@ -96,7 +96,7 @@ test("Prepare delegates the exact preferred worktree binding to Root Reconcile",
 
   const workspace = await reconciler.prepare(world.request.root, preferred);
   assert.deepEqual(workspace, { workspace_path: preferred, run_directory: world.runDirectory, root_branch: "root/ENG-1" });
-  assert.equal(launches[0]?.sandbox, "workspace_write");
+  assert.equal(launches[0]?.sandbox, "danger_full_access");
   assert.equal(launches[0]?.working_directory, process.cwd());
   assert.deepEqual(launches[0]?.additional_writable_directories, [path.dirname(preferred)]);
   assert.match(launches[0]?.prompt ?? "", /Prepare phase/u);
@@ -140,7 +140,7 @@ test("returns one Cycle draft from Root-owned inputs without exposing workspace 
     report: cycleReport,
   });
   assert.equal(launches.length, 1);
-  assert.equal(launches[0]?.sandbox, "workspace_write");
+  assert.equal(launches[0]?.sandbox, "danger_full_access");
   assert.equal(launches[0]?.working_directory, world.workspace);
   assert.equal(launches[0]?.diagnostic_jsonl_path?.startsWith(world.runDirectory), true);
   assert.equal(launches[0]?.diagnostic_stderr_path?.startsWith(world.runDirectory), true);

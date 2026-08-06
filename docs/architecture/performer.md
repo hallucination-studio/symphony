@@ -18,7 +18,7 @@ PerformerLaunchRequest {
   reasoning_effort?,
   prompt,
   working_directory,
-  sandbox: no_workspace | read_only | workspace_write,
+  sandbox: no_workspace | read_only | workspace_write | danger_full_access,
   final_response_path?,
   diagnostic_jsonl_path?,
   diagnostic_stderr_path?,
@@ -105,20 +105,21 @@ prefix and does not traverse `cause`.
 ## Session and permission topology
 
 ```mermaid
-%% source-rules: PF-SESSION-001 PF-SESSION-002 PF-SESSION-003 PF-PERM-001 PF-PERM-002
+%% source-rules: PF-SESSION-001 PF-SESSION-002 PF-SESSION-003 PF-PERM-001 PF-PERM-002 PF-PERM-003
 flowchart LR
-  RR[Root Reconciler] -->|no-workspace launch request| P1[Fresh process]
+  RR[Root Reconciler] -->|Git-capable full-access request| P1[Fresh process]
   CR[Cycle Runner] -->|workspace-write Artist request| P2[Fresh process]
   CR -->|read-only Critic request| P3[Fresh process]
 ```
 
 | Rule | Caller role | Session | Workspace sandbox | Excluded context |
 |---|---|---|---|---|
-| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the independent Reconcile role configuration | no workspace mount or tools | workspace facts and Artist/Critic transcripts |
+| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the independent Reconcile role configuration | danger-full-access for Prepare and final Git/`gh` delivery | Artist transcript and Cycle child DAG |
 | `PF-SESSION-002` | Artist | one fresh process per Cycle | workspace-write | Reconcile transcript, prior Cycle transcripts, and Critic history |
 | `PF-SESSION-003` | Critic | a distinct fresh process after Artist terminates | read-only | Artist transcript, hidden state, and prior Critic history |
 | `PF-PERM-001` | every process | only the configured workspace and role sandbox | supplied by the caller, not inferred by Performer | Linear capability |
 | `PF-PERM-002` | every process | no secrets by default | explicit allowlist only when the frozen task boundary requires it | `.env*`, keychains, tokens, credential stores |
+| `PF-PERM-003` | Root Reconcile only | Prepare and Delivery | danger-full-access permits worktrees, Git metadata, push, and `gh` within the role prompt | never granted to Artist or Critic |
 
 Performer does not enforce workflow order. Conductor and Cycle Runner ensure that
 Critic starts only after Artist is terminal and that a failed Artist still gets

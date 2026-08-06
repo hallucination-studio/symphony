@@ -38,11 +38,11 @@ the stable allocation is the persisted Root ID, preferred path, and run director
 
 | Role and phase | Access | Constraint |
 |---|---|---|
-| Root Reconcile Prepare | workspace-write | prepare or adopt the binding only; do not implement the task |
-| Root Reconcile Cycle decision | workspace-write process, reviewed-state authority | do not replace Critic judgment with self-inspection |
+| Root Reconcile Prepare | full local process access | use the authority only for worktree/branch preparation; do not implement the task |
+| Root Reconcile Cycle decision | full local process access, reviewed-state authority | use Git/`gh` only for final delivery; do not replace Critic judgment with self-inspection |
 | Artist | workspace-write | implement only the frozen Cycle |
 | Critic | read-only | inspect the full current workspace independently |
-| Root Reconcile Delivery | workspace-write | create the best available structured Delivery |
+| Root Reconcile Delivery | full local process access | create the best available structured Delivery |
 
 Artist failed attempts still proceed to Critic; partial changes and residual effects
 are independently inspected. Artist Markdown remains display-only and
