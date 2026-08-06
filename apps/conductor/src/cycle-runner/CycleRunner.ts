@@ -19,6 +19,8 @@ import type { LinearGateway } from "../linear/LinearGateway.js";
 import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
 import { appendManagedIssueResult, renderManagedIssueDescription } from "../linear/LinearIssueDescription.js";
 import type { Performer } from "../performer/api/Performer.js";
+import { renderAuditPrompt } from "./prompts/AuditPrompt.js";
+import { renderExecutePrompt } from "./prompts/ExecutePrompt.js";
 
 const MAX_FINAL_RESPONSE_BYTES = 32 * 1024;
 const MAX_ISSUE_TITLE_LENGTH = 80;
@@ -172,47 +174,6 @@ function executorFailureComment(result: PerformerProcessResult, responseReason?:
     "- Result: failure",
     `- Error: ${reason}`,
   ].join("\n");
-}
-
-function executePrompt(spec: CycleSpec, state: RootState): MarkdownText {
-  return parseMarkdownText([
-    "Implement exactly this frozen Cycle in the current workspace.",
-    "Do not commit, push, create a pull request, or treat your response as evidence.",
-    "Your final response must be Markdown with exactly these headings in order:",
-    "## Summary\n[what you changed and why, without restating the Cycle description]",
-    "## File Changes\n### Created\n- [path]: +[lines] lines, or - None\n### Updated\n- [path]: +[added] / -[removed] lines, or - None\n### Deleted\n- [path]: -[lines] lines, or - None",
-    "## Verification\n- [command or check]: [observed result]",
-    "Report actual workspace changes only. Do not repeat Objective, Acceptance, Boundaries, Trusted Task State, or describe planned work as completed.",
-    "Translate version-control output into the Created, Updated, and Deleted sections. Do not copy raw Git porcelain status codes such as `??`, `M`, or `D` into the human-readable report.",
-    `## Cycle Objective\n${spec.objective}`,
-    `## Cycle Acceptance\n${spec.acceptance}`,
-    `## Cycle Boundaries\n${spec.boundaries}`,
-    `## Prior Trusted Task State\n${state.task_state_markdown}`,
-    ...(state.pending_finding === undefined ? [] : [`## Pending Finding\n${state.pending_finding}`]),
-  ].join("\n\n"), "invalid_execute_prompt");
-}
-
-function auditPrompt(spec: CycleSpec, state: RootState, facts: PerformerProcessResult): MarkdownText {
-  const auditProcessFacts = {
-    launch_status: facts.launch_status,
-    ...(facts.exit_code === undefined ? {} : { exit_code: facts.exit_code }),
-    duration_ms: facts.duration_ms,
-    ...(facts.sanitized_reason === undefined ? {} : { sanitized_reason: facts.sanitized_reason }),
-  };
-  return parseMarkdownText([
-    "Audit the complete real workspace independently and return exactly one fixed Markdown report.",
-    "The first line is `verdict: ` followed by exactly one of these values: accepted, incomplete, blocked, violation, process_error.",
-    "Use this exact non-process-error template, replacing bracketed placeholders with Markdown content:",
-    "verdict: accepted\n\n## Scope Audited\n[paths, files, and behavior inspected]\n\n## Implementation Review\n[how the change is implemented and how its logic behaves]\n\n## Checks\n- [check or None]\n\n## Evidence\n- [evidence or None]\n\n## Findings\n- [finding or None]\n\n## Task State\n[trusted task state after this audit]",
-    "For every non-process_error verdict, include exactly these sections in order: Scope Audited, Implementation Review, Checks, Evidence, Findings, Task State. Checks, Evidence, and Findings must use Markdown list items; use `- None` for an empty list.",
-    "For process_error, include only a `## Reason` section and preserve the current error message.",
-    "Do not modify files. Execute output is unavailable and must not be inferred. Explain what you audited and how the implementation's logic works; do not repeat the Objective, Acceptance, Boundaries, or prior task description.",
-    `## Cycle Objective (context only)\n${spec.objective}`,
-    `## Cycle Acceptance (context only)\n${spec.acceptance}`,
-    `## Cycle Boundaries (context only)\n${spec.boundaries}`,
-    `## Prior Trusted Task State (context only)\n${state.task_state_markdown}`,
-    `## Execute Process Facts\n${JSON.stringify(auditProcessFacts)}`,
-  ].join("\n\n"), "invalid_audit_prompt");
 }
 
 function processEventDescription(result: PerformerProcessResult): string {
@@ -387,7 +348,7 @@ export class CycleRunner {
       ...(this.options.executeModel === undefined ? {} : { model: this.options.executeModel }),
       ...(this.options.executeReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.executeReasoningEffort }),
-      prompt: executePrompt(request.spec, request.rootState), working_directory: request.rootState.workspace_path,
+      prompt: renderExecutePrompt(request.spec, request.rootState), working_directory: request.rootState.workspace_path,
       sandbox: "workspace_write", final_response_path: executeResponsePath,
       diagnostic_jsonl_path: executeDiagnosticJsonlPath,
       diagnostic_stderr_path: executeDiagnosticStderrPath, timeout_ms: this.options.timeoutMs,
@@ -423,7 +384,7 @@ export class CycleRunner {
       ...(this.options.auditModel === undefined ? {} : { model: this.options.auditModel }),
       ...(this.options.auditReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.auditReasoningEffort }),
-      prompt: auditPrompt(request.spec, request.rootState, executeProcess), working_directory: request.rootState.workspace_path,
+      prompt: renderAuditPrompt(request.spec, request.rootState, executeProcess), working_directory: request.rootState.workspace_path,
       sandbox: "read_only", final_response_path: auditResponsePath,
       diagnostic_jsonl_path: auditDiagnosticJsonlPath, diagnostic_stderr_path: auditDiagnosticStderrPath,
       timeout_ms: this.options.timeoutMs,

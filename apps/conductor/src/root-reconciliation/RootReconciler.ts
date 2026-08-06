@@ -10,8 +10,8 @@ import {
   type RootReconcileDecision,
   type RootReconcileRequest,
 } from "../contracts/root.js";
-import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js";
 import type { Performer } from "../performer/api/Performer.js";
+import { renderRootReconcilePrompt } from "./RootReconcilePrompt.js";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_VISIBLE_REASON_LENGTH = 50;
@@ -23,40 +23,6 @@ export interface RootReconcilerOptions {
   readonly reconcileModel?: string;
   readonly reconcileReasoningEffort?: string;
   readonly timeoutMs: number;
-}
-
-function renderPrompt(request: RootReconcileRequest): MarkdownText {
-  const sections = [
-    "You are the Root Manager. Choose exactly one smallest observable next step.",
-    "Use only the inputs below. You have no workspace access and must not claim workspace facts.",
-    "Return exactly one of these control-header and h2-section skeletons, replacing bracketed text with Markdown content:",
-    "decision: cycle\n\n## Objective\n[objective]\n\n## Acceptance\n[acceptance]\n\n## Boundaries\n[boundaries]\n\n## Report\n[report]",
-    "decision: complete\n\n## Summary\n[summary]\n\n## Report\n[report]",
-    "decision: needs_human\n\n## Reason\n[reason]\n\n## Question\n[optional question; omit this entire section when unnecessary]\n\n## Report\n[report]",
-    "Every decision must include one ## Report section. Inside it use exactly these h3 sections in order: cycle = Why Continue, Evidence, Next Cycle; complete = Overview, File Changes, Line Changes, Verification, Token Usage; needs_human = Reason, Question, Next Step.",
-    "For complete reports, use the supplied mechanical Worktree Summary exactly for File Changes and Line Changes. Conductor will replace those sections with the trusted facts and will fill Token Usage; do not invent paths, line counts, or token totals.",
-    "A Cycle must be achievable by one Execute session and independently checkable by one read-only Audit.",
-    "Do not choose an executor, omit new comments, request a second role, or publish a pull request.",
-    `## Root Title\n${request.root.title}`,
-    `## Root Description\n${request.root.description}`,
-    `## Trusted Task State\n${request.root_state.task_state_markdown}`,
-    `## Worktree Summary (trusted mechanical facts)\n${JSON.stringify(request.worktree_summary, null, 2)}`,
-  ];
-  if (request.root_state.latest_audit !== undefined) {
-    sections.push(`## Latest Audit Result\n${JSON.stringify(request.root_state.latest_audit, null, 2)}`);
-  }
-  if (request.root_state.pending_finding !== undefined) {
-    sections.push(`## Pending Finding\n${request.root_state.pending_finding}`);
-  }
-  if (request.root_state.harness_feedback !== undefined) {
-    sections.push(`## Harness Feedback\n${request.root_state.harness_feedback}`);
-  }
-  sections.push("## New Root Comments");
-  if (request.new_root_comments.length === 0) sections.push("None.");
-  else for (const comment of request.new_root_comments) {
-    sections.push(`### ${comment.id}\n${comment.body}`);
-  }
-  return parseMarkdownText(sections.join("\n\n"), "invalid_root_reconcile_prompt");
 }
 
 function parseSections(source: string): RootReconcileDecision {
@@ -157,7 +123,7 @@ export class RootReconciler {
       ...(this.options.reconcileModel === undefined ? {} : { model: this.options.reconcileModel }),
       ...(this.options.reconcileReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.reconcileReasoningEffort }),
-      prompt: renderPrompt(request),
+      prompt: renderRootReconcilePrompt(request),
       working_directory: noWorkspaceDirectory,
       sandbox: "no_workspace",
       final_response_path: finalResponsePath,

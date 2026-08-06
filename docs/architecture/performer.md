@@ -128,8 +128,9 @@ an Audit attempt.
 
 | Concern | Owner |
 |---|---|
-| Reconcile prompt and decision schema | Root Reconciler |
-| Execute and Audit prompts | Cycle Runner |
+| Reconcile prompt and decision schema | dedicated Root Reconcile Prompt module and Root Reconciler |
+| Execute prompt | dedicated Execute Prompt module called by Cycle Runner |
+| Audit prompt | dedicated Audit Prompt module called by Cycle Runner |
 | Cycle result interpretation | Cycle Runner |
 | trusted Root State promotion | Conductor's fixed `accepted`-Audit update |
 | Linear Issue, exact role-description/Root-description/Cycle-comment projections, and typed Audit JSON file projection | private rendering helpers behind Linear Gateway calls |
@@ -144,8 +145,9 @@ per-Cycle routing, plugin discovery, registry, compatibility alias, or
 cross-role transcript.
 
 Performer never constructs, truncates, repairs, or interprets a prompt. Root
-Reconciler owns the Manager prompt; Cycle Runner owns the frozen Execute and
-Audit prompts and their bounded context selection.
+Reconcile, Execute, and Audit each have a dedicated role Prompt module. Root
+Reconciler and Cycle Runner supply those modules' bounded inputs and remain the
+only callers that launch the resulting prompts.
 
 Complete trajectories are outside the semantic architecture. Raw bounded Agent
 streams may be retained only as the private local diagnostic evidence described

@@ -186,13 +186,21 @@ transcript, or trajectory. Bounded Execute process facts may explain that work
 was interrupted, but they are not correctness evidence. Raw Agent JSONL and
 stderr, when diagnostic paths are supplied, remain private local evidence only.
 
-Cycle Runner renders both role prompts from the same frozen inputs captured at
-family creation: Root title and immutable requirement section, task state, optional pending finding,
-Harness feedback, and the Cycle contract. Execute receives no Reconcile
-transcript. Audit receives those same frozen inputs plus bounded mechanical
-Execute process facts, but no Execute response or transcript. It always checks
-the complete workspace diff for boundary violations as well as the Cycle
-acceptance criteria; its real inspection is the sole semantic authority.
+Cycle Runner delegates Prompt construction to separate Execute and Audit Prompt
+modules. They share the frozen Cycle contract and prior trusted task state, but
+not role instructions. Execute additionally receives the optional pending
+finding. Audit receives bounded mechanical Execute process facts instead; it
+receives no Execute response or transcript. Neither role receives the Root
+title/description, Root comments, Harness feedback, Reconcile transcript, or
+child history. Audit always checks the complete workspace diff for boundary
+violations as well as the Cycle acceptance criteria; its real inspection is the
+sole semantic authority.
+
+Each role Prompt places identity, permissions, and authority rules before named,
+escaped runtime-data blocks, and places its exact response contract last. A
+runtime block cannot redefine the role or forge its own matching end marker.
+The two role modules may reuse only the mechanical block renderer; they do not
+share semantic Prompt text.
 
 For each role launch, Conductor supplies private
 `diagnostic_jsonl_path`/`diagnostic_stderr_path` values under the external run
@@ -235,7 +243,6 @@ comment or local phase.
 
 ```text
 fixed Executor instructions
-+ Root title and immutable requirement section
 + task_state_markdown and optional pending_finding at family creation
 + frozen CycleSpec
 + write the final Markdown response to `cycle-NNN-executor-result.md` as the last response
@@ -253,7 +260,7 @@ comments, or Audit history.
 
 ```text
 fixed Auditor instructions
-+ the same frozen Root/task-state/finding background
++ prior task_state_markdown
 + frozen CycleSpec
 + bounded Execute process facts
 + read-only access to the real Root workspace

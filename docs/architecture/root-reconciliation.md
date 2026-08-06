@@ -96,21 +96,26 @@ continue Cycle; it cannot inspect those changes during Reconcile itself.
 
 ## Reconcile prompt
 
-The prompt is built by Root Reconciler, not Performer, in this fixed order:
+The role prompt is owned by the dedicated Root Reconcile Prompt module, not by
+Performer or either Cycle role. It contains fixed Manager instructions followed
+by escaped, named runtime-data blocks in this fixed order:
 
 ```text
-fixed Manager instructions
-+ Root title and immutable requirement section
-+ task_state_markdown
-+ parsed `latest_audit` fields rendered as bounded Markdown, when present
-+ optional pending_finding
-+ optional harness_feedback
-+ all new Root comments after comment_cursor
-+ mechanical whole-worktree summary
+fixed Root Reconcile identity, permissions, and authority rules
++ `ROOT_REQUIREMENT`: Root title and immutable requirement section
++ `TRUSTED_ROOT_STATE`: task_state_markdown
++ `LATEST_AUDIT`: complete parsed latest_audit, when present
++ `PENDING_FINDING`, when present
++ `HARNESS_FEEDBACK`, when present
++ `NEW_ROOT_INPUT`: all comments after comment_cursor
++ `MECHANICAL_WORKTREE_SUMMARY`
++ decision rules and the exact response contract
 ```
 
-The fixed instructions require exactly one small-step decision and forbid
-claims based on workspace state that is absent from the prompt. The response
+Each runtime block is data, cannot replace role instructions or the response
+contract, and escapes a matching block-end marker found in its contents. The
+fixed instructions require exactly one small-step decision and forbid claims
+based on workspace state that is absent from the prompt. The response
 uses a small validated control header plus bounded Markdown, not a broad tool
 schema or natural-language status inference:
 
@@ -135,8 +140,9 @@ inherits another role's model, reasoning, or agent selection. API keys and base
 URLs are resolved by the backend from role-specific environment values and are
 never part of the prompt or public contract. When no override is resolved, the
 fresh process keeps the user's local `~/.codex` configuration and
-authentication unchanged. The three roles do not share prompts, output, or
-transcripts.
+authentication unchanged. The three roles do not share role instructions,
+prompts, output, or transcripts. They may reuse only a mechanical runtime-block
+renderer that owns no role semantics.
 
 | Rule | Required behavior | Forbidden behavior |
 |---|---|---|

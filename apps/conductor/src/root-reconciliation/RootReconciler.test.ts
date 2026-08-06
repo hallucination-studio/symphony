@@ -147,7 +147,7 @@ test("includes the complete latest Audit in the prompt without child DAG content
 
     await reconciler.reconcile(request);
     const prompt = launches[0]?.prompt ?? "";
-    assert.equal(prompt.includes(`## Latest Audit Result\n${JSON.stringify(latest_audit, null, 2)}`), true);
+    assert.equal(prompt.includes(`<<< BEGIN LATEST_AUDIT >>>\n${JSON.stringify(latest_audit, null, 2)}`), true);
     assert.equal(prompt.includes("Cycle DAG"), false);
     assert.equal(prompt.includes("## Execute"), false);
     assert.equal(prompt.includes("cycle-child-secret"), false);

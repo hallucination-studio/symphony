@@ -158,9 +158,9 @@ test("creates exact family and trusts only a fresh Audit", async () => {
   assert.equal(launches[1]?.prompt.includes("Parser behavior is verified"), false);
   assert.match(launches[0]?.prompt ?? "", /final response.*Markdown/iu);
   assert.match(launches[0]?.prompt ?? "", /## Summary[\s\S]*## File Changes[\s\S]*## Verification/u);
-  assert.match(launches[0]?.prompt ?? "", /Do not copy raw Git porcelain status codes such as `\?\?`, `M`, or `D`/u);
+  assert.match(launches[0]?.prompt ?? "", /Never copy raw porcelain markers such as `\?\?`, `M`, or `D`/u);
   assert.doesNotMatch(launches[0]?.prompt ?? "", /## Objective\n|## Acceptance\n|## Boundaries\n|## Trusted Task State\n/u);
-  assert.match(launches[1]?.prompt ?? "", /first line is `verdict: ` followed by exactly one/u);
+  assert.match(launches[1]?.prompt ?? "", /first line is `verdict: ` followed by accepted, incomplete, blocked, violation, or process_error/u);
   assert.match(launches[1]?.prompt ?? "", /## Scope Audited[\s\S]*## Implementation Review[\s\S]*## Checks/u);
   assert.doesNotMatch(launches[1]?.prompt ?? "", /## Summary\n/u);
   const descendants = await fixture.gateway.list_unfinished_descendants("root-id");
