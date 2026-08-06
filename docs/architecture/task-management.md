@@ -46,6 +46,7 @@ LinearGateway {
   update_issue_status(issue_id, status_id) -> void
   update_issue_description(issue_id, body) -> void
   create_comment(issue_id, body) -> LinearComment
+  create_comment_reaction(comment_id, emoji) -> LinearReaction
   upload_file(filename, content_type: "application/json", contents: Uint8Array) -> LinearUploadedFile
 }
 ```
@@ -76,11 +77,11 @@ Cycle descriptions.
 |---|---|
 | Root identifier such as `TEAM-123` | one exact existing Root and its team |
 | Root UUID | the same normalized Root shape |
-| Root team | five canonical statuses: `Todo`/`unstarted`, `In Progress`/`started`, `In Review`/`started`, `Done`/`completed`, `Canceled`/`canceled` |
+| Root team | six canonical Root statuses: `Todo`/`unstarted`, `In Progress`/`started`, `In Review`/`started`, `Needs Human`/`started`, `Done`/`completed`, `Canceled`/`canceled` |
 | Root description | zero or one canonical Harness-managed snapshot suffix |
 
 The caller provides no team or workflow-state IDs. The Gateway reads the Root's
-team and resolves the five canonical statuses by exact name and expected type;
+team and resolves the six canonical statuses by exact name and expected type;
 the resulting provider IDs stay inside Conductor's projection boundary. It does
 not use type uniqueness, list order, fuzzy names, or provider defaults to assign
 meaning.
@@ -98,8 +99,8 @@ Startup handles each canonical name/type pair as follows:
 Any other user-defined state is ignored completely. Symphony never edits or
 deletes those state definitions, never treats another `started` state as
 `In Progress` or `In Review`, and never copies their names into public
-contracts. The five canonical states are shared by Root, Cycle, Artist, and
-Critic. Startup performs this team-level workflow-contract check even when the
+contracts. Descendants use the five-state subset without `Needs Human`. Startup
+performs this team-level workflow-contract check even when the
 Root is already `Done`; creating a missing canonical state does not mutate the
 Root or any descendant. An Issue already on the exact canonical `Done` state is
 a terminal no-op and is not normalized through another same-named state.
@@ -123,7 +124,7 @@ state machine. Because both canonical active states have provider type
 | append results | append each exact role Markdown once to its own Issue description; write exactly one Cycle creation rationale and one terminal result; errors show the current message's first 50 characters |
 | attach results | serialize the Critique artifact once as `cycle-NNN-critique-result.json`, write and upload the same bytes as `application/json`; record its returned URL or current upload error |
 | finish role or Cycle | append its bounded result, then set Artist, Critic, or Cycle to canonical `Done` |
-| project Root decision | active Cycle -> `In Progress`; `complete`, `needs_human`, or escaped runtime failure -> `In Review`; recorded PR or pushed branch delivery -> `Done` |
+| project Root decision | active Cycle -> `In Progress`; `complete` or escaped runtime failure -> `In Review`; structured `needs_human` -> `Needs Human`; recorded Delivery -> `Done` |
 | project Root Reconcile result | place report and Delivery before Metadata; copy `create_cycle` once to Cycle; project trusted result facts; never feed it to Inbox |
 | update Root State | replace only the canonical Harness-managed Root description suffix |
 
@@ -159,8 +160,8 @@ Root State is the durable runtime checkpoint and contains only:
 - optional structured Delivery.
 
 If Root State is missing for a new Root, initialize it. If it is duplicated or
-malformed, stop as `NeedsHuman`; do not reconstruct it from descendants. If the
-saved workspace is missing, stop rather than creating a conflicting workspace.
+malformed, expose a runtime failure; do not reconstruct it from descendants. If
+the saved workspace is missing, stop rather than creating a conflicting one.
 
 ## Comment policy
 
@@ -170,8 +171,10 @@ saved workspace is missing, stop rather than creating a conflicting workspace.
 | comment carries Harness marker | operational output, never model input |
 | comment belongs to descendant | display-only, never fetched for Reconcile |
 | Cycle creation/result comment | exactly two append-only operator records; never model input |
-| selected new comment | cursor remains unchanged until complete Cycle family is recorded |
+| selected new comment | cursor remains unchanged until its Reconcile action and receipt are durably projected |
 | completion decision | perform one final after-cursor read before persisting Root Reconcile Delivery |
+| accepted `Needs Human` reply batch | add `white_check_mark` reaction to every batch comment before committing its cursor |
+| rejected `Needs Human` reply batch | add `x` reaction to every batch comment, commit its cursor, and create one new Harness question comment with the rejection reason |
 
 ## Failure policy
 
