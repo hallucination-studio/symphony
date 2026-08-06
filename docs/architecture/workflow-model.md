@@ -20,7 +20,7 @@ but must not define another transition for the same fact.
 | `WF-AUTH-007` | next step | one fresh Root Reconcile session over Root and Root State inputs | create one Cycle, recommend completion, or request human input |
 | `WF-AUTH-008` | terminal delivery success | one valid Root Reconcile Delivery: pull request, branch, or local files | only fact that allows Root `Done` |
 | `WF-AUTH-009` | real-state verification | fresh Critic against the Root workspace | Reconcile never substitutes workspace inspection or Artist claims |
-| `WF-AUTH-010` | visible workflow status | the five canonical Linear statuses resolved for the Root team | arbitrary user states, status-order inference, or hidden local state |
+| `WF-AUTH-010` | visible workflow status | six canonical Root statuses and the five-state descendant subset resolved for the Root team | arbitrary user states, status-order inference, or hidden local state |
 | `WF-AUTH-011` | latest critique checkpoint | newest verdict, task state, pending finding, and artifact URL in `RootState.latest_critique` | complete report, Cycle DAG, child comments, or reconstructed history |
 | `WF-AUTH-012` | human-readable Reconcile rationale | latest validated report in the managed Root suffix; `create_cycle` also copies it once to the new Cycle comment | hidden decisions, raw Git status text, or a second summarizer call |
 
@@ -52,7 +52,7 @@ content. A Reconcile completion decision includes a structured Delivery and is
 not Root completion until the final Inbox check and durable projection succeed.
 
 Every `create_cycle`, `complete`, and `needs_human` decision also contains a
-validated human report which Conductor copies to Root under a Harness marker.
+validated human report which Conductor projects into the managed Root suffix.
 Continue reports explain why, evidence, and the next Cycle. Completion reports
 cover the complete worktree's created/updated/deleted paths, insertion/deletion
 counts, verification, wall-clock run duration, and exact accumulated token usage in short form. The
@@ -99,15 +99,16 @@ visible provider/state error; it is not silently repaired from child Issues.
 
 ## Linear status plane
 
-Linear is the visible workflow plane. Root, Cycle, Artist, and Critic all use
-the same five canonical statuses; comments and Root State explain detail but do
-not replace an Issue status.
+Linear is the visible workflow plane. Root uses six canonical statuses. Cycle,
+Artist, and Critic use the five-state subset without `Needs Human`; comments and
+Root State explain detail but do not replace an Issue status.
 
 | Canonical name | Linear type | Normalized status |
 |---|---|---|
 | `Todo` | `unstarted` | `todo` |
 | `In Progress` | `started` | `in_progress` |
 | `In Review` | `started` | `in_review` |
+| `Needs Human` | `started` | `needs_human` |
 | `Done` | `completed` | `done` |
 | `Canceled` | `canceled` | `canceled` |
 
@@ -116,8 +117,9 @@ mutate an Issue. Their provider IDs are internal projection data, never caller
 inputs or CLI flags. Other team-defined states are ignored completely: the
 harness does not infer meaning from type uniqueness, list order, or a similar
 name, and never edits or deletes those state definitions.
-After Prepare, startup gates normalize it to `Todo` before the first fresh
-Reconcile; Prepare itself does not add another Linear status.
+After Prepare, a new Root remains `Todo` before the first fresh Reconcile.
+Startup never rewrites a resumed Root to `Todo` merely because a new process
+began.
 
 The following matrix is the only role-status transition model. Conductor
 performs each update at the named boundary, so Linear shows what is happening
@@ -125,7 +127,7 @@ without waiting for a comment or a local checkpoint.
 
 | Issue | Creation | Start or advance | Terminal transition |
 |---|---|---|---|
-| Root | `Todo` after Prepare | durable family -> `In Progress`; Critic checkpoint -> `In Review`; later decisions stay there | valid Delivery projection -> `Done` |
+| Root | `Todo` after Prepare | durable family -> `In Progress`; Critic checkpoint -> `In Review`; Reconcile question -> `Needs Human` | valid Delivery projection -> `Done` |
 | Cycle | `Todo` when created | recorded family sets `In Progress`; starting Critic sets `In Review` | a terminal Cycle result sets `Done` |
 | Artist | `Todo` when created | process launch sets `In Progress` | process return, timeout, interruption, or start failure sets `Done` |
 | Critic | `Todo` when created | Critic launch sets `In Review` | Critic report or process error sets `Done`; the report is exact Markdown |
@@ -184,10 +186,11 @@ one, Prepare adopts the invocation current checkout.
 | `WF-TR-007` | Critic | `In Review` | process returns or errors | `Done` | append exact Critic Markdown to the description when valid, expose current error message limited to 50 characters when invalid, then transition |
 | `WF-TR-008` | Cycle | `In Progress` or `In Review` | complete Critique resolves | `Done` | serialize typed JSON once, write/upload the same bytes, record its link/error, then finish Cycle and Root projection |
 | `WF-TR-009` | prior unfinished descendants | nonterminal | process starts | `Canceled` | mechanically cancel all before fresh Reconcile |
-| `WF-TR-010` | Root | `Todo` or `In Progress` | Reconcile recommends completion or needs human input | `In Review` | perform final Inbox check or record the human gate; do not mark Done yet |
+| `WF-TR-010` | Root | `Todo`, `In Progress`, or `In Review` | Reconcile returns one or more concrete human questions | `Needs Human` | create one Root question comment, advance past that Harness comment, and stop without occupying a slot |
 | `WF-TR-011` | Root Reconcile Delivery | absent | final Inbox is empty and trusted state supports completion | running | Root Reconcile creates the best available PR, branch, or files delivery |
 | `WF-TR-012` | Root | `In Review` | a valid Delivery is recorded in Root State and description | `Done` | stop successfully and retain local evidence |
 | `WF-TR-013` | Root | `Done` | later launch or poll | `Done` | after the team workflow-contract check, perform no Root-owned mutation; exit successfully |
+| `WF-TR-014` | Root | `Needs Human` | at least one non-Harness Root comment follows the latest Harness question comment | `Needs Human` | Podium may launch a normal candidate; status changes only after the fresh Reconcile decision |
 
 Terminal Issues are never reopened or rewritten.
 Remediation is always a new Cycle. Linear workflow status shows progress; the
@@ -249,7 +252,7 @@ Rows are evaluated in order and exactly one action runs at a time.
 | `WF-ROUTE-007` | completion recommendation and new Root input exists | discard completion recommendation and Reconcile again |
 | `WF-ROUTE-008` | completion decision, empty Inbox, no active Cycle | validate and persist Root Reconcile Delivery |
 | `WF-ROUTE-009` | active Cycle and new Root comments arrive | show pending; do not change the active Cycle |
-| `WF-ROUTE-010` | no actionable fact or human input required | record the reason and exit |
+| `WF-ROUTE-010` | Root is `Needs Human` and has no new Root input | exit without another question comment or retry |
 
 ## Failure policy
 
@@ -263,8 +266,8 @@ Rows are evaluated in order and exactly one action runs at a time.
 | `WF-FAIL-006` | Root Reconcile cannot produce any valid Delivery | leave Root `In Review` and retain workspace/evidence | Conductor retries Git, invents a location, or marks Root Done |
 | `WF-FAIL-007` | remote publication is unavailable | Root Reconcile may return an explicit files Delivery | require an empty commit or hide the local result |
 | `WF-FAIL-008` | unfinished descendants at startup | cancel all, warn of possible unreviewed workspace changes, then Reconcile | resume, review, parse, or synthesize their results |
-| `WF-FAIL-009` | maximum Cycle count reached | set Root State `NeedsHuman`, project Root `In Review`, and stop with the reason visible | create another Cycle or deliver |
-| `WF-FAIL-010` | saved workspace or run directory is missing, invalid, or mismatched | set Root State `NeedsHuman`, project Root `In Review`, and stop | create a replacement path or infer files from child Issues |
+| `WF-FAIL-009` | maximum Cycle count reached | expose a runtime failure and stop with Root `In Review` | invent a human question, create another Cycle, or deliver |
+| `WF-FAIL-010` | saved workspace or run directory is missing, invalid, or mismatched | expose a runtime failure and stop with Root `In Review` | invent a human question, create a replacement path, or infer files from child Issues |
 | `WF-FAIL-012` | any visible process or upload error | show only the current `error.message`, first 50 characters | walk causes, add prefixes or codes, publish raw context, or change the Critic verdict for an upload failure |
 | `WF-FAIL-013` | a runtime error escapes normal Cycle or decision handling | persist the bounded current message on Root, project Root `In Review`, then fail the process | leave Root `In Progress` or hide the visible failure |
 
@@ -280,10 +283,12 @@ PR failures do not enter a recovery state machine.
 | Rule | Step | Durable meaning |
 |---|---|---|
 | `WF-INBOX-001` | fetch comments newer than startup cursor | add eligible user comments to pending input |
-| `WF-INBOX-002` | Reconcile receives all comments after cursor | place every ID in candidate `CycleSpec`, or return `NeedsHuman`; never partially consume |
+| `WF-INBOX-002` | Reconcile receives all comments after cursor | treat them as one batch; never partially accept or reject the batch |
 | `WF-INBOX-003` | create Cycle, Artist, Critic and record their provider IDs locally | establish complete frozen family |
 | `WF-INBOX-004` | persist created `CycleSpec` with `consumed_comment_ids` | mark exactly those IDs consumed for this run |
 | `WF-INBOX-005` | Reconcile recommends completion | fetch once more before PR publication; any new input returns to Reconcile |
+| `WF-INBOX-006` | Reconcile accepts a reply batch | add one Symphony `white_check_mark` reaction to every comment, then commit the cursor with the chosen action |
+| `WF-INBOX-007` | Reconcile rejects a reply batch | add one Symphony `x` reaction to every comment, commit the cursor, and create one new Root question comment containing the rejection reason and concrete options |
 
 If family creation or local recording fails before `WF-INBOX-004`, comments
 remain pending and no Agent starts from the partial family.
@@ -329,7 +334,7 @@ Root/Cycle state machine or changes a Root's trusted state.
 | `WF-PODIUM-004` | operator stop is explicit and confirms the complete process tree exited | local Desktop process supervisor | scheduler never stops work merely because a higher-priority Root arrived |
 | `WF-PODIUM-005` | only Bindings and credentials persist | Desktop storage | assignment, paths, PID, and queue rebuild without a second Root checkpoint |
 | `WF-PODIUM-006` | scheduling is confined to one Desktop host | Podium Desktop process boundary | no cross-machine lease, distributed claim, or daemon IPC is part of this target |
-| `WF-PODIUM-007` | Podium does not schedule, render, or test Conductor `NeedsHuman` handling in this round | V2 scope boundary | existing V1 `NeedsHuman` behavior remains intact, with no new Podium UI, dispatch, or E2E path |
+| `WF-PODIUM-007` | a new Root reply follows the latest `Needs Human` question | Linear candidate discovery | use the ordinary queue; add no rank, label, priority mutation, or Resume command |
 | `WF-PODIUM-008` | Desktop owns the Linear authorization session for the built-in application and injects its token into each launch | Desktop credential store | tokens rest in one 0600 credentials file; Conductors hold no refresh tokens |
 | `WF-PODIUM-009` | cleanup is explicit; optional retention removes older completed workspaces | Desktop resources | never auto-delete active or undelivered workspaces |
 
@@ -337,3 +342,5 @@ The routing label is a visible operator label used by the Desktop binding; it is
 not a hidden Linear status or a second workflow authority. The Desktop has no
 Web surface in this target. A Conductor remains the only owner of Root
 Reconcile, Artist/Critic order, Root State promotion, and terminal delivery.
+Podium displays the Root status only; it does not render the question, replies,
+reactions, or another Linear detail surface.
