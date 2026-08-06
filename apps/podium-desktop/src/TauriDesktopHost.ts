@@ -98,6 +98,9 @@ export class TauriDesktopHost implements DesktopHost {
         case "connect_linear":
           await invoke("connect_linear");
           break;
+        case "cancel_linear_connect":
+          await invoke("cancel_linear_connect");
+          break;
         case "disconnect_linear":
           await invoke("disconnect_linear");
           break;

@@ -52,6 +52,7 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
     comments: [{
       id: "comment-1",
       issue_id: "root-id",
+      parent_id: null,
       body: "First input",
       creator_id: "user-id",
       created_at: "2026-08-05T00:00:00.000Z",
@@ -87,10 +88,29 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
 
   const comment = await gateway.create_comment(execute.id, "Process completed");
   assert.equal(comment.issue_id, execute.id);
+  assert.equal(comment.parent_id, null);
   assert.equal(
     (await gateway.list_root_comments_after(execute.id)).at(0)?.body,
     "Process completed",
   );
+
+  const reply = await gateway.create_comment_reply(execute.id, comment.id, "Use the existing parser boundary.");
+  assert.equal(reply.issue_id, execute.id);
+  assert.equal(reply.parent_id, comment.id);
+  assert.deepEqual((await gateway.list_root_comments_after(execute.id)).map(({ id }) => id), [comment.id]);
+  assert.deepEqual((await gateway.list_comment_replies_after(comment.id)).map(({ id }) => id), [reply.id]);
+  assert.deepEqual(await gateway.list_comment_replies_after(comment.id, reply.id), []);
+
+  assert.deepEqual(await gateway.create_comment_reaction(reply.id, "white_check_mark"), {
+    id: "fake-reaction-1",
+    reply_id: reply.id,
+    emoji: "white_check_mark",
+  });
+  assert.deepEqual(gateway.reactions, [{
+    id: "fake-reaction-1",
+    reply_id: reply.id,
+    emoji: "white_check_mark",
+  }]);
 });
 
 test("in-memory gateway fails closed for missing cursors", async () => {
@@ -112,6 +132,28 @@ test("in-memory gateway fails closed for missing cursors", async () => {
   });
 
   await assert.rejects(gateway.list_root_comments_after(root.id, "missing"), /linear_comment_cursor_not_found/u);
+  await assert.rejects(gateway.list_comment_replies_after("missing"), /linear_comment_not_found:missing/u);
+});
+
+test("in-memory gateway rejects flat reactions and nested replies", async () => {
+  const root = parseLinearIssue({
+    id: "root-id",
+    identifier: "ENG-1",
+    title: "Root",
+    description: "Original task",
+    url: "https://linear.app/acme/issue/ENG-1/root",
+    status: "active",
+    status_id: "state-active",
+    parent_id: null,
+    team_id: "team-id",
+    creator_id: "user-id",
+  });
+  const gateway = new InMemoryLinearGateway({ issues: [root] });
+  const opener = await gateway.create_comment(root.id, "Question");
+  await assert.rejects(
+    gateway.create_comment_reaction(opener.id, "x"),
+    /linear_comment_reaction_target_invalid/u,
+  );
 });
 
 test("in-memory gateway records uploaded files with defensive byte copies", async () => {
