@@ -21,10 +21,70 @@ function uploadContents(value) {
 }
 
 function requireStatus(value) {
-  if (!["todo", "in_progress", "in_review", "done", "canceled"].includes(value)) {
+  if (!["todo", "in_progress", "in_review", "needs_human", "done", "canceled"].includes(value)) {
     throw new Error("linear_status_invalid");
   }
   return value;
+}
+
+const LINEAR_REACTION_EMOJIS = ["white_check_mark", "x"];
+const ROOT_NEEDS_HUMAN_COMMENT_MARKER = "# Symphony Harness: Human Action";
+
+function requireReactionEmoji(value) {
+  if (!LINEAR_REACTION_EMOJIS.includes(value)) throw new Error("linear_comment_reaction_emoji_invalid");
+  return value;
+}
+
+function requireHumanQuestions(value) {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("linear_human_questions_invalid");
+  return value.map((question) => {
+    if (question === null || typeof question !== "object" || Array.isArray(question)) {
+      throw new Error("linear_human_question_invalid");
+    }
+    const options = question.options;
+    if (!Array.isArray(options) || options.length < 2 || options.length > 4) {
+      throw new Error("linear_human_options_invalid");
+    }
+    return {
+      question: requireText(question.question, "linear_human_question_invalid"),
+      options: options.map((option) => {
+        if (option === null || typeof option !== "object" || Array.isArray(option)) {
+          throw new Error("linear_human_option_invalid");
+        }
+        return {
+          key: requireText(option.key, "linear_human_option_invalid"),
+          label: requireText(option.label, "linear_human_option_invalid"),
+          consequence: requireText(option.consequence, "linear_human_option_invalid"),
+        };
+      }),
+    };
+  });
+}
+
+function needsHumanComment({ reason, questions }) {
+  const sections = questions.flatMap((question, index) => [
+    `### ${index + 1}. ${question.question}`,
+    "",
+    ...question.options.map((option) => (
+      `- **${option.key}. ${option.label}**: ${option.consequence}`
+    )),
+    "",
+  ]);
+  return [
+    ROOT_NEEDS_HUMAN_COMMENT_MARKER,
+    "",
+    "## Reason",
+    "",
+    reason,
+    "",
+    "## Questions",
+    "",
+    ...sections,
+  ].join("\n").trimEnd();
+}
+
+function isHarnessComment(body) {
+  return body.startsWith("# Symphony Harness:");
 }
 
 function pad(value, width = 2) {
@@ -52,6 +112,29 @@ function rootRequirement(description) {
 }
 
 function rootStateDescription(description, state) {
+  const decisions = Array.isArray(state.architecture_decisions)
+    ? state.architecture_decisions
+    : [];
+  const decisionLines = decisions.length === 0
+    ? ["## Architecture Decisions", "", "None recorded."]
+    : [
+      "## Architecture Decisions",
+      "",
+      ...decisions.flatMap((decision) => [
+        `## ${decision.id}`,
+        "",
+        `- id: ${decision.id}`,
+        `- title: ${decision.title}`,
+        `- decision: ${decision.decision}`,
+        `- rationale: ${decision.rationale}`,
+        "- consequences:",
+        ...decision.consequences.map((consequence) => `  - ${consequence}`),
+        `- source_action_comment_id: ${decision.source_action_comment_id}`,
+        `- source_reply_ids: [${decision.source_reply_ids.join(", ")}]`,
+        `- decided_at: ${decision.decided_at}`,
+        "",
+      ]),
+    ];
   return [
     rootRequirement(description),
     ROOT_DESCRIPTION_START,
@@ -62,6 +145,7 @@ function rootStateDescription(description, state) {
     "```json",
     JSON.stringify(state, null, 2),
     "```",
+    ...decisionLines,
     ROOT_DESCRIPTION_END,
   ].join("\n\n");
 }
@@ -73,11 +157,13 @@ function managedDescription(task, metadata) {
 export class LinearDriver {
   #root;
   #comments = [];
+  #reactions = [];
   #state;
   #cycles = [];
   #uploads = [];
   #uploadFailures = [];
   #commentNumber = 0;
+  #reactionNumber = 0;
   #cycleNumber = 0;
   #events = [];
 
@@ -129,37 +215,199 @@ export class LinearDriver {
   }
 
   async listRootCommentsAfter(cursor) {
-    const rootComments = this.#comments.filter((comment) => comment.issue_id === this.#root.id);
+    const rootComments = this.#comments.filter((comment) => (
+      comment.issue_id === this.#root.id && comment.parent_id === null
+    ));
     if (cursor === undefined || cursor === null) return frozen(rootComments.map(clone));
     const index = rootComments.findIndex((comment) => comment.id === cursor);
     if (index < 0) throw new Error("linear_comment_cursor_not_found");
     return frozen(rootComments.slice(index + 1).map(clone));
   }
 
-  async addRootComment(body, { creatorId = "user-1" } = {}) {
+  async listRootUserCommentsAfter(cursor) {
+    const comments = await this.listRootCommentsAfter(cursor);
+    return frozen(comments.filter((comment) => !isHarnessComment(comment.body)).map(clone));
+  }
+
+  async listThreadRepliesAfter(parentId, cursor) {
+    const replies = this.#comments.filter((comment) => (
+      comment.issue_id === this.#root.id && comment.parent_id === parentId
+    ));
+    if (cursor === undefined || cursor === null) return frozen(replies.map(clone));
+    const index = replies.findIndex((comment) => comment.id === cursor);
+    if (index < 0) throw new Error("linear_comment_cursor_not_found");
+    return frozen(replies.slice(index + 1).map(clone));
+  }
+
+  async addRootComment(body, { creatorId = "user-1", parentId = null } = {}) {
     const comment = {
       id: `comment-${++this.#commentNumber}`,
       issue_id: this.#root.id,
+      parent_id: parentId,
       body: requireText(body, "linear_comment_invalid"),
       creator_id: requireText(creatorId, "linear_creator_invalid"),
       created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, this.#commentNumber)).toISOString(),
     };
     this.#comments.push(comment);
-    this.#events.push(frozen({ event: "root_comment", comment_id: comment.id }));
+    this.#events.push(frozen({
+      event: "root_comment",
+      comment_id: comment.id,
+      parent_id: parentId,
+    }));
     return frozen(clone(comment));
   }
 
-  async createComment(issueId, body) {
+  async createComment(issueId, body, { parentId = null, creatorId = "harness-1" } = {}) {
     const comment = {
       id: `comment-${++this.#commentNumber}`,
       issue_id: requireText(issueId, "linear_comment_issue_invalid"),
+      parent_id: parentId,
       body: requireText(body, "linear_comment_invalid"),
-      creator_id: "harness-1",
+      creator_id: requireText(creatorId, "linear_creator_invalid"),
       created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, this.#commentNumber)).toISOString(),
     };
     this.#comments.push(comment);
-    this.#events.push(frozen({ event: "comment_created", comment_id: comment.id, issue_id: issueId }));
+    this.#events.push(frozen({
+      event: "comment_created",
+      comment_id: comment.id,
+      issue_id: issueId,
+      parent_id: parentId,
+    }));
     return frozen(clone(comment));
+  }
+
+  async createCommentReaction(commentId, emoji) {
+    if (!this.#comments.some((comment) => comment.id === commentId)) {
+      throw new Error("linear_comment_not_found");
+    }
+    const reaction = {
+      id: `reaction-${++this.#reactionNumber}`,
+      comment_id: commentId,
+      emoji: requireReactionEmoji(emoji),
+    };
+    this.#reactions.push(reaction);
+    this.#events.push(frozen({
+      event: "comment_reaction",
+      comment_id: commentId,
+      emoji,
+    }));
+    return frozen(clone(reaction));
+  }
+
+  get reactions() {
+    return frozen(this.#reactions.map(clone));
+  }
+
+  async pauseForHuman({ reason, questions } = {}) {
+    const humanReason = requireText(reason, "linear_human_reason_invalid");
+    const humanQuestions = requireHumanQuestions(questions);
+    const questionComment = await this.createComment(
+      this.#root.id,
+      needsHumanComment({ reason: humanReason, questions: humanQuestions }),
+    );
+    await this.writeRootState({
+      ...(this.#state === undefined ? {} : clone(this.#state)),
+      current_phase: "NeedsHuman",
+      harness_feedback: humanReason,
+      comment_cursor: questionComment.id,
+      human_action: {
+        action_id: `human-action-${questionComment.id}`,
+        root_issue_id: this.#root.id,
+        request_comment_id: questionComment.id,
+        questions: humanQuestions,
+        reply_comment_ids: [],
+        status: "pending",
+        thread_cursor: undefined,
+      },
+      architecture_decisions: this.#state?.architecture_decisions ?? [],
+    });
+    await this.setRootStatus("needs_human");
+    return frozen(clone(questionComment));
+  }
+
+  async processHumanReply({
+    cursor,
+    requestCommentId = cursor,
+    disposition,
+    nextStatus = "in_review",
+    rejection,
+    acceptedDecision = {
+      title: "Choose the caller-owned boundary",
+      decision: "Use the caller-owned boundary.",
+      rationale: "The accepted reply gives the caller control of transaction boundaries.",
+      consequences: [
+        "Callers control transaction boundaries.",
+        "The service remains composable within existing transactions.",
+      ],
+    },
+  } = {}) {
+    if (disposition !== "accepted" && disposition !== "rejected") {
+      throw new Error("linear_reply_disposition_invalid");
+    }
+    const replies = (await this.listThreadRepliesAfter(
+      requestCommentId,
+      cursor === requestCommentId ? undefined : cursor,
+    )).filter((comment) => !isHarnessComment(comment.body));
+    if (replies.length === 0) {
+      await this.setRootStatus("needs_human");
+      return frozen({ status: "needs_human", disposition: "unanswered", comments: [] });
+    }
+    const emoji = disposition === "accepted" ? "white_check_mark" : "x";
+    for (const comment of replies) await this.createCommentReaction(comment.id, emoji);
+    if (disposition === "rejected") {
+      if (rejection === undefined) throw new Error("linear_rejection_question_missing");
+      const questionComment = await this.createComment(
+        this.#root.id,
+        needsHumanComment(rejection),
+        { parentId: requestCommentId },
+      );
+      await this.writeRootState({
+        ...(this.#state === undefined ? {} : clone(this.#state)),
+        current_phase: "NeedsHuman",
+        harness_feedback: rejection.reason,
+        comment_cursor: questionComment.id,
+        human_action: {
+          ...(this.#state?.human_action ?? {}),
+          reply_comment_ids: [
+            ...(this.#state?.human_action?.reply_comment_ids ?? []),
+            ...replies.map(({ id }) => id),
+          ],
+          status: "pending",
+          thread_cursor: replies.at(-1).id,
+        },
+        architecture_decisions: this.#state?.architecture_decisions ?? [],
+      });
+      return frozen(clone({
+        status: "needs_human",
+        disposition,
+        comments: replies,
+        question: questionComment,
+      }));
+    }
+    const status = requireStatus(nextStatus);
+    const priorDecisions = this.#state?.architecture_decisions ?? [];
+    const decision = {
+      id: `ADR-${String(priorDecisions.length + 1).padStart(3, "0")}`,
+      title: requireText(acceptedDecision.title, "linear_decision_title_invalid"),
+      decision: requireText(acceptedDecision.decision, "linear_decision_value_invalid"),
+      rationale: requireText(acceptedDecision.rationale, "linear_decision_rationale_invalid"),
+      consequences: acceptedDecision.consequences.map((consequence) => (
+        requireText(consequence, "linear_decision_consequence_invalid")
+      )),
+      source_action_comment_id: requestCommentId,
+      source_reply_ids: replies.map(({ id }) => id),
+      decided_at: formatLocalTimestamp(),
+    };
+    const architectureDecisions = [...priorDecisions, decision];
+    await this.writeRootState({
+      ...(this.#state === undefined ? {} : clone(this.#state)),
+      current_phase: status === "needs_human" ? "NeedsHuman" : "idle",
+      comment_cursor: replies.at(-1).id,
+      human_action: undefined,
+      architecture_decisions: architectureDecisions,
+    });
+    await this.setRootStatus(status);
+    return frozen(clone({ status, disposition, comments: replies, decision }));
   }
 
   async updateIssueDescription(issueId, description) {
@@ -213,13 +461,24 @@ export class LinearDriver {
     return frozen(clone(this.#state));
   }
 
-  async createCycle({ objective, acceptance, boundaries, consumedCommentIds = [] }) {
+  async createCycle({
+    objective,
+    acceptance,
+    boundaries,
+    consumedCommentIds = [],
+    architectureDecisions = this.#state?.architecture_decisions ?? [],
+  }) {
     const cycle = {
       id: `cycle-${++this.#cycleNumber}`,
       objective: requireText(objective, "cycle_objective_invalid"),
       acceptance: requireText(acceptance, "cycle_acceptance_invalid"),
       boundaries: requireText(boundaries, "cycle_boundaries_invalid"),
       consumed_comment_ids: [...consumedCommentIds],
+      architecture_decisions: clone(architectureDecisions),
+      description: managedDescription(
+        ["## Objective", objective, "## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
+        "## Role\n\nCycle",
+      ),
       status: "todo",
       artist: null,
       critic: null,
@@ -247,6 +506,27 @@ export class LinearDriver {
       },
       result: null,
     };
+    const decisionSnapshot = architectureDecisions.length === 0
+      ? "## Architecture Decisions\n\nNone recorded."
+      : [
+        "## Architecture Decisions",
+        "",
+        ...architectureDecisions.flatMap((decision) => [
+          `## ${decision.id}`,
+          "",
+          `- id: ${decision.id}`,
+          `- title: ${decision.title}`,
+          `- decision: ${decision.decision}`,
+          `- rationale: ${decision.rationale}`,
+          "- consequences:",
+          ...decision.consequences.map((consequence) => `  - ${consequence}`),
+          `- source_action_comment_id: ${decision.source_action_comment_id}`,
+          `- source_reply_ids: [${decision.source_reply_ids.join(", ")}]`,
+          `- decided_at: ${decision.decided_at}`,
+          "",
+        ]),
+      ].join("\n");
+    cycle.description = cycle.description.replace("# Symphony Metadata", `${decisionSnapshot}\n\n# Symphony Metadata`);
     this.#cycles.push(cycle);
     this.#events.push(frozen({
       event: "cycle_created",
@@ -296,8 +576,93 @@ export class LinearDriver {
       root_comments: this.#comments.filter((comment) => comment.issue_id === this.#root.id).map(clone),
       cycles: this.#cycles.map(clone),
       comments: this.#comments.map(clone),
+      reactions: this.#reactions.map(clone),
       uploads: this.#uploads.map(clone),
       events: this.#events.map(clone),
     });
   }
+}
+
+const DEFAULT_HUMAN_QUESTIONS = Object.freeze([{
+  question: "Which boundary should Symphony use?",
+  options: [
+    { key: "A", label: "Service-owned", consequence: "The service owns the transaction." },
+    { key: "B", label: "Caller-owned", consequence: "The caller owns the transaction." },
+  ],
+}]);
+
+export async function runHumanActionScenario({
+  linear,
+  mode,
+  reason = "Choose one API boundary.",
+  questions = DEFAULT_HUMAN_QUESTIONS,
+  replyBodies = [],
+  rejection = {
+    reason: "The reply does not choose one boundary.",
+    questions: DEFAULT_HUMAN_QUESTIONS,
+  },
+  supplementBody = "Use the caller-owned boundary.",
+} = {}) {
+  if (!(linear instanceof LinearDriver)) throw new Error("linear_driver_required");
+  if (!["unanswered", "accepted", "rejected_then_supplement"].includes(mode)) {
+    throw new Error("linear_human_scenario_invalid");
+  }
+  const question = await linear.pauseForHuman({ reason, questions });
+  if (mode === "unanswered") {
+    const reply = await linear.processHumanReply({
+      requestCommentId: question.id,
+      cursor: question.id,
+      disposition: "accepted",
+    });
+    return frozen({ mode, question, reply, state: await linear.snapshot() });
+  }
+
+  const bodies = replyBodies.length > 0
+    ? replyBodies
+    : mode === "accepted"
+      ? ["Use the caller-owned boundary."]
+      : ["Maybe use either boundary.", "I am not sure yet."];
+  const replies = [];
+  for (const body of bodies) {
+    replies.push(await linear.addRootComment(body, { parentId: question.id }));
+  }
+  const firstReply = await linear.processHumanReply({
+    requestCommentId: question.id,
+    cursor: question.id,
+    disposition: mode === "accepted" ? "accepted" : "rejected",
+    nextStatus: "in_review",
+    rejection,
+    acceptedDecision: {
+      title: "Choose the caller-owned boundary",
+      decision: "Use the caller-owned boundary.",
+      rationale: "The accepted reply gives the caller control of transaction boundaries.",
+      consequences: [
+        "Callers control transaction boundaries.",
+        "The service remains composable within existing transactions.",
+      ],
+    },
+  });
+  let finalReply = firstReply;
+  if (mode === "rejected_then_supplement") {
+    const followUpQuestion = firstReply.question;
+    if (followUpQuestion === undefined) throw new Error("linear_follow_up_question_missing");
+    const supplement = await linear.addRootComment(supplementBody, { parentId: question.id });
+    finalReply = await linear.processHumanReply({
+      requestCommentId: question.id,
+      cursor: replies.at(-1).id,
+      disposition: "accepted",
+      nextStatus: "in_review",
+      acceptedDecision: {
+        title: "Choose the caller-owned boundary",
+        decision: "Use the caller-owned boundary.",
+        rationale: "The accepted reply gives the caller control of transaction boundaries.",
+        consequences: [
+          "Callers control transaction boundaries.",
+          "The service remains composable within existing transactions.",
+        ],
+      },
+    });
+    finalReply = frozen(clone({ ...finalReply, supplement }));
+  }
+  return frozen({ mode, question, firstReply, finalReply, state: await linear.snapshot() });
 }

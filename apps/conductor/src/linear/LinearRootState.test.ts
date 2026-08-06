@@ -24,6 +24,7 @@ const state = parseRootState({
     artifact_url: "https://linear.invalid/files/cycle-001-critique-result.json",
   },
   comment_cursor: "comment-1",
+  architecture_decisions: [],
 });
 
 const report = [
@@ -93,6 +94,39 @@ test("Root description renders structured Delivery as a visible human section", 
   assert.match(description, /### Contents\n- dist\/result\.txt\n- README\.md/u);
   assert.equal(description.indexOf("## Delivery") < description.indexOf("## Metadata"), true);
   assert.deepEqual(parseRootDescription(description).state?.delivery, delivered.delivery);
+});
+
+test("Root description renders Architecture Decisions from durable Root State", () => {
+  const decided = parseRootState({
+    ...state,
+    architecture_decisions: [{
+      id: "ADR-001",
+      title: "Use service ownership",
+      decision: "Keep transaction ownership in the service.",
+      rationale: "The accepted Human Action reply selected service ownership.",
+      consequences: ["Callers do not coordinate commits."],
+      source_action_comment_id: "comment-action-1",
+      source_reply_ids: ["comment-reply-1"],
+      decided_at: "2026-08-05 00:00:00 GMT+08:00",
+    }],
+  });
+
+  const description = renderRootDescription("Choose transaction ownership.", decided, report, updatedAt);
+
+  assert.match(description, /# Architecture Decisions\n\n## ADR-001/u);
+  assert.match(description, /\*\*Decision:\*\* Keep transaction ownership in the service\./u);
+  assert.equal(description.indexOf("# Architecture Decisions") < description.indexOf(ROOT_MANAGED_ROOT_START), true);
+  assert.equal(parseRootDescription(description).requirement, "Choose transaction ownership.");
+  assert.deepEqual(parseRootDescription(description).state?.architecture_decisions, decided.architecture_decisions);
+  const linearNormalized = description
+    .replace(/^(#+ [^\n]+)\n(?!\n)/gmu, "$1\n\n")
+    .replace(/^(\s*)- /gmu, "$1* ");
+  assert.equal(parseRootDescription(linearNormalized).requirement, "Choose transaction ownership.");
+  assert.deepEqual(parseRootDescription(linearNormalized).state?.architecture_decisions, decided.architecture_decisions);
+  assert.throws(
+    () => parseRootDescription(description.replace("Use service ownership", "Use caller ownership")),
+    /linear_root_description_malformed/u,
+  );
 });
 
 test("Gateway updates only the Root description while preserving its issue identity", async () => {

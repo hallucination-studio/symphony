@@ -18,7 +18,9 @@ pub const LINEAR_TOKEN_ENDPOINT: &str = "https://api.linear.app/oauth/token";
 pub const LINEAR_GRAPHQL_ENDPOINT: &str = "https://api.linear.app/graphql";
 pub const LINEAR_SCOPES: &str = "read,write,app:assignable,app:mentionable";
 
-const CALLBACK_PATH: &str = "/callback";
+const CALLBACK_PATH: &str = "/oauth/linear/callback";
+/// The loopback port registered on the built-in Linear application.
+const CALLBACK_PORT: u16 = 43821;
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(180);
 const CALLBACK_POLL: Duration = Duration::from_millis(50);
 const MAX_CALLBACK_BYTES: usize = 8 * 1024;
@@ -102,10 +104,15 @@ impl std::fmt::Debug for AuthorizationSession {
 }
 
 pub fn begin_authorization(client_id: &str) -> Result<AuthorizationSession, OAuthError> {
+    begin_authorization_on(client_id, CALLBACK_PORT)
+}
+
+fn begin_authorization_on(client_id: &str, port: u16) -> Result<AuthorizationSession, OAuthError> {
     if client_id.trim().is_empty() {
         return Err(OAuthError::MissingClientId);
     }
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| OAuthError::ListenerFailed)?;
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .map_err(|_| OAuthError::ListenerFailed)?;
     listener.set_nonblocking(true).map_err(|_| OAuthError::ListenerFailed)?;
     let port = listener.local_addr().map_err(|_| OAuthError::ListenerFailed)?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
@@ -137,8 +144,9 @@ pub fn begin_authorization(client_id: &str) -> Result<AuthorizationSession, OAut
 
 impl AuthorizationSession {
     /// Block until the browser returns, the operator cancels, or the flow
-    /// times out.  Only a callback whose `state` matches this session is
-    /// accepted; anything else fails closed (TM-CRED-002).
+    /// times out.  Stray or malformed connections (favicon probes, port
+    /// scanners) get a plain 400 and the wait continues; only a real callback
+    /// with a mismatched `state` fails closed (TM-CRED-002).
     pub fn wait_for_code(&self, cancel: &AtomicBool) -> Result<String, OAuthError> {
         let deadline = Instant::now() + AUTHORIZATION_TIMEOUT;
         loop {
@@ -149,18 +157,21 @@ impl AuthorizationSession {
                 return Err(OAuthError::TimedOut);
             }
             match self.listener.accept() {
-                Ok((mut stream, _)) => {
-                    let outcome = read_callback(&mut stream);
-                    let code = outcome.and_then(|callback| {
-                        if callback.state == self.state {
-                            Ok(callback.code)
-                        } else {
-                            Err(OAuthError::StateMismatch)
-                        }
-                    });
-                    respond(&mut stream, code.is_ok());
-                    return code;
-                }
+                Ok((mut stream, _)) => match read_callback(&mut stream) {
+                    Ok(callback) if callback.state == self.state => {
+                        respond(&mut stream, true);
+                        return Ok(callback.code);
+                    }
+                    Ok(_) => {
+                        // A well-formed callback with a foreign state is a
+                        // real forgery attempt: fail the whole flow closed.
+                        respond(&mut stream, false);
+                        return Err(OAuthError::StateMismatch);
+                    }
+                    Err(_) => {
+                        respond(&mut stream, false);
+                    }
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(CALLBACK_POLL);
                 }
@@ -428,9 +439,13 @@ fn url_encode(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn begin_test_session() -> AuthorizationSession {
+        begin_authorization_on("client-fixture", 0).unwrap()
+    }
+
     #[test]
     fn authorize_url_uses_pkce_app_actor_and_loopback() {
-        let session = begin_authorization("client-fixture").unwrap();
+        let session = begin_test_session();
         assert!(session.authorize_url.starts_with(LINEAR_AUTHORIZE_ENDPOINT));
         for fragment in [
             "response_type=code",
@@ -448,7 +463,7 @@ mod tests {
 
     #[test]
     fn callback_round_trip_and_state_verification() {
-        let session = begin_authorization("client-fixture").unwrap();
+        let session = begin_test_session();
         let address = session.listener.local_addr().unwrap();
         let cancel = AtomicBool::new(false);
         std::thread::scope(|scope| {
@@ -456,7 +471,7 @@ mod tests {
             let mut browser = std::net::TcpStream::connect(address).unwrap();
             write!(
                 browser,
-                "GET /callback?code=fixture-code&state={} HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n",
+                "GET /oauth/linear/callback?code=fixture-code&state={} HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n",
                 session.state
             )
             .unwrap();
@@ -466,7 +481,7 @@ mod tests {
 
     #[test]
     fn mismatched_state_fails_closed() {
-        let session = begin_authorization("client-fixture").unwrap();
+        let session = begin_test_session();
         let address = session.listener.local_addr().unwrap();
         let cancel = AtomicBool::new(false);
         std::thread::scope(|scope| {
@@ -474,7 +489,7 @@ mod tests {
             let mut browser = std::net::TcpStream::connect(address).unwrap();
             write!(
                 browser,
-                "GET /callback?code=fixture-code&state=forged-state HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n"
+                "GET /oauth/linear/callback?code=fixture-code&state=forged-state HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n"
             )
             .unwrap();
             assert_eq!(waiter.join().unwrap(), Err(OAuthError::StateMismatch));
@@ -482,8 +497,32 @@ mod tests {
     }
 
     #[test]
+    fn stray_connections_do_not_end_the_flow() {
+        let session = begin_test_session();
+        let address = session.listener.local_addr().unwrap();
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| session.wait_for_code(&cancel));
+            // A favicon probe and an empty probe arrive before the browser.
+            let mut probe = std::net::TcpStream::connect(address).unwrap();
+            write!(probe, "GET /favicon.ico HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n").unwrap();
+            let mut discard = String::new();
+            std::io::Read::read_to_string(&mut probe, &mut discard).unwrap();
+            drop(std::net::TcpStream::connect(address).unwrap());
+            let mut browser = std::net::TcpStream::connect(address).unwrap();
+            write!(
+                browser,
+                "GET /oauth/linear/callback?code=fixture-code&state={} HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n",
+                session.state
+            )
+            .unwrap();
+            assert_eq!(waiter.join().unwrap().unwrap(), "fixture-code");
+        });
+    }
+
+    #[test]
     fn cancellation_stops_the_wait() {
-        let session = begin_authorization("client-fixture").unwrap();
+        let session = begin_test_session();
         let cancel = AtomicBool::new(true);
         assert_eq!(session.wait_for_code(&cancel), Err(OAuthError::Cancelled));
     }

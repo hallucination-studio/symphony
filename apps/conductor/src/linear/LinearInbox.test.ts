@@ -29,6 +29,7 @@ test("Root Inbox returns only stable after-cursor user comments and excludes eve
   const comment = (id: string, issueId: string, body: string, createdAt: string) => parseLinearComment({
     id,
     issue_id: issueId,
+    parent_id: null,
     body,
     creator_id: body.startsWith("# Symphony Harness:") ? "harness-id" : "user-id",
     created_at: createdAt,
