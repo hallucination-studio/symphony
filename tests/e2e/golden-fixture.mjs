@@ -742,7 +742,7 @@ function githubEnvironment(environment, inherited) {
 
 export async function cleanupGoldenRemote({
   pullRequestUrl,
-  branch,
+  deliveryBranch,
   environment,
   inheritedEnvironment,
   executeCommand = execute,
@@ -754,11 +754,11 @@ export async function cleanupGoldenRemote({
       env, encoding: "utf8", timeout: 30_000,
     }).catch(() => failures.push("golden_pr_cleanup_failed"));
   }
-  await executeCommand("git", ["push", "origin", "--delete", branch], {
-    env, encoding: "utf8", timeout: 30_000,
-  }).catch(() => {
-    if (pullRequestUrl !== undefined) failures.push("golden_branch_cleanup_failed");
-  });
+  if (deliveryBranch !== undefined) {
+    await executeCommand("git", ["push", "origin", "--delete", "--", deliveryBranch], {
+      env, encoding: "utf8", timeout: 30_000,
+    }).catch(() => failures.push("golden_branch_cleanup_failed"));
+  }
   return failures;
 }
 
@@ -770,7 +770,6 @@ export async function createGoldenFixture({
   const runId = crypto.randomUUID().slice(0, 8);
   const base = await mkdtemp(path.join(os.tmpdir(), "symphony-golden-"));
   const runDirectory = path.join(base, "run");
-  const branch = `symphony/golden-${runId}`;
   const resolvedDiagnosticRoot = diagnosticRoot
     ?? environment?.SYMPHONY_E2E_DIAGNOSTIC_ROOT
     ?? environment?.SYMPHONY_E2E_DIAGNOSTIC_DIR;
@@ -788,7 +787,6 @@ export async function createGoldenFixture({
   return Object.freeze({
     root,
     runDirectory,
-    branch,
     async archiveFailure({ error, stdout, stderr } = {}) {
       return archiveGoldenFailure({
         archiveRoot: resolvedDiagnosticRoot,
@@ -802,9 +800,12 @@ export async function createGoldenFixture({
       await verifyGoldenVisibleTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
       await verifyGoldenResultComments(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
     },
-    async cleanup(pullRequestUrl, { archiveIssueTree: shouldArchiveIssueTree = false } = {}) {
+    async cleanup(pullRequestUrl, {
+      archiveIssueTree: shouldArchiveIssueTree = false,
+      deliveryBranch,
+    } = {}) {
       const failures = await cleanupGoldenRemote({
-        pullRequestUrl, branch, environment, inheritedEnvironment,
+        pullRequestUrl, deliveryBranch, environment, inheritedEnvironment,
       });
       if (shouldArchiveIssueTree) {
         await archiveIssueTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id)

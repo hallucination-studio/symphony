@@ -174,6 +174,7 @@ export async function runGoldenScenario({
   }
   let fixture = fixtureOverride;
   let pullRequestUrl;
+  let deliveryBranch;
   let failureContext;
   const createFixtureOperation = fixtureFactory ?? createFixture;
   const run = operation ?? (async () => {
@@ -229,6 +230,7 @@ export async function runGoldenScenario({
     }
     await fixture.verifyVisibleCompletion?.();
     pullRequestUrl = requireGoldenPullRequest(terminal);
+    deliveryBranch = terminal.delivery.branch;
     return { status: terminal.status, root: fixture.root.identifier };
   });
   let outcome;
@@ -269,7 +271,10 @@ export async function runGoldenScenario({
       : Object.freeze({ ...failure, diagnostic_ref: diagnosticRef });
   } finally {
     try {
-      await fixture?.cleanup?.(pullRequestUrl, { archiveIssueTree: outcome?.status === "passed" });
+      await fixture?.cleanup?.(pullRequestUrl, {
+        archiveIssueTree: outcome?.status === "passed",
+        deliveryBranch,
+      });
     } catch (error) {
       cleanupError = error;
     }

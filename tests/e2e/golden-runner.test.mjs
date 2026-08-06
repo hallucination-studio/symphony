@@ -48,7 +48,7 @@ test("golden cleanup closes the PR before deleting its checked-out remote branch
   const calls = [];
   const failures = await cleanupGoldenRemote({
     pullRequestUrl: "https://github.com/acme/repo/pull/7",
-    branch: "root/ENG-7",
+    deliveryBranch: "root/ENG-7",
     environment: {},
     inheritedEnvironment: { PATH: "/usr/bin" },
     async executeCommand(command, args) {
@@ -59,7 +59,7 @@ test("golden cleanup closes the PR before deleting its checked-out remote branch
   assert.deepEqual(failures, []);
   assert.deepEqual(calls, [
     ["gh", ["pr", "close", "https://github.com/acme/repo/pull/7"]],
-    ["git", ["push", "origin", "--delete", "root/ENG-7"]],
+    ["git", ["push", "origin", "--delete", "--", "root/ENG-7"]],
   ]);
 });
 
@@ -695,7 +695,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
     },
   });
   assert.equal(cleaned, true);
-  assert.deepEqual(cleanupOptions, { archiveIssueTree: false });
+  assert.deepEqual(cleanupOptions, { archiveIssueTree: false, deliveryBranch: undefined });
   assert.equal(result.status, "failed");
   assert.equal(result.layer, "golden");
   assert.equal(result.reason, "conductor failure");
@@ -747,7 +747,10 @@ test("golden archives the Linear fixture only after complete visible success", a
   });
 
   assert.equal(result.status, "passed");
-  assert.deepEqual(cleanupCalls, [{ pullRequestUrl: undefined, options: { archiveIssueTree: true } }]);
+  assert.deepEqual(cleanupCalls, [{
+    pullRequestUrl: undefined,
+    options: { archiveIssueTree: true, deliveryBranch: undefined },
+  }]);
 });
 
 test("golden diagnostic archives cap child streams and reject roots inside fixture-owned paths", async (context) => {
