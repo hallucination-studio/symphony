@@ -190,7 +190,7 @@ export function inspectTargetSemantics(sources) {
     ["missing_single_root_entry", /Root mode is the only public execution entry[\s\S]*no one-shot\s+role CLI/u],
     ["missing_artist_output_boundary", /Artist model output is neither parsed nor projected/u],
     ["missing_critique_only_result_authority", /verdict alone determines the Cycle result/u],
-    ["missing_cycle_summary_boundary", /Cycle Result repeats only the mapped result[\s\S]*never copies Critic evidence/u],
+    ["missing_cycle_summary_boundary", /Cycle Result repeats only the mapped result[\s\S]*never copies Critic verdict, reason, evidence/u],
   ];
   const forbidden = [
     ["superseded_plan_issue", /Plan Issue/iu],

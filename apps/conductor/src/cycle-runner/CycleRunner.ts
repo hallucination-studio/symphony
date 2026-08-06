@@ -67,7 +67,12 @@ export interface CycleRunOutcome {
 
 function issueTitle(prefix: string, objective: CycleSpec["objective"]): string {
   const marker = `${prefix} `;
-  return `${marker}${objective.slice(0, MAX_ISSUE_TITLE_LENGTH - marker.length)}`;
+  const available = MAX_ISSUE_TITLE_LENGTH - marker.length;
+  if (objective.length <= available) return `${marker}${objective}`;
+  const candidate = objective.slice(0, available - 1).trimEnd();
+  const boundary = candidate.lastIndexOf(" ");
+  const title = boundary > Math.floor(available / 2) ? candidate.slice(0, boundary) : candidate;
+  return `${marker}${title}…`;
 }
 
 function cycleDescription(spec: CycleSpec): string {
@@ -301,13 +306,16 @@ async function uploadCriticResult(
   }
 }
 
-function cycleResult(result: CycleTerminalResult, filename: string, upload: CriticResultUpload): string {
+function cycleResult(
+  result: CycleTerminalResult,
+  criticIssue: LinearIssue,
+  filename: string,
+  upload: CriticResultUpload,
+): string {
   return [
     "## Cycle Result",
     `- Result: ${result.result}`,
-    `- Critic Issue: ${result.critic_issue_id}`,
-    `- Critic verdict: ${result.critic_verdict}`,
-    `- Reason: ${result.reason}`,
+    `- Critic: [${criticIssue.identifier}](${criticIssue.url})`,
     upload.status === "uploaded"
       ? `- Critique: [${filename}](${upload.url})`
       : `- Critique: upload failed (${upload.reason})`,
@@ -447,7 +455,7 @@ export class CycleRunner {
     );
     await this.options.gateway.create_comment(
       cycle.id,
-      cycleResult(terminal, critiqueResultFilename, critiqueResultUpload),
+      cycleResult(terminal, criticIssue, critiqueResultFilename, critiqueResultUpload),
     );
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.done_status_id);
 

@@ -36,7 +36,7 @@ const report = [
   "### Evidence", "The trusted Root state requires another independently audited change.", "",
   "### Next Cycle", "Create and verify the parser change.",
 ].join("\n");
-const updatedAt = "2026-08-05T00:00:00.000+08:00";
+const updatedAt = "2026-08-05 00:00:00 GMT+08:00";
 
 test("Root description keeps the authored requirement outside one strict managed block", () => {
   const description = renderRootDescription("The parser must reject ambiguity.", state, report, updatedAt);
@@ -44,9 +44,10 @@ test("Root description keeps the authored requirement outside one strict managed
   assert.equal(description.split(ROOT_MANAGED_ROOT_END).length, 2);
   assert.match(description, /^The parser must reject ambiguity\.\n\n# Symphony Harness: Managed Root\n/u);
   assert.match(description, /## Metadata\n\nUpdated at:/u);
-  assert.match(description, /Updated at: 2026-08-05T00:00:00\.000\+08:00/u);
+  assert.match(description, /Updated at: 2026-08-05 00:00:00 GMT\+08:00/u);
   assert.match(description, /### Root State\n\n```json\n/u);
   assert.match(description, /## Result\n\n### Why Continue/u);
+  assert.equal(description.indexOf("## Result") < description.indexOf("## Metadata"), true);
   assert.equal(parseRootDescription(description).requirement, "The parser must reject ambiguity.");
   assert.deepEqual(parseRootDescription(description).state, state);
   assert.equal(parseRootDescription(description).reconcile_report, report);
@@ -89,6 +90,7 @@ test("Root description renders structured Delivery as a visible human section", 
   assert.match(description, /## Delivery\n\n### Type\nFiles/u);
   assert.match(description, /### Location\n\/workspaces\/ENG-1/u);
   assert.match(description, /### Contents\n- dist\/result\.txt\n- README\.md/u);
+  assert.equal(description.indexOf("## Delivery") < description.indexOf("## Metadata"), true);
   assert.deepEqual(parseRootDescription(description).state?.delivery, delivered.delivery);
 });
 

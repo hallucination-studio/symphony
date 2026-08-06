@@ -31,8 +31,8 @@ exactly one Artist process and one fresh Critic process per Cycle; Conductor
 never starts a second summarization or format-repair Agent call.
 
 Artist Markdown is appended byte-for-byte once to the Artist Issue description
-at terminal handling. The append also records one mechanical RFC3339 local-time
-line `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`; retries never append a
+at terminal handling. The append also records one mechanical human-readable local-time
+line `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>`; retries never append a
 second report. Its
 fixed report is a summary of actual file changes and validation: `## Summary`,
 `## File Changes` with `### Created`, `### Updated`, and `### Deleted` paths and
@@ -40,8 +40,8 @@ line deltas, followed by `## Verification`. It does not repeat Cycle
 description, acceptance, or boundaries and remains untrusted process output.
 
 Critic Markdown is appended byte-for-byte once to the Critic Issue description at
-terminal handling. The append also records one mechanical RFC3339 local-time
-line `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`; retries never append a
+terminal handling. The append also records one mechanical human-readable local-time
+line `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>`; retries never append a
 second report. Its
 fixed report starts with the verdict and then reports `## Scope Reviewed`,
 `## Implementation Review`, `## Checks`, `## Evidence`, `## Findings`, and
@@ -61,7 +61,7 @@ Every `create_cycle`, `complete`, and `needs_human` decision also contains a
 validated human report which Conductor copies to Root under a Harness marker.
 Continue reports explain why, evidence, and the next Cycle. Completion reports
 cover the complete worktree's created/updated/deleted paths, insertion/deletion
-counts, verification, and exact accumulated token usage in short form. The
+counts, verification, wall-clock run duration, and exact accumulated token usage in short form. The
 worktree and token sections are mechanical Conductor projections; unavailable
 facts say `Unknown`, never an estimate. Raw porcelain such as `??`, `M`, or `D`
 is not human report content.
@@ -80,18 +80,20 @@ place on every durable projection:
 
 ```text
 # Symphony Harness: Managed Root
-## Metadata
-Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>
-### Root State
-<canonical RootState JSON fence>
 ## Result
 <latest validated Reconcile report>
+## Delivery
+<terminal delivery when present>
+## Metadata
+Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>
+### Root State
+<canonical RootState JSON fence>
 # Symphony Harness: End Managed Root
 ```
 
 There must be exactly one start marker and one end marker, with the end marker
 after the start marker. On every replacement Conductor writes the mechanical
-RFC3339 local-time line `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` using
+human-readable local-time line `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` using
 the customer runtime's local clock and numeric offset. It uses the same exact
 timestamp value for that update. Conductor updates only the bytes between the markers;
 it never rewrites, normalizes, or appends to the requirement region. Root State
@@ -225,8 +227,8 @@ missing/invalid result file is a process error, not an invitation to make
 another Agent call.
 
 The verdict alone determines the Cycle result.
-Cycle Result repeats only the mapped result
-and the JSON file link or current upload error. It never copies Critic evidence or
+Cycle Result repeats only the mapped result, a linked Critic Issue identifier,
+and the JSON file link or current upload error. It never copies Critic verdict, reason, evidence, or
 role Markdown or Cycle description text into its mechanical fields.
 
 Cycle history comments are append-only operator breadcrumbs. Conductor adds one

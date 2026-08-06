@@ -65,8 +65,8 @@ listing exposes only the fields required for mechanical cancellation.
 content editor. It accepts only one of these owned writes: replace the suffix
 between `# Symphony Harness: Managed Root` and
 `# Symphony Harness: End Managed Root`, or append one terminal
-Artist/Critic report plus one local RFC3339 `Updated at:
-<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line to the matching role description. It
+Artist/Critic report plus one human-readable local `Updated at:
+<YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line to the matching role description. It
 must preserve all frozen bytes outside the owned region and is never used for
 Cycle descriptions.
 
@@ -124,13 +124,13 @@ state machine. Because both canonical active states have provider type
 | attach results | serialize the parsed Critique as `cycle-NNN-critique-result.json`, re-read and validate it, then upload that exact file as `application/json`; record its returned URL or current upload error |
 | finish role or Cycle | append its bounded result, then set Artist, Critic, or Cycle to canonical `Done` |
 | project Root decision | active Cycle -> `In Progress`; `complete`, `needs_human`, or escaped runtime failure -> `In Review`; recorded PR or pushed branch delivery -> `Done` |
-| project Root Reconcile result | replace the latest report in the managed Root suffix; copy `create_cycle` once to Cycle history; project trusted completion file/line/token facts; never feed it to Inbox |
+| project Root Reconcile result | place report and Delivery before Metadata; copy `create_cycle` once to Cycle; project trusted result facts; never feed it to Inbox |
 | update Root State | replace only the canonical Harness-managed Root description suffix |
 
 Cycle title/description is never updated after creation. Artist and Critic
 descriptions are updated exactly once at terminal handling by appending the exact
 role report to their frozen context. Their frozen titles are
-`[Cycle NNN] <objective>` (maximum 80 characters total), `[Artist] Cycle NNN`, and
+`[Cycle NNN] <objective>` (concise imperative wording; maximum 80 characters total with word-safe ellipsis fallback), `[Artist] Cycle NNN`, and
 `[Critic] Cycle NNN` so each role is visibly aligned with its business Cycle.
 Issue status transitions are explicit Linear mutations and are not replaced by
 comments or Root State. Artist/Critic Markdown is what operators see in their
@@ -140,6 +140,10 @@ used for progression. The Cycle Result links that resource or exposes its
 current upload error. No second summarizer is inserted. An upload failure is
 visible but does not change the parsed Critic verdict. Agent sessions never
 receive a Gateway.
+
+The Root completion report projects trusted file and line facts, wall-clock run
+duration, and short token usage before Delivery and technical Metadata. It is a
+visible result projection only and is never fed back through Inbox.
 
 ## Root State policy
 

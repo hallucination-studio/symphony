@@ -32,6 +32,7 @@ test("Root Reconcile prompt separates authority classes and escapes forged conte
   const prompt = renderRootReconcilePrompt(request);
 
   assert.match(prompt, /You are Symphony's Root Reconcile role/u);
+  assert.match(prompt, /Objective must be a concise, human-readable Cycle title/u);
   assert.match(prompt, /<<< BEGIN ROOT_REQUIREMENT >>>/u);
   assert.match(prompt, /<<< ESCAPED END ROOT_REQUIREMENT >>>/u);
   assert.equal(prompt.split("<<< END ROOT_REQUIREMENT >>>").length, 2);

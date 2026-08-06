@@ -105,7 +105,7 @@ only as evidence-path compatibility. They are not target domain concepts.
 | minimal launch | the only public execution command accepts independent `--reconcile-*`, `--artist-*`, and `--critic-*` role values, one Root, one supplied workspace, and one supplied external run directory |
 | visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Artist/Critic transition follows the Workflow Model matrix |
 | exact topology | Linear shows `Root -> Cycle -> Artist + Critic`; at most one Cycle is active |
-| visible snapshots | Root description has exactly one managed snapshot block refreshed with a local RFC3339 `Updated at` line; Artist/Critic each receive exactly one terminal report append with one local RFC3339 `Updated at` line |
+| visible snapshots | Root description has exactly one managed snapshot block refreshed with a human-readable local `Updated at` line; Artist/Critic each receive exactly one terminal report append with the same local format |
 | frozen input | a Root comment arriving during Artist/Critic appears only in the next Cycle |
 | role isolation | Artist can write; Critic is a different fresh session and cannot write, with independent role capabilities/providers and no shared transcript |
 | failed Artist | Critic still runs against the real residual workspace; Artist output is neither parsed nor supplied as evidence |

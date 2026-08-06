@@ -22,8 +22,8 @@ unbounded process output, full Agent transcripts, provider payloads, raw
 diagnostic file bytes, or commit identifiers. Exact role Markdown is public by
 design: tests compare it only at the owned role descriptions. The typed Critique JSON
 file is checked as the single Cycle upload, including `application/json` and
-its returned file URL. Root snapshots are checked for exact markers and a local
-RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. Cycle comment
+its returned file URL. Root snapshots are checked for exact markers and a human-readable
+local `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line. Cycle comment
 ordering uses Linear `createdAt`; tests do not add or require a duplicate body
 timestamp.
 
@@ -83,9 +83,9 @@ not public request fields.
 - Artist uses workspace-write access and writes one untrusted final Markdown file;
 - a fresh read-only Critic inspects the real workspace;
 - the exact Artist Markdown is appended once to the Artist description with
-  one local RFC3339 `Updated at` line, without parsing;
+  one human-readable local `Updated at` line, without parsing;
 - the exact Critic Markdown is appended once to the Critic description with one
-  local RFC3339 `Updated at` line;
+  human-readable local `Updated at` line;
 - the parsed Critic value is written to `cycle-NNN-critique-result.json`, read back
   and validated, then uploaded once as `application/json` for the Cycle;
 - Cycle history/result comments record transitions, decisions, terminal fields,
@@ -97,9 +97,9 @@ not public request fields.
 - every Reconcile decision replaces the latest human-readable report in the
   managed Root suffix; `create_cycle` also copies it once to the new Cycle;
   completion reports use semantic created/updated/deleted paths, whole-worktree
-  line deltas, verification evidence, and short exact token totals;
+  line deltas, verification evidence, wall-clock duration, and short exact token totals;
 - every durable Root projection refreshes exactly one managed description block
-  with a local RFC3339 `Updated at` line, while the immutable requirement bytes
+  with a human-readable local `Updated at` line, while the immutable requirement bytes
   remain unchanged;
 - an accepted Critic promotes task state and permits one terminal commit, push,
   and injected pull-request result;
@@ -156,9 +156,10 @@ fake.
 
 `golden-runner.mjs` is the overall manual single-machine gate. It requires an
 explicit enable flag, the allowlisted product credentials, a human Linear token,
-and one unambiguous Linear project slug. It creates its own temporary Root Issue,
-clones the current `origin` into an isolated workspace, and allocates an external
-run directory. Callers do not supply a Root, workspace, or run-directory path.
+and one unambiguous Linear project slug. It creates its own `[E2E]` Root Issue and
+private external run directory. It does not clone or supply a workspace; Root
+Reconcile Prepare owns worktree and branch creation from the local invocation
+checkout. Callers do not supply a Root, workspace, or run-directory path.
 
 The human token is used only to create and archive the test-owned Issue tree.
 The built Conductor receives the product Linear and GitHub credentials plus the
@@ -187,14 +188,14 @@ reasoning effort, or capability matrix supplied by Symphony.
 
 The golden visible-tree queries also fetch the Root managed suffix, each role's
 terminal description, and Cycle rationale/result comments. They check the
-frozen title rules, exact Artist/Critic Markdown placement, one local RFC3339
+frozen title rules, exact Artist/Critic Markdown placement, one human-readable local
 `Updated at` line per terminal role description, and one visible
 `[cycle-NNN-critique-result.json](<assetUrl>)`
 file link in the mechanical Cycle Result. The real Gateway's successful JSON
 upload is therefore proven at the public Linear boundary without assuming a
 provider file-list schema. Golden also requires one continue report per Cycle
 and one completion report with semantic file changes, line counts,
-verification, and a short exact-or-unknown token total. Artist projection is
+verification, wall-clock duration, and a short exact-or-unknown token total. Artist projection is
 exactly one successful human report or one explicit bounded failure report;
 an Critic-accepted Cycle is not rejected merely because Artist itself timed
 out after leaving the correct workspace change. The runner does not download diagnostic JSONL

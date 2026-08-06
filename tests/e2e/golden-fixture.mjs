@@ -352,7 +352,7 @@ export async function createLinearRoot(environment, runId) {
       teamId,
       projectId: project.id,
       stateId,
-      title: `Symphony golden Root ${runId}`,
+      title: `[E2E] Symphony golden Root ${runId}`,
       description: [
         `Create ${filename} containing exactly: Symphony golden E2E ${runId}`,
         "The file must match those bytes exactly, with no trailing newline or other additional content.",
@@ -456,7 +456,7 @@ const ARTIST_REPORT_HEADINGS = Object.freeze([
   "## Summary", "## File Changes", "### Created", "### Updated", "### Deleted", "## Verification",
 ]);
 const RAW_GIT_PORCELAIN_LINE = /^(?:(?:\?\?|[ MADRCU?!]{1,2}) |[12u?!] )[^\r\n]+$/u;
-const LOCAL_TIMESTAMP = /^Updated at: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{2}:[0-9]{2}$/u;
+const LOCAL_TIMESTAMP = /^Updated at: [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT[+-][0-9]{2}:[0-9]{2}$/u;
 
 function descriptionResult(description, separator) {
   const start = description.lastIndexOf(separator);
@@ -509,9 +509,10 @@ function validRootReconcileReport(body, kind) {
   }
   if (!orderedHeadings(lines, [
     "### Overview", "### File Changes", "#### Created", "#### Updated", "#### Deleted",
-    "### Line Changes", "### Verification", "### Token Usage",
+    "### Line Changes", "### Verification", "### Run Metrics",
   ])) return false;
-  return lines.some((line) => /^Total tokens: (?:Unknown|[0-9]+(?:\.[0-9])?[kM]?)$/u.test(line));
+  return lines.some((line) => /^Duration: (?:[0-9]+ms|[0-9]+s|[0-9]+m [0-9]+s)$/u.test(line))
+    && lines.some((line) => /^Total tokens: (?:Unknown|[0-9]+(?:\.[0-9])?[kM]?)$/u.test(line));
 }
 
 export function validateGoldenResultComments(issue) {
@@ -526,8 +527,11 @@ export function validateGoldenResultComments(issue) {
   const managedStart = issue.description.indexOf("\n\n# Symphony Harness: Managed Root\n");
   const managedEnd = issue.description.lastIndexOf("\n\n# Symphony Harness: End Managed Root");
   const reconcileStart = issue.description.indexOf("\n\n## Result\n", managedStart);
+  const deliveryStart = issue.description.indexOf("\n\n## Delivery\n", reconcileStart);
+  const metadataStart = issue.description.indexOf("\n\n## Metadata\n", reconcileStart);
   if (managedStart < 1 || managedEnd <= managedStart || reconcileStart <= managedStart
-    || !issue.description.includes("\n\n## Metadata\n", managedStart)
+    || metadataStart <= reconcileStart
+    || (deliveryStart >= 0 && deliveryStart >= metadataStart)
     || !issue.description.includes("\n\n### Root State\n", managedStart)
     || !issue.description.slice(managedStart, managedEnd).split(/\r?\n/u).some((line) => LOCAL_TIMESTAMP.test(line))
     || issue.comments.nodes.some(({ body }) => body.startsWith("# Symphony Harness:"))) {
@@ -535,7 +539,7 @@ export function validateGoldenResultComments(issue) {
   }
   const completionReport = `# Symphony Harness: Reconcile\n${issue.description.slice(
     reconcileStart + "\n\n## Result".length,
-    managedEnd,
+    deliveryStart >= 0 ? deliveryStart : metadataStart,
   )}`;
   if (!validRootReconcileReport(completionReport, "complete")) {
     throw new Error("golden_root_description_invalid");
@@ -553,6 +557,7 @@ export function validateGoldenResultComments(issue) {
     const audit = roles.find((role) => role?.title === `[Critic] Cycle ${cycleTitle[1]}`);
     if (artist === undefined || audit === undefined
       || typeof artist.description !== "string" || typeof audit.description !== "string"
+      || typeof audit.identifier !== "string" || typeof audit.url !== "string"
       || !commentConnection(artist.comments) || !commentConnection(audit.comments)) {
       throw new Error("golden_result_comments_role_invalid");
     }
@@ -582,6 +587,9 @@ export function validateGoldenResultComments(issue) {
       || !auditBody.includes("## Implementation Review")
       || !auditBody.includes("## Findings")
       || cycleBodies.includes(auditBody)
+      || !cycleResult.includes(`- Critic: [${audit.identifier}](${audit.url})`)
+      || cycleResult.includes("Critic verdict")
+      || cycleResult.includes("Reason:")
       || !cycleResult.includes(`- Critique: [cycle-${cycleTitle[1]}-critique-result.json](https://`)
       || cycleResult.includes("cycle-" + cycleTitle[1] + "-artist-result.md")
       || cycleResult.includes("cycle-" + cycleTitle[1] + "-critic-result.md")
@@ -714,7 +722,7 @@ async function verifyGoldenResultComments(token, rootId) {
           }
           children(first: 3) {
             nodes {
-              title
+              identifier title url
               description
               comments(first: 20) {
                 nodes { body }

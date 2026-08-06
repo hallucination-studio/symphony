@@ -45,19 +45,21 @@ description may additionally contain exactly one Harness-managed snapshot block:
 
 ````text
 # Symphony Harness: Managed Root
+## Result
+<latest validated Reconcile report>
+## Delivery
+<terminal delivery when present>
 ## Metadata
-Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>
+Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>
 ### Root State
 ```json
 <canonical RootState JSON>
 ```
-## Result
-<latest validated Reconcile report>
 # Symphony Harness: End Managed Root
 ````
 
 Conductor appends the block when absent and replaces only its interior on later
-projections, refreshing the local RFC3339 `Updated at` line from the customer
+projections, refreshing the human-readable local `Updated at` line from the customer
 runtime clock each time. It never rewrites the requirement region. Before Root Reconcile,
 Conductor strips the complete block, so generated state cannot become a new
 requirement. The Root State inside this suffix is the sole durable runtime
@@ -71,7 +73,7 @@ Each Root Reconcile decision replaces the latest `## Result` report in the
 managed suffix. A continue report contains `Why Continue`, `Evidence`, and
 `Next Cycle`; a completion report contains `Overview`, semantic
 `Created`/`Updated`/`Deleted` paths, whole-worktree line changes,
-`Verification`, and short exact `Token Usage`; a human gate contains `Reason`,
+`Verification`, and `Run Metrics` with wall-clock duration and short exact token usage; a human gate contains `Reason`,
 `Question`, and `Next Step`. For `create_cycle`, Conductor also copies the exact
 report once to the new Cycle under `# Symphony Harness: Reconcile`, preserving
 Cycle history without creating Root or role result comments. Raw Git porcelain,
@@ -94,8 +96,9 @@ context; `# Symphony Metadata` is Harness-owned operational context; and
 immutable. Only Conductor may append the terminal role report to each role description;
 V1 does not detect or repair unrelated manual edits.
 
-The frozen Cycle title is `[Cycle NNN] <objective>` with a maximum total title
-length of 80 characters. The role titles are exactly `[Artist] Cycle NNN` and
+The frozen Cycle title is `[Cycle NNN] <objective>` with a concise imperative
+objective and a maximum total title length of 80 characters. Overlong fallback
+projection truncates only at a complete word and adds an ellipsis. The role titles are exactly `[Artist] Cycle NNN` and
 `[Critic] Cycle NNN`; they carry the Cycle number rather than repeating its
 objective.
 
@@ -103,8 +106,8 @@ objective.
 
 Each role's prompt requires one final Markdown response at its local result path.
 At terminal handling, the response is appended byte-for-byte once to that role's
-Linear Issue description with one mechanical local RFC3339 `Updated at:
-<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line;
+Linear Issue description with one mechanical human-readable local `Updated at:
+<YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line;
 it is intentionally human-facing and does not repeat the frozen Cycle
 objective, acceptance, or boundaries. Linear may normalize equivalent Markdown
 syntax such as unordered-list markers on readback. That provider normalization
@@ -119,7 +122,8 @@ The parsed Critique is mechanically serialized as
 `cycle-NNN-critique-result.json`, written privately, and read back and validated
 before it is used for Cycle/Root progression. Only this JSON file is uploaded
 for the Cycle with `application/json` content type. The Cycle Result comment has
-only terminal fields and one visible resource line:
+only the mapped terminal result, one linked Critic Issue identifier, and one
+visible resource line. It does not repeat the Critic verdict, reason, or evidence:
 
 ```markdown
 - Critique: [cycle-NNN-critique-result.json](https://linear.example/asset)

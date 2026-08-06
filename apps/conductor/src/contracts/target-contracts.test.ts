@@ -272,7 +272,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     "### File Changes", "#### Created", "- src/parser.ts: +8 lines", "#### Updated", "- None", "#### Deleted", "- None", "",
     "### Line Changes", "+8 / -0 lines", "",
     "### Verification", "- npm test passed", "",
-    "### Token Usage", "Total tokens: 1.2k",
+    "### Run Metrics", "Duration: 1m 2s", "Total tokens: 1.2k",
   ].join("\n");
   const delivery = { kind: "files", workspace_path: "/workspaces/ENG-123", files: ["src/parser.ts"] } as const;
   assert.deepEqual(parseRootReconcileDecision({ kind: "complete", summary: "Complete.", delivery, report: completeReport }), {
@@ -281,7 +281,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     report: completeReport,
     delivery,
   });
-  const reportAwaitingMechanicalTokenUsage = completeReport.replace("Total tokens: 1.2k", "").trimEnd();
+  const reportAwaitingMechanicalTokenUsage = completeReport.replace("Duration: 1m 2s\nTotal tokens: 1.2k", "").trimEnd();
   assert.deepEqual(parseRootReconcileDecision({
     kind: "complete",
     summary: "Complete with token usage pending mechanical projection.",

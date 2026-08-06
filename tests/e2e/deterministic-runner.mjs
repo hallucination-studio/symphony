@@ -73,7 +73,12 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
     : critique.verdict === "incomplete" ? "rejected" : "failed";
   const uploadOutcome = await uploadCriticResult(linear, critiqueJsonPath);
   await linear.createComment(cycle.id, cycleResultComment({
-    cycleResult, critique: persistedCritic, uploadOutcome, criticIssueId: cycle.critic_issue?.id ?? `critic-${cycle.id}`,
+    cycleResult,
+    uploadOutcome,
+    criticIssue: cycle.critic_issue ?? {
+      identifier: `critic-${cycle.id}`,
+      url: `https://linear.example/issue/critic-${cycle.id}`,
+    },
   }));
   await linear.finishCycle(cycle.id, cycleResult, uploadOutcome);
 
@@ -141,16 +146,11 @@ async function uploadCriticResult(linear, filePath) {
   }
 }
 
-function cycleResultComment({ cycleResult, critique, uploadOutcome, criticIssueId }) {
-  const reason = critique.verdict === "process_error"
-    ? critique.reason
-    : critique.implementation_review ?? critique.findings?.[0] ?? critique.scope_reviewed;
+function cycleResultComment({ cycleResult, uploadOutcome, criticIssue }) {
   return [
     "## Cycle Result",
     `- Result: ${cycleResult}`,
-    `- Critic Issue: ${criticIssueId}`,
-    `- Critic verdict: ${critique.verdict}`,
-    `- Reason: ${reason}`,
+    `- Critic: [${criticIssue.identifier}](${criticIssue.url})`,
     uploadOutcome.status === "uploaded"
       ? `- Critique: [${uploadOutcome.filename}](${uploadOutcome.url})`
       : `- Critique: upload failed (${uploadOutcome.reason})`,

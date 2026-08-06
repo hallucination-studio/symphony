@@ -42,6 +42,7 @@ export interface ConductorOptions {
   readonly workspace: RootWorkspace | (() => Promise<RootWorkspace>);
   readonly maxCycles: number;
   readonly worktreeSummary?: (workspace: RootWorkspace) => Promise<RootWorktreeSummary>;
+  readonly clock?: () => number;
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
 }
 
@@ -221,6 +222,14 @@ function tokenShort(value: number): string {
   return String(value);
 }
 
+function durationShort(value: number): string {
+  const milliseconds = Math.max(0, Math.floor(value));
+  if (milliseconds < 1_000) return `${milliseconds}ms`;
+  const seconds = Math.floor(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
 function listChanges(changes: readonly RootWorktreeFileChange[], category: "created" | "updated" | "deleted"): string {
   if (changes.length === 0) return "- None";
   return changes.map((change) => category === "updated"
@@ -254,6 +263,7 @@ function renderDecisionReport(
   decision: RootReconcileDecision,
   summary: RootWorktreeSummary,
   tokenUsage: PerformerTokenUsage | undefined,
+  durationMs: number,
 ): string {
   if (decision.kind !== "complete") return decision.report;
   let report: string = decision.report;
@@ -267,8 +277,11 @@ function renderDecisionReport(
   );
   report = replaceReportSection(
     report,
-    "Token Usage",
-    tokenUsage === undefined ? "Total tokens: Unknown" : `Total tokens: ${tokenShort(tokenUsage.total_tokens)}`,
+    "Run Metrics",
+    [
+      `Duration: ${durationShort(durationMs)}`,
+      tokenUsage === undefined ? "Total tokens: Unknown" : `Total tokens: ${tokenShort(tokenUsage.total_tokens)}`,
+    ].join("\n"),
   );
   return report;
 }
@@ -277,9 +290,10 @@ function rootDecisionReport(
   decision: RootReconcileDecision,
   summary: RootWorktreeSummary,
   tokenUsage: PerformerTokenUsage | undefined,
+  durationMs: number,
 ): MarkdownText {
   return parseRootReconcileReportMarkdown(
-    renderDecisionReport(decision, summary, tokenUsage),
+    renderDecisionReport(decision, summary, tokenUsage, durationMs),
     decision.kind,
   );
 }
@@ -335,6 +349,8 @@ export class Conductor {
   }
 
   async run(rootReference: string, signal?: AbortSignal): Promise<ConductorResult> {
+    const clock = this.options.clock ?? Date.now;
+    const startedAt = clock();
     const root = await this.options.gateway.get_issue(rootReference);
     if (root.status_id === this.options.workflow.done_status_id) return { status: "done" };
 
@@ -448,7 +464,7 @@ export class Conductor {
         decision = reconcileOutcome.decision;
         reconcileProcess = reconcileOutcome.process;
         const tokenUsage = addTokenUsage(state.token_usage, reconcileProcess?.token_usage);
-        reconcileReport = rootDecisionReport(decision, worktreeSummary, tokenUsage);
+        reconcileReport = rootDecisionReport(decision, worktreeSummary, tokenUsage, clock() - startedAt);
         await updateState(withState(state, { token_usage: tokenUsage }), reconcileReport);
       } catch (error) {
         return failVisible(error);

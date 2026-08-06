@@ -35,8 +35,8 @@ export function formatLocalTimestamp(date = new Date()) {
   const absoluteOffset = Math.abs(offsetMinutes);
   return [
     `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`,
-    `${sign}${pad(Math.floor(absoluteOffset / 60))}:${pad(absoluteOffset % 60)}`,
+    ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    ` GMT${sign}${pad(Math.floor(absoluteOffset / 60))}:${pad(absoluteOffset % 60)}`,
   ].join("");
 }
 
@@ -199,6 +199,8 @@ export class LinearDriver {
       critic: null,
       artist_issue: {
         id: `execute-${this.#cycleNumber}`,
+        identifier: `ENG-${this.#cycleNumber * 3 - 1}`,
+        url: `https://linear.example/issue/ENG-${this.#cycleNumber * 3 - 1}`,
         title: `[Artist] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
         description: managedDescription(
           ["## Objective", objective, "## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
@@ -207,6 +209,8 @@ export class LinearDriver {
       },
       critic_issue: {
         id: `audit-${this.#cycleNumber}`,
+        identifier: `ENG-${this.#cycleNumber * 3}`,
+        url: `https://linear.example/issue/ENG-${this.#cycleNumber * 3}`,
         title: `[Critic] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
         description: managedDescription(
           ["## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),

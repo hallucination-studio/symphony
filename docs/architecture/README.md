@@ -91,7 +91,7 @@ the parsed `latest_critique` fields), and new Root comments. Workspace access ne
 lets it replace Critic judgment. Each Artist and Critic prompt requires its role to finish with one
 Markdown result at the prescribed local `cycle-NNN-*-result.md` path. Conductor
 appends the exact Artist Markdown to the Artist description and exact Critic
-Markdown to the Critic description, each with one local RFC3339 `Updated at` line;
+Markdown to the Critic description, each with one human-readable local `Updated at` line;
 neither role report is copied to the Cycle.
 There is no second summarization or format-repair Agent call.
 

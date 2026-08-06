@@ -274,9 +274,9 @@ test("fresh Root Reconcile and visible Issue titles have closed contracts", asyn
   assert.match(workflow, /startup gates normalize it to `Todo`/);
   assert.match(reconciliation, /normalizes a\s+nonterminal Root to `Todo` before the first fresh Reconcile/);
   assert.match(conductor, /normalize a nonterminal Root to canonical Todo before fresh Reconcile/);
-  assert.match(rootIssue, /`\[Cycle NNN\] <objective>` with a maximum total title\s+length of 80 characters/);
+  assert.match(rootIssue, /`\[Cycle NNN\] <objective>` with a concise imperative\s+objective and a maximum total title length of 80 characters/);
   assert.match(rootIssue, /exactly `\[Artist\] Cycle NNN` and\s+`\[Critic\] Cycle NNN`/);
-  assert.match(taskManagement, /`\[Cycle NNN\] <objective>` \(maximum 80 characters total\),\s+`\[Artist\] Cycle NNN`, and\s+`\[Critic\] Cycle NNN`/);
+  assert.match(taskManagement, /`\[Cycle NNN\] <objective>` \(concise imperative wording;\s+maximum 80 characters total with word-safe ellipsis fallback\), `\[Artist\] Cycle NNN`, and\s+`\[Critic\] Cycle NNN`/);
 });
 
 test("role configuration is independent and closed", async () => {

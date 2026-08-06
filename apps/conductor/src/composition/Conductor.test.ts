@@ -18,7 +18,7 @@ import type { Performer } from "../performer/api/Performer.js";
 import { Conductor } from "./Conductor.js";
 
 const exec = promisify(execFile);
-const DESCRIPTION_TIMESTAMP = "2026-08-05T00:00:00.000+08:00";
+const DESCRIPTION_TIMESTAMP = "2026-08-05 00:00:00 GMT+08:00";
 
 async function scenario() {
   const base = await mkdtemp(path.join(os.tmpdir(), "symphony-conductor-"));
@@ -137,7 +137,7 @@ const complete = (summary: string): RootReconcileDecision => ({
     "### File Changes", "#### Created", "- None", "", "#### Updated", "- None", "", "#### Deleted", "- None", "",
     "### Line Changes", "+0 / -0 lines", "",
     "### Verification", "The latest Critic provides the trusted evidence.", "",
-    "### Token Usage", "Total tokens: Unknown",
+    "### Run Metrics", "Duration: 0ms", "Total tokens: Unknown",
   ].join("\n") as never,
 });
 
@@ -510,7 +510,7 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
   assert.match(completed, /#### Updated\n- updated\.txt: \+2 \/ -1 lines/u);
   assert.match(completed, /#### Deleted\n- deleted\.txt: -1 lines/u);
   assert.match(completed, /### Line Changes\n\+4 \/ -2 lines/u);
-  assert.match(completed, /### Token Usage\nTotal tokens: 1\.3k/u);
+  assert.match(completed, /### Run Metrics\nDuration: [0-9]+(?:ms|s|m [0-9]+s)\nTotal tokens: 1\.3k/u);
   assert.doesNotMatch(completed, /(?:^|\n)(?:\?\?|[ MADRCU?!]{1,2}) /u);
   assert.equal(projection.state?.token_usage?.total_tokens, 1_300);
 });

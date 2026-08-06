@@ -246,11 +246,11 @@ function parseRootCycleDraft(value: unknown): RootCycleDraft {
 
 const ROOT_RECONCILE_REPORT_SECTIONS = {
   create_cycle: ["Why Continue", "Evidence", "Next Cycle"],
-  complete: ["Overview", "File Changes", "Line Changes", "Verification", "Token Usage"],
+  complete: ["Overview", "File Changes", "Line Changes", "Verification", "Run Metrics"],
   needs_human: ["Reason", "Question", "Next Step"],
 } as const;
 
-const MECHANICAL_COMPLETE_REPORT_SECTIONS = new Set(["File Changes", "Line Changes", "Token Usage"]);
+const MECHANICAL_COMPLETE_REPORT_SECTIONS = new Set(["File Changes", "Line Changes", "Run Metrics"]);
 
 function parseRootReportSections(
   source: string,
@@ -292,7 +292,7 @@ export function parseRootReconcileReportMarkdown(
   const source = value.replace(/\r\n?/gu, "\n").trim();
   try {
     parseMarkdownText(source, "invalid_root_reconcile_report", 64 * 1024);
-    const allowedEmptySections = kind === "complete" ? new Set(["Token Usage"]) : new Set<string>();
+    const allowedEmptySections = kind === "complete" ? new Set(["Run Metrics"]) : new Set<string>();
     const sections = parseRootReportSections(source, allowedEmptySections);
     const expected = ROOT_RECONCILE_REPORT_SECTIONS[kind];
     if (

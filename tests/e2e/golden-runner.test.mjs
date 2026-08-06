@@ -277,6 +277,7 @@ test("golden creates the Root issue in the team's canonical Todo state", async (
     }, "run-id");
     assert.equal(root.identifier, "SYM-1");
     const createRequest = requests.find(({ query }) => query.includes("GoldenRoot"));
+    assert.equal(createRequest.variables.input.title, "[E2E] Symphony golden Root run-id");
     assert.equal(createRequest.variables.input.stateId, "todo-state-id");
     assert.equal(createRequest.variables.input.teamId, "team-id");
   } finally {
@@ -441,16 +442,6 @@ test("golden result projection uses role descriptions and one visible Critic JSO
       "",
       "# Symphony Harness: Managed Root",
       "",
-      "## Metadata",
-      "",
-      `Updated at: ${updatedAt}`,
-      "",
-      "### Root State",
-      "",
-      "```json",
-      '{"current_phase":"completed"}',
-      "```",
-      "",
       "## Result",
       "",
       "### Overview",
@@ -472,8 +463,19 @@ test("golden result projection uses role descriptions and one visible Critic JSO
       "### Verification",
       "The latest Critic accepted the complete diff.",
       "",
-      "### Token Usage",
+      "### Run Metrics",
+      "Duration: 1m 2s",
       "Total tokens: 1.2k",
+      "",
+      "## Metadata",
+      "",
+      `Updated at: ${updatedAt}`,
+      "",
+      "### Root State",
+      "",
+      "```json",
+      '{"current_phase":"completed"}',
+      "```",
       "",
       "# Symphony Harness: End Managed Root",
     ].join("\n"),
@@ -495,9 +497,7 @@ test("golden result projection uses role descriptions and one visible Critic JSO
             { body: [
               "## Cycle Result",
               "- Result: succeeded",
-              "- Critic Issue: audit-1",
-              "- Critic verdict: accepted",
-              "- Reason: The golden file is present.",
+              "- Critic: [ENG-3](https://linear.example/issue/ENG-3)",
               "- Critique: [cycle-001-critique-result.json](https://linear.example/upload/1)",
             ].join("\n") },
           ],
@@ -506,7 +506,9 @@ test("golden result projection uses role descriptions and one visible Critic JSO
         children: {
           nodes: [
             {
+              identifier: "ENG-2",
               title: "[Artist] Cycle 001",
+              url: "https://linear.example/issue/ENG-2",
               description: `# Task\n\n## Objective\n\nCreate the golden file.\n\n# Symphony Metadata\n\n## Role\n\nArtist\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${artistMarkdown}`,
               comments: {
                 nodes: [],
@@ -514,7 +516,9 @@ test("golden result projection uses role descriptions and one visible Critic JSO
               },
             },
             {
+              identifier: "ENG-3",
               title: "[Critic] Cycle 001",
+              url: "https://linear.example/issue/ENG-3",
               description: `# Task\n\n## Acceptance\n\nVerify the golden file.\n\n# Symphony Metadata\n\n## Role\n\nCritic\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${criticMarkdown}`,
               comments: { nodes: [], pageInfo: { hasNextPage: false } },
             },

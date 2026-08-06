@@ -1,11 +1,7 @@
-const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})([+-])(\d{2}):(\d{2})$/u;
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT([+-])(\d{2}):(\d{2})$/u;
 
 function two(value: number): string {
   return String(value).padStart(2, "0");
-}
-
-function three(value: number): string {
-  return String(value).padStart(3, "0");
 }
 
 /** Formats a Date using the host's numeric local timezone offset. */
@@ -16,24 +12,23 @@ export function currentLinearDescriptionTimestamp(now = new Date()): string {
   const absoluteOffset = Math.abs(offsetMinutes);
   return [
     `${String(now.getFullYear()).padStart(4, "0")}-${two(now.getMonth() + 1)}-${two(now.getDate())}`,
-    `T${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}.${three(now.getMilliseconds())}`,
-    `${sign}${two(Math.floor(absoluteOffset / 60))}:${two(absoluteOffset % 60)}`,
+    ` ${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`,
+    ` GMT${sign}${two(Math.floor(absoluteOffset / 60))}:${two(absoluteOffset % 60)}`,
   ].join("");
 }
 
-/** Accepts only the canonical local RFC3339 form used in Root descriptions. */
+/** Accepts only the canonical human-readable local form used in Linear descriptions. */
 export function parseLinearDescriptionTimestamp(value: unknown): string {
   if (typeof value !== "string") throw new Error("linear_description_timestamp_invalid");
   const match = TIMESTAMP_PATTERN.exec(value);
   if (match === null) throw new Error("linear_description_timestamp_invalid");
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, millisecondText, sign, offsetHourText, offsetMinuteText] = match;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, sign, offsetHourText, offsetMinuteText] = match;
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
   const hour = Number(hourText);
   const minute = Number(minuteText);
   const second = Number(secondText);
-  const millisecond = Number(millisecondText);
   const offsetHour = Number(offsetHourText);
   const offsetMinute = Number(offsetMinuteText);
   if (
@@ -44,7 +39,7 @@ export function parseLinearDescriptionTimestamp(value: unknown): string {
   // Date.UTC treats years 0-99 as 1900-1999, so set the year separately.
   const probe = new Date(0);
   probe.setUTCFullYear(year, month - 1, day);
-  probe.setUTCHours(hour, minute, second, millisecond);
+  probe.setUTCHours(hour, minute, second, 0);
   const offset = (offsetHour * 60 + offsetMinute) * (sign === "-" ? -1 : 1);
   const instant = new Date(probe.getTime() - offset * 60_000);
   if (Number.isNaN(instant.getTime())) throw new Error("linear_description_timestamp_invalid");
@@ -56,7 +51,6 @@ export function parseLinearDescriptionTimestamp(value: unknown): string {
     || roundTrip.getUTCHours() !== hour
     || roundTrip.getUTCMinutes() !== minute
     || roundTrip.getUTCSeconds() !== second
-    || roundTrip.getUTCMilliseconds() !== millisecond
   ) throw new Error("linear_description_timestamp_invalid");
   return value;
 }

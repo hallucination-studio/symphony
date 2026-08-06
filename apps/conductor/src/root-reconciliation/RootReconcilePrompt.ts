@@ -51,6 +51,7 @@ export function renderRootReconcilePrompt(request: RootReconcileRequest): Markdo
     worktree,
     "Decision rules:",
     "- create one Cycle only when one Artist session can achieve it and one fresh read-only Critic can independently check it.",
+    "- Objective must be a concise, human-readable Cycle title: use a complete imperative phrase, keep it within 68 characters when practical, and leave detailed checks to Acceptance.",
     "- choose complete only when trusted state and the latest Critic support every Root requirement and new input, with no unresolved finding or warning.",
     "- before returning complete, you must attempt a pull request: inspect the repository, commit the intended changes when needed, push the Root branch, and use installed gh to create or locate the pull request.",
     "- only when the pull request attempt fails may you return a pushed branch, and only after verifying that the Root branch exists on a remote.",
@@ -60,9 +61,9 @@ export function renderRootReconcilePrompt(request: RootReconcileRequest): Markdo
     "- do not choose an artist, request another role, partially consume comments, or prescribe a broad implementation plan.",
     "Return exactly one control header and its exact h2 sections. Every decision includes ## Report.",
     "decision: cycle\n\n## Objective\n[one observable outcome]\n\n## Acceptance\n[concrete read-only checks]\n\n## Boundaries\n[scope and exclusions]\n\n## Report\n### Why Continue\n[reason]\n\n### Evidence\n[trusted evidence]\n\n### Next Cycle\n[human-readable next step]",
-    "decision: complete\n\n## Summary\n[completion summary]\n\n## Delivery\n[one compact JSON object: {\"kind\":\"pull_request\",\"url\":\"...\",\"branch\":\"...\"} or {\"kind\":\"branch\",\"branch\":\"...\",\"remote\":\"...\"} or {\"kind\":\"files\",\"workspace_path\":\"absolute path\",\"files\":[\"relative/path\"]}]\n\n## Report\n### Overview\n[complete-worktree overview]\n\n### File Changes\n[use the mechanical summary]\n\n### Line Changes\n[use the mechanical summary]\n\n### Verification\n[latest Critic evidence]\n\n### Token Usage\n[leave for Conductor]",
+    "decision: complete\n\n## Summary\n[completion summary]\n\n## Delivery\n[one compact JSON object: {\"kind\":\"pull_request\",\"url\":\"...\",\"branch\":\"...\"} or {\"kind\":\"branch\",\"branch\":\"...\",\"remote\":\"...\"} or {\"kind\":\"files\",\"workspace_path\":\"absolute path\",\"files\":[\"relative/path\"]}]\n\n## Report\n### Overview\n[complete-worktree overview]\n\n### File Changes\n[use the mechanical summary]\n\n### Line Changes\n[use the mechanical summary]\n\n### Verification\n[latest Critic evidence]\n\n### Run Metrics\n[leave for Conductor]",
     "decision: needs_human\n\n## Reason\n[why no bounded Cycle can proceed]\n\n## Question\n[optional; omit this entire section when unnecessary]\n\n## Report\n### Reason\n[human-readable reason]\n\n### Question\n[question or no question]\n\n### Next Step\n[required human action]",
-    "For complete reports, reproduce the supplied mechanical file and line facts without inventing paths or counts. Conductor replaces those sections and fills exact token usage.",
+    "For complete reports, reproduce the supplied mechanical file and line facts without inventing paths or counts. Conductor replaces those sections and fills exact run duration and token usage.",
     "Return only the selected decision. Do not add prose before or after it.",
   ].join("\n\n"), "invalid_root_reconcile_prompt");
 }

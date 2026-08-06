@@ -75,7 +75,7 @@ const completeReport = [
   "### File Changes", "#### Created", "- None", "", "#### Updated", "- None", "", "#### Deleted", "- None", "",
   "### Line Changes", "+0 / -0 lines", "",
   "### Verification", "The latest Critic accepted the complete workspace.", "",
-  "### Token Usage", "Total tokens: Unknown",
+  "### Run Metrics", "Duration: 0ms", "Total tokens: Unknown",
 ].join("\n");
 
 const humanReport = [

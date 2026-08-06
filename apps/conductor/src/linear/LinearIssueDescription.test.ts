@@ -7,7 +7,7 @@ import {
   renderManagedIssueDescription,
 } from "./LinearIssueDescription.js";
 
-const updatedAt = "2026-08-05T23:30:00.000+08:00";
+const updatedAt = "2026-08-05 23:30:00 GMT+08:00";
 
 test("managed Issue descriptions separate task, Symphony metadata, and terminal result", () => {
   const initial = renderManagedIssueDescription({

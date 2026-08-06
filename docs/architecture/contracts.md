@@ -188,7 +188,7 @@ the caller never supplies status IDs or CLI flags.
 
 The Gateway's description operation is constrained to replacing the exact
 interior of the Root Harness snapshot block or appending one terminal `# Result`
-region plus one local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`
+region plus one human-readable local `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>`
 line to an Artist/Critic description. Child descriptions separate frozen
 `# Task`, Harness-owned `# Symphony Metadata`, and optional terminal `# Result`
 regions. It preserves all frozen bytes outside the owned region and cannot
@@ -372,14 +372,14 @@ response position and writes it to a local `cycle-NNN-*-result.md` file. The
 Artist report contains `## Summary`, `## File Changes` with
 `### Created`/`### Updated`/`### Deleted` path and +/- line-count entries, and
 `## Verification`; it is appended byte-for-byte once to the Artist description
-with one local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line and
+with one human-readable local `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line and
 is never parsed or supplied to Critic. Git porcelain markers (`??`, `M`,
 `D`) must be translated to those semantic sections rather than copied verbatim.
 The Critic report contains the verdict and
 `## Scope Reviewed`, `## Implementation Review`, `## Checks`, `## Evidence`,
 `## Findings`, and `## Task State`; it is appended byte-for-byte once to the Critic
-description with one local RFC3339 `Updated at:
-<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. Neither report repeats the Cycle
+description with one human-readable local `Updated at:
+<YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line. Neither report repeats the Cycle
 description. Byte-for-byte describes the Harness write request. Linear may
 normalize equivalent Markdown syntax when the description is read back; public
 validation therefore requires the same report structure and content, not the
@@ -398,9 +398,10 @@ not pre-judge workspace correctness. Only `succeeded` replaces
 Rejected or Failed replaces `pending_finding` with one bounded current failure
 summary.
 
-`CycleTerminalResult` remains as concise mechanical fields for the Cycle Result
-comment: it lets a human read the Cycle without traversing Artist and Critic
-descendants. Additional Cycle history comments are append-only records of each
+`CycleTerminalResult` remains the internal mechanical mapping. The visible Cycle
+Result shows only the mapped result, a linked Critic Issue identifier, and the
+Critique JSON resource outcome, avoiding repetition of Critic verdict, reason,
+or evidence. Additional Cycle history comments are append-only records of each
 status transition, Root decision, terminal result, and JSON upload/link outcome;
 their event timestamp is Linear `createdAt`, not a duplicate body timestamp.
 Cycle Runner parses Critic Markdown once, serializes the typed

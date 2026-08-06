@@ -175,8 +175,8 @@ before fresh Reconcile.
 | Step | Required behavior | Next step |
 |---|---|---|
 | activate | after the family record is durable, set Cycle and Root `In Progress` | then start Artist |
-| Artist | fresh workspace-write process with final `cycle-NNN-artist-result.md` | append report plus local RFC3339 `Updated at` to Artist description; expose current error first 50 chars; finish, then Critic |
-| Critic | fresh read-only process with final `cycle-NNN-critic-result.md` | parse once; append report plus local RFC3339 `Updated at` to Critic description; expose current error first 50 chars; finish, then persist JSON |
+| Artist | fresh workspace-write process with final `cycle-NNN-artist-result.md` | append report plus human-readable local `Updated at` to Artist description; expose current error first 50 chars; finish, then Critic |
+| Critic | fresh read-only process with final `cycle-NNN-critic-result.md` | parse once; append report plus human-readable local `Updated at` to Critic description; expose current error first 50 chars; finish, then persist JSON |
 | result | apply `WF-RESULT-*` mechanically | append Cycle history/result comments (timestamps come from Linear `createdAt`), upload only `cycle-NNN-critique-result.json` as `application/json`, then set Cycle `Done` |
 | Root State | write parsed Critic fields to `latest_critique`; update trusted fields only for Succeeded; clear a workspace warning only after clean full-diff Critic | checkpoint Root `In Review`, then Reconcile |
 
@@ -217,13 +217,13 @@ Role responses are Markdown files with fixed human-facing report sections. The
 Artist report is `## Summary`, `## File Changes` with
 `### Created`/`### Updated`/`### Deleted` path and +/- line-count entries, and
 `## Verification`; it is appended exactly once to Artist's description with
-one mechanical local RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line.
+one mechanical human-readable local `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line.
 The Critic report starts with
 `verdict: accepted | incomplete | blocked | violation | process_error`, then
 uses `## Scope Reviewed`, `## Implementation Review`, `## Checks`, `## Evidence`,
 `## Findings`, and `## Task State` in that order; it is appended exactly once to
-Critic's description with one mechanical local RFC3339 `Updated at:
-<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line.
+Critic's description with one mechanical human-readable local `Updated at:
+<YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line.
 Neither report repeats the Cycle description. There is one Artist and one
 Critic Agent call per Cycle. A missing or invalid final file becomes a process
 error; Conductor never starts a second summarization or format-repair call.

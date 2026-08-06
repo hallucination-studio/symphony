@@ -270,13 +270,13 @@ test("projects the Cycle, Artist, and Critic lifecycle statuses visibly", async 
   assert.equal(comments.some(([issueId]) => issueId === outcome.criticIssue.id), false);
   assert.equal(cycleComment.includes("## Cycle Result"), true);
   assert.equal(cycleComment.includes(`- Result: ${outcome.terminal.result}`), true);
-  assert.equal(cycleComment.includes(`- Critic Issue: ${outcome.criticIssue.id}`), true);
-  assert.equal(cycleComment.includes(`- Critic verdict: ${outcome.critique.verdict}`), true);
-  assert.equal(cycleComment.includes(`- Reason: ${outcome.terminal.reason}`), true);
+  assert.equal(cycleComment.includes(`- Critic: [${outcome.criticIssue.identifier}](${outcome.criticIssue.url})`), true);
+  assert.equal(cycleComment.includes("Critic verdict"), false);
+  assert.equal(cycleComment.includes("Reason:"), false);
   assert.equal(cycleComment.includes(criticDescription), false);
 });
 
-test("caps the Cycle title at 80 characters while naming role issues by Cycle", async () => {
+test("caps the Cycle title at a complete word with an ellipsis while naming role issues by Cycle", async () => {
   const fixture = await world();
   const longObjective = "Objective ".repeat(20);
   const spec = parseCycleSpec({
@@ -315,6 +315,8 @@ test("caps the Cycle title at 80 characters while naming role issues by Cycle", 
 
   assert.equal((creates[0] ?? "").length <= 80, true);
   assert.match(creates[0] ?? "", /^\[Cycle 001\] Objective /u);
+  assert.match(creates[0] ?? "", /…$/u);
+  assert.doesNotMatch(creates[0] ?? "", /Objectiv…$/u);
   assert.equal(creates[1], "[Artist] Cycle 001");
   assert.equal(creates[2], "[Critic] Cycle 001");
 });
