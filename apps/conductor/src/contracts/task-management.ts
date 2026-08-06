@@ -9,6 +9,7 @@ import {
   freezeObject,
   parseArray,
   parseBoundedString,
+  parseEnum,
   parseMarkdownText,
   parseOptional,
   type MarkdownText,
@@ -30,9 +31,19 @@ export interface LinearIssue {
 export interface LinearComment {
   readonly id: string;
   readonly issue_id: string;
+  readonly parent_id: string | null;
   readonly body: MarkdownText;
   readonly creator_id: string;
   readonly created_at: string;
+}
+
+export const LINEAR_REACTION_EMOJIS = ["white_check_mark", "x"] as const;
+export type LinearReactionEmoji = typeof LINEAR_REACTION_EMOJIS[number];
+
+export interface LinearReaction {
+  readonly id: string;
+  readonly reply_id: string;
+  readonly emoji: LinearReactionEmoji;
 }
 
 export interface LinearWorkflow {
@@ -40,6 +51,7 @@ export interface LinearWorkflow {
   readonly todo_status_id: string;
   readonly in_progress_status_id: string;
   readonly in_review_status_id: string;
+  readonly needs_human_status_id: string;
   readonly done_status_id: string;
   readonly canceled_status_id: string;
 }
@@ -78,13 +90,26 @@ export function parseLinearIssue(value: unknown): LinearIssue {
 
 export function parseLinearComment(value: unknown): LinearComment {
   const record = asRecord(value, "invalid_linear_comment");
-  assertExactKeys(record, ["id", "issue_id", "body", "creator_id", "created_at"]);
+  assertExactKeys(record, ["id", "issue_id", "parent_id", "body", "creator_id", "created_at"]);
   return freezeObject({
     id: parseProviderId(record.id, "linear_comment_id"),
     issue_id: parseProviderId(record.issue_id, "linear_comment_issue_id"),
+    parent_id: record.parent_id === null
+      ? null
+      : parseProviderId(record.parent_id, "linear_comment_parent_id"),
     body: parseMarkdownText(record.body, "invalid_comment_body"),
     creator_id: parseProviderId(record.creator_id, "linear_comment_creator_id"),
     created_at: parseBoundedString(record.created_at, "invalid_comment_created_at", 64),
+  });
+}
+
+export function parseLinearReaction(value: unknown): LinearReaction {
+  const record = asRecord(value, "invalid_linear_reaction");
+  assertExactKeys(record, ["id", "reply_id", "emoji"]);
+  return freezeObject({
+    id: parseProviderId(record.id, "linear_reaction_id"),
+    reply_id: parseProviderId(record.reply_id, "linear_reaction_reply_id"),
+    emoji: parseEnum(record.emoji, LINEAR_REACTION_EMOJIS),
   });
 }
 
@@ -95,6 +120,7 @@ export function parseLinearWorkflow(value: unknown): LinearWorkflow {
     "todo_status_id",
     "in_progress_status_id",
     "in_review_status_id",
+    "needs_human_status_id",
     "done_status_id",
     "canceled_status_id",
   ]);
@@ -103,6 +129,7 @@ export function parseLinearWorkflow(value: unknown): LinearWorkflow {
     todo_status_id: parseProviderId(record.todo_status_id, "linear_todo_status_id"),
     in_progress_status_id: parseProviderId(record.in_progress_status_id, "linear_in_progress_status_id"),
     in_review_status_id: parseProviderId(record.in_review_status_id, "linear_in_review_status_id"),
+    needs_human_status_id: parseProviderId(record.needs_human_status_id, "linear_needs_human_status_id"),
     done_status_id: parseProviderId(record.done_status_id, "linear_done_status_id"),
     canceled_status_id: parseProviderId(record.canceled_status_id, "linear_canceled_status_id"),
   };

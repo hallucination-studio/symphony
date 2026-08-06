@@ -92,6 +92,11 @@ function cycleDescription(spec: CycleSpec): string {
     metadata: [
       "## Consumed Root Comment IDs",
       ...(spec.consumed_comment_ids.length === 0 ? ["None"] : spec.consumed_comment_ids.map((id) => `- ${id}`)),
+      "",
+      "## Architecture Decisions",
+      ...(spec.architecture_decisions.length === 0
+        ? ["None"]
+        : ["```json", JSON.stringify(spec.architecture_decisions, null, 2), "```"]),
     ].join("\n\n"),
   });
 }

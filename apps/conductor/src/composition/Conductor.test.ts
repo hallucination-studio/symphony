@@ -11,6 +11,7 @@ import type { PerformerLaunchRequest } from "../contracts/performer.js";
 import type { RootReconcileDecision, RootReconcileRequest } from "../contracts/root.js";
 import { parseRootState } from "../contracts/root.js";
 import { parseRootWorkspace } from "../contracts/workspace.js";
+import type { MarkdownText } from "../contracts/validation.js";
 import { CycleRunner } from "../cycle-runner/CycleRunner.js";
 import { InMemoryLinearGateway } from "../linear/InMemoryLinearGateway.js";
 import { parseRootDescription, renderRootDescription } from "../linear/LinearRootState.js";
@@ -30,6 +31,7 @@ async function scenario() {
       { id: "todo-id", name: "Waiting", type: "unstarted", team_id: "team-id" },
       { id: "active-id", name: "Doing", type: "started", team_id: "team-id" },
       { id: "review-id", name: "In Review", type: "started", team_id: "team-id" },
+      { id: "needs-human-id", name: "Needs Human", type: "started", team_id: "team-id" },
       { id: "completed-id", name: "Finished", type: "completed", team_id: "team-id" },
       { id: "canceled-id", name: "Abandoned", type: "canceled", team_id: "team-id" },
     ],
@@ -110,6 +112,17 @@ async function rootProjection(world: Awaited<ReturnType<typeof scenario>>) {
   return parseRootDescription((await world.gateway.get_issue("root-id")).description);
 }
 
+function makeStaleRootReadback(
+  world: Awaited<ReturnType<typeof scenario>>,
+  description: MarkdownText,
+): void {
+  const getIssue = world.gateway.get_issue.bind(world.gateway);
+  world.gateway.get_issue = async (issueRef: string) => {
+    const issue = await getIssue(issueRef);
+    return issue.id === "root-id" ? { ...issue, description } : issue;
+  };
+}
+
 const cycle = (objective: string): RootReconcileDecision => ({
   kind: "create_cycle",
   cycle: { objective, acceptance: `${objective} is independently verified`, boundaries: "Parser and tests only" } as never,
@@ -132,8 +145,27 @@ const complete = (summary: string): RootReconcileDecision => ({
   ].join("\n") as never,
 });
 
-const needsHuman = (reason: string): RootReconcileDecision => ({
+const needsHuman = (
+  reason: string,
+  replyDisposition?: "accepted" | "rejected",
+): RootReconcileDecision => ({
   kind: "needs_human", reason: reason as never,
+  questions: [{
+    question: "Which boundary should Symphony use?",
+    options: [
+      { key: "A", label: "Service-owned", consequence: "The service owns the transaction." },
+      { key: "B", label: "Caller-owned", consequence: "The caller owns the transaction." },
+    ],
+  }] as never,
+  ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+  ...(replyDisposition !== "accepted" ? {} : {
+    architecture_decisions: [{
+      title: "Choose the service-owned boundary",
+      decision: "Use the service-owned transaction boundary.",
+      rationale: "The human reply selected the service-owned option.",
+      consequences: ["The service owns transaction coordination."],
+    }] as never,
+  }),
   report: [
     "### Reason", reason, "",
     "### Question", "What explicit direction should Symphony apply?", "",
@@ -183,7 +215,7 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Critic
     artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const conductor = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
     workspace: world.workspace, maxCycles: 3,
   });
 
@@ -217,13 +249,13 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Critic
   assert.equal((await world.gateway.list_root_comments_after("root-id")).length, 0);
 });
 
-test("normalizes an unfinished Root to Todo before its first fresh Reconcile", async () => {
+test("preserves the visible Root status until Reconcile requests human input", async () => {
   const world = await scenario();
   await world.gateway.update_issue_status("root-id", "active-id");
   const statuses: string[] = [];
   const conductor = new Conductor({
     gateway: world.gateway,
-    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: {
       reconcile: async () => {
         statuses.push((await world.gateway.get_issue("ENG-1")).status_id);
@@ -239,8 +271,12 @@ test("normalizes an unfinished Root to Todo before its first fresh Reconcile", a
     status: "needs_human",
     reason: "Require an explicit boundary",
   });
-  assert.deepEqual(statuses, ["todo-id"]);
-  assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "review-id");
+  assert.deepEqual(statuses, ["active-id"]);
+  assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "needs-human-id");
+  const comments = await world.gateway.list_root_comments_after("root-id");
+  assert.equal(comments.length, 1);
+  assert.match(comments[0]?.body ?? "", /^# Symphony Harness: Human Action\n/u);
+  assert.equal((await rootProjection(world)).state?.human_action?.comment_id, comments[0]?.id);
 });
 
 test("final Inbox input cancels completion and enters the next frozen Cycle", async () => {
@@ -274,7 +310,7 @@ test("final Inbox input cancels completion and enters the next frozen Cycle", as
     artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const conductor = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
     workspace: world.workspace, maxCycles: 2,
   });
 
@@ -283,7 +319,7 @@ test("final Inbox input cancels completion and enters the next frozen Cycle", as
   assert.equal(reconcilerRequests[1]?.new_root_comments[0]?.body, "Late user requirement");
 });
 
-test("NeedsHuman resumes only after explicit new Root input", async () => {
+test("NeedsHuman resumes only after a direct Human Action reply", async () => {
   const world = await scenario();
   const rolePerformer = scriptedPerformer([], []);
   const runner = new CycleRunner({
@@ -292,33 +328,237 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
     artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const stopped = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([needsHuman("Choose an API boundary")], []),
     cycleRunner: runner,
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await stopped.run("ENG-1"), { status: "needs_human", reason: "Choose an API boundary" });
+  assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "needs-human-id");
+  assert.equal((await world.gateway.list_root_comments_after("root-id")).length, 1);
 
   let reconciles = 0;
   const withoutInput = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: { reconcile: async () => { reconciles += 1; throw new Error("unexpected_reconcile"); } },
     cycleRunner: runner,
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await withoutInput.run("ENG-1"), { status: "needs_human", reason: "Choose an API boundary" });
   assert.equal(reconciles, 0);
+  assert.equal((await world.gateway.list_root_comments_after("root-id")).length, 1);
 
-  await world.gateway.create_comment("root-id", "Use the existing parser boundary.");
+  const action = (await world.gateway.list_root_comments_after("root-id"))[0];
+  assert.notEqual(action, undefined);
+  const reply = await world.gateway.create_comment_reply("root-id", action?.id ?? "missing", "Use the existing parser boundary.");
   const requests: RootReconcileRequest[] = [];
   const withInput = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    reconciler: scriptedReconciler([needsHuman("Input acknowledged")], requests),
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    reconciler: scriptedReconciler([needsHuman("Input acknowledged", "accepted")], requests),
     cycleRunner: runner,
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await withInput.run("ENG-1"), { status: "needs_human", reason: "Input acknowledged" });
-  assert.equal(requests[0]?.new_root_comments[0]?.body, "Use the existing parser boundary.");
+  assert.deepEqual(requests[0]?.new_root_comments, []);
+  assert.equal(requests[0]?.human_action_replies[0]?.body, "Use the existing parser boundary.");
+  assert.deepEqual(world.gateway.reactions, [{
+    id: "fake-reaction-1", reply_id: reply.id, emoji: "white_check_mark",
+  }]);
+  const comments = await world.gateway.list_root_comments_after("root-id");
+  assert.equal(comments.length, 2);
+  assert.equal((await rootProjection(world)).state?.human_action?.comment_id, comments.at(-1)?.id);
+  assert.equal((await rootProjection(world)).state?.architecture_decisions[0]?.id, "ADR-001");
+});
+
+test("rejects one whole Root reply batch and asks one actionable follow-up", async () => {
+  const world = await scenario();
+  const runner = {} as CycleRunner;
+  const workflow = { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" };
+  const stopped = new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([needsHuman("Choose an API boundary")], []),
+    cycleRunner: runner, workspace: world.workspace, maxCycles: 1,
+  });
+  await stopped.run("ENG-1");
+  const action = (await world.gateway.list_root_comments_after("root-id"))[0];
+  assert.notEqual(action, undefined);
+  const firstReply = await world.gateway.create_comment_reply("root-id", action?.id ?? "missing", "Maybe use either boundary.");
+  const secondReply = await world.gateway.create_comment_reply("root-id", action?.id ?? "missing", "I am not sure yet.");
+  const requests: RootReconcileRequest[] = [];
+  const rejected = new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([needsHuman("The reply does not choose one boundary.", "rejected")], requests),
+    cycleRunner: runner, workspace: world.workspace, maxCycles: 1,
+  });
+
+  assert.deepEqual(await rejected.run("ENG-1"), {
+    status: "needs_human", reason: "The reply does not choose one boundary.",
+  });
+  assert.deepEqual(requests[0]?.new_root_comments, []);
+  assert.deepEqual(requests[0]?.human_action_replies.map(({ id }) => id), [firstReply.id, secondReply.id]);
+  assert.deepEqual(world.gateway.reactions.map(({ reply_id, emoji }) => ({ reply_id, emoji })), [
+    { reply_id: firstReply.id, emoji: "x" },
+    { reply_id: secondReply.id, emoji: "x" },
+  ]);
+  const comments = await world.gateway.list_root_comments_after("root-id");
+  assert.equal(comments.filter(({ body }) => body.startsWith("# Symphony Harness: Human Action")).length, 1);
+  const thread = await world.gateway.list_comment_replies_after(action?.id ?? "missing");
+  assert.match(thread.at(-1)?.body ?? "", /^# Symphony Harness: Human Action Follow-up[\s\S]*The reply does not choose one boundary\./u);
+  assert.equal((await rootProjection(world)).state?.human_action?.reply_cursor, secondReply.id);
+
+  let reconciles = 0;
+  const restarted = new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: { reconcile: async () => { reconciles += 1; throw new Error("unexpected_reconcile"); } },
+    cycleRunner: runner, workspace: world.workspace, maxCycles: 1,
+  });
+  assert.deepEqual(await restarted.run("ENG-1"), {
+    status: "needs_human", reason: "The reply does not choose one boundary.",
+  });
+  assert.equal(reconciles, 0);
+  assert.equal((await world.gateway.list_comment_replies_after(action?.id ?? "missing")).length, thread.length);
+});
+
+test("accepts a Root reply once before the final completion read", async () => {
+  const world = await scenario();
+  const workflow = { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" };
+  await new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([needsHuman("Choose an API boundary")], []),
+    cycleRunner: {} as CycleRunner, workspace: world.workspace, maxCycles: 1,
+  }).run("ENG-1");
+  const action = (await world.gateway.list_root_comments_after("root-id"))[0];
+  assert.notEqual(action, undefined);
+  const reply = await world.gateway.create_comment_reply("root-id", action?.id ?? "missing", "Use the service-owned boundary.");
+  const requests: RootReconcileRequest[] = [];
+  const acceptedCompletion = {
+    ...complete("The selected boundary is already verified."),
+    reply_disposition: "accepted",
+    architecture_decisions: [{
+      title: "Use service ownership",
+      decision: "Use the service-owned transaction boundary.",
+      rationale: "The human selected service ownership.",
+      consequences: ["The service coordinates the transaction."],
+    }] as never,
+  } as RootReconcileDecision;
+  const result = await new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([acceptedCompletion], requests),
+    cycleRunner: {} as CycleRunner, workspace: world.workspace, maxCycles: 1,
+  }).run("ENG-1");
+
+  assert.deepEqual(result, { status: "done", delivery: { kind: "branch", branch: "root/ENG-1" } });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(world.gateway.reactions.map(({ reply_id, emoji }) => ({ reply_id, emoji })), [
+    { reply_id: reply.id, emoji: "white_check_mark" },
+  ]);
+  assert.equal((await rootProjection(world)).state?.human_action, undefined);
+  assert.equal((await rootProjection(world)).state?.architecture_decisions[0]?.source_reply_ids[0], reply.id);
+});
+
+test("fails closed when an accepted Architecture Decision is missing from provider read-back", async () => {
+  const world = await scenario();
+  const workflow = { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" };
+  await new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([needsHuman("Choose an API boundary")], []),
+    cycleRunner: {} as CycleRunner, workspace: world.workspace, maxCycles: 1,
+  }).run("ENG-1");
+  const action = (await world.gateway.list_root_comments_after("root-id"))[0];
+  assert.notEqual(action, undefined);
+  const reply = await world.gateway.create_comment_reply("root-id", action?.id ?? "missing", "Use the service-owned boundary.");
+  const beforeAcceptance = await rootProjection(world);
+  const staleDescription = renderRootDescription(
+    beforeAcceptance.requirement,
+    beforeAcceptance.state as NonNullable<typeof beforeAcceptance.state>,
+    beforeAcceptance.reconcile_report,
+    DESCRIPTION_TIMESTAMP,
+  );
+  makeStaleRootReadback(world, staleDescription);
+  const acceptedCompletion = {
+    ...complete("The selected boundary is already verified."),
+    reply_disposition: "accepted",
+    architecture_decisions: [{
+      title: "Use service ownership",
+      decision: "Use the service-owned transaction boundary.",
+      rationale: "The human selected service ownership.",
+      consequences: ["The service coordinates the transaction."],
+    }] as never,
+  } as RootReconcileDecision;
+  const conductor = new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([acceptedCompletion], []),
+    cycleRunner: {} as CycleRunner, workspace: world.workspace, maxCycles: 1,
+  });
+
+  await assert.rejects(conductor.run("ENG-1"), /accepted_architecture_decision_readback_mismatch/u);
+  assert.deepEqual(world.gateway.reactions.map(({ reply_id, emoji }) => ({ reply_id, emoji })), [
+    { reply_id: reply.id, emoji: "white_check_mark" },
+  ]);
+  const projection = await rootProjection(world);
+  assert.equal(projection.state?.human_action?.comment_id, action?.id);
+  assert.deepEqual(projection.state?.architecture_decisions, []);
+  assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "needs-human-id");
+});
+
+test("does not start a Cycle when an accepted Architecture Decision read-back is stale", async () => {
+  const world = await scenario();
+  const workflow = { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" };
+  await new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([needsHuman("Choose an API boundary")], []),
+    cycleRunner: {} as CycleRunner, workspace: world.workspace, maxCycles: 1,
+  }).run("ENG-1");
+  const action = (await world.gateway.list_root_comments_after("root-id"))[0];
+  assert.notEqual(action, undefined);
+  const reply = await world.gateway.create_comment_reply("root-id", action?.id ?? "missing", "Use the service-owned boundary.");
+  const beforeAcceptance = await rootProjection(world);
+  const state = beforeAcceptance.state;
+  if (state === undefined) throw new Error("missing_root_state");
+  const staleDescription = renderRootDescription(
+    beforeAcceptance.requirement,
+    parseRootState({
+      ...state,
+      architecture_decisions: [{
+        id: "ADR-001",
+        title: "An older boundary decision",
+        decision: "Use the caller-owned transaction boundary.",
+        rationale: "This decision predates the current reply.",
+        consequences: ["The caller coordinates the transaction."],
+        source_action_comment_id: action?.id,
+        source_reply_ids: [reply.id],
+        decided_at: "2026-08-05 00:00:00 GMT+08:00",
+      }],
+    }),
+    beforeAcceptance.reconcile_report,
+    DESCRIPTION_TIMESTAMP,
+  );
+  makeStaleRootReadback(world, staleDescription);
+  const acceptedCycle = {
+    ...cycle("Apply the selected boundary"),
+    reply_disposition: "accepted",
+    architecture_decisions: [{
+      title: "Use service ownership",
+      decision: "Use the service-owned transaction boundary.",
+      rationale: "The human selected service ownership.",
+      consequences: ["The service coordinates the transaction."],
+    }] as never,
+  } as RootReconcileDecision;
+  let cycleRuns = 0;
+  const conductor = new Conductor({
+    gateway: world.gateway, workflow,
+    reconciler: scriptedReconciler([acceptedCycle], []),
+    cycleRunner: { run: async () => { cycleRuns += 1; } } as unknown as CycleRunner,
+    workspace: world.workspace, maxCycles: 1,
+  });
+
+  await assert.rejects(conductor.run("ENG-1"), /accepted_architecture_decision_readback_mismatch/u);
+  assert.equal(cycleRuns, 0);
+  assert.deepEqual(world.gateway.reactions.map(({ reply_id, emoji }) => ({ reply_id, emoji })), [
+    { reply_id: reply.id, emoji: "white_check_mark" },
+  ]);
+  assert.equal((await rootProjection(world)).state?.human_action?.comment_id, action?.id);
+  assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "review-id");
 });
 
 test("a recorded delivery completes Root without resolving the workspace", async () => {
@@ -329,11 +569,12 @@ test("a recorded delivery completes Root without resolving the workspace", async
     root_branch: "root/ENG-1",
     current_phase: "completed",
     task_state_markdown: "All acceptance checks passed",
+    architecture_decisions: [],
     delivery: { kind: "pull_request", url: "https://github.com/acme/repo/pull/9", branch: "root/ENG-1" },
   }));
   let workspaceResolutions = 0;
   const conductor = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: { reconcile: async () => { throw new Error("unexpected_reconcile"); } },
     cycleRunner: {} as CycleRunner,
     workspace: async () => {
@@ -348,18 +589,21 @@ test("a recorded delivery completes Root without resolving the workspace", async
   assert.equal((await world.gateway.get_issue("ENG-1")).status, "completed");
 });
 
-test("fails closed when Reconcile completes with unconsumed Root input", async () => {
+test("completion consumes ordinary Root input supplied to that Reconcile", async () => {
   const world = await scenario();
-  await world.gateway.create_comment("root-id", "New requirement");
+  const comment = await world.gateway.create_comment("root-id", "New requirement");
+  const requests: RootReconcileRequest[] = [];
   const conductor = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    reconciler: scriptedReconciler([complete("Already done")], []),
+    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    reconciler: scriptedReconciler([complete("Already done")], requests),
     cycleRunner: {} as CycleRunner,
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await conductor.run("ENG-1"), {
-    status: "needs_human", reason: "completion_with_unconsumed_root_input",
+    status: "done", delivery: { kind: "branch", branch: "root/ENG-1" },
   });
+  assert.equal(requests[0]?.new_root_comments[0]?.id, comment.id);
+  assert.equal((await rootProjection(world)).state?.comment_cursor, comment.id);
 });
 
 test("a recorded branch delivery completes Root", async () => {
@@ -370,11 +614,12 @@ test("a recorded branch delivery completes Root", async () => {
     root_branch: "root/ENG-1",
     current_phase: "completed",
     task_state_markdown: "All acceptance checks passed",
+    architecture_decisions: [],
     delivery: { kind: "branch", branch: "root/ENG-1" },
   }));
   const conductor = new Conductor({
     gateway: world.gateway,
-    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: { reconcile: async () => { throw new Error("unexpected_reconcile"); } },
     cycleRunner: {} as CycleRunner,
     workspace: async () => { throw new Error("workspace_must_not_be_resolved"); },
@@ -390,7 +635,7 @@ test("an escaped Cycle failure records the current message and moves Root to In 
   const error = new Error("native cycle failure detail that exceeds the visible fifty character boundary");
   const conductor = new Conductor({
     gateway: world.gateway,
-    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([cycle("Trigger one runtime failure")], []),
     cycleRunner: { run: async () => { throw error; } } as unknown as CycleRunner,
     workspace: world.workspace,
@@ -402,7 +647,7 @@ test("an escaped Cycle failure records the current message and moves Root to In 
   const state = (await rootProjection(world)).state;
   assert.notEqual(state, undefined);
   if (state === undefined) throw new Error("missing_root_state");
-  assert.equal(state.current_phase, "NeedsHuman");
+  assert.equal(state.current_phase, "failed");
   assert.equal(state.harness_feedback, error.message.slice(0, 50));
 });
 
@@ -479,7 +724,7 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
   });
   const conductor = new Conductor({
     gateway: world.gateway,
-    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler, cycleRunner,
     workspace: world.workspace, maxCycles: 2,
   });
@@ -509,7 +754,7 @@ test("bounds untracked file reads while collecting the Reconcile worktree summar
   const requests: RootReconcileRequest[] = [];
   const conductor = new Conductor({
     gateway: world.gateway,
-    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", needs_human_status_id: "needs-human-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([complete("The bounded summary behavior is verified.")], requests),
     cycleRunner: { run: async () => { throw new Error("cycle_must_not_run"); } } as unknown as CycleRunner,
     workspace: world.workspace,

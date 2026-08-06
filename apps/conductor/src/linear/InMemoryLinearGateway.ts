@@ -6,16 +6,24 @@ import type {
   LinearUploadContentType,
   LinearGateway,
   LinearIssue,
+  LinearReaction,
+  LinearReactionEmoji,
   LinearUnfinishedDescendant,
   LinearWorkflowState,
 } from "./LinearGateway.js";
-import { parseLinearComment, parseLinearIssue } from "../contracts/task-management.js";
+import {
+  LINEAR_REACTION_EMOJIS,
+  parseLinearComment,
+  parseLinearIssue,
+  parseLinearReaction,
+} from "../contracts/task-management.js";
 
 
 export interface InMemoryLinearGatewaySeed {
   readonly issues?: readonly LinearIssue[];
   readonly states?: readonly LinearWorkflowState[];
   readonly comments?: readonly LinearComment[];
+  readonly reactions?: readonly LinearReaction[];
 }
 
 export interface InMemoryLinearAttachment extends LinearUploadedFile {
@@ -37,6 +45,10 @@ function copyComment(comment: LinearComment): LinearComment {
   return Object.freeze({ ...comment });
 }
 
+function copyReaction(reaction: LinearReaction): LinearReaction {
+  return Object.freeze({ ...reaction });
+}
+
 function copyAttachment(attachment: InMemoryLinearAttachment): InMemoryLinearAttachment {
   return Object.freeze({ ...attachment, contents: attachment.contents.slice() });
 }
@@ -50,10 +62,12 @@ export class InMemoryLinearGateway implements LinearGateway {
   readonly #issues = new Map<string, LinearIssue>();
   readonly #states = new Map<string, LinearWorkflowState>();
   readonly #comments = new Map<string, LinearComment>();
+  readonly #reactions = new Map<string, LinearReaction>();
   readonly #attachments = new Map<string, InMemoryLinearAttachment>();
   #issueSequence = 0;
   #stateSequence = 0;
   #commentSequence = 0;
+  #reactionSequence = 0;
   #attachmentSequence = 0;
 
   constructor(seed: InMemoryLinearGatewaySeed = {}) {
@@ -67,7 +81,23 @@ export class InMemoryLinearGateway implements LinearGateway {
     }
     for (const comment of seed.comments ?? []) {
       if (this.#comments.has(comment.id)) throw new Error("linear_comment_duplicated");
-      this.#comments.set(comment.id, copyComment(comment));
+      const parsed = parseLinearComment(comment);
+      this.#comments.set(parsed.id, copyComment(parsed));
+    }
+    for (const comment of this.#comments.values()) {
+      if (comment.parent_id === null) continue;
+      const parent = this.#comments.get(comment.parent_id);
+      if (parent === undefined) throw new Error("linear_comment_parent_not_found");
+      if (parent.parent_id !== null) throw new Error("linear_nested_comment_reply");
+      if (parent.issue_id !== comment.issue_id) throw new Error("linear_comment_issue_mismatch");
+    }
+    for (const reaction of seed.reactions ?? []) {
+      if (this.#reactions.has(reaction.id)) throw new Error("linear_reaction_duplicated");
+      const parsed = parseLinearReaction(reaction);
+      const reply = this.#comments.get(parsed.reply_id);
+      if (reply === undefined) throw new Error("linear_reaction_reply_not_found");
+      if (reply.parent_id === null) throw new Error("linear_reaction_target_invalid");
+      this.#reactions.set(parsed.id, copyReaction(parsed));
     }
   }
 
@@ -103,13 +133,27 @@ export class InMemoryLinearGateway implements LinearGateway {
   }
 
   async list_root_comments_after(rootId: string, cursor?: string): Promise<readonly LinearComment[]> {
+    if (!this.#issues.has(rootId)) throw new Error(`linear_issue_not_found:${rootId}`);
     const comments = orderedComments(
-      [...this.#comments.values()].filter((comment) => comment.issue_id === rootId),
+      [...this.#comments.values()].filter((comment) => comment.issue_id === rootId && comment.parent_id === null),
     );
     if (cursor === undefined) return Object.freeze(comments.map(copyComment));
     const cursorIndex = comments.findIndex((comment) => comment.id === cursor);
     if (cursorIndex < 0) throw new Error("linear_comment_cursor_not_found");
     return Object.freeze(comments.slice(cursorIndex + 1).map(copyComment));
+  }
+
+  async list_comment_replies_after(commentId: string, cursor?: string): Promise<readonly LinearComment[]> {
+    const parent = this.#comments.get(commentId);
+    if (parent === undefined) throw new Error(`linear_comment_not_found:${commentId}`);
+    if (parent.parent_id !== null) throw new Error("linear_nested_comment_reply");
+    const replies = orderedComments(
+      [...this.#comments.values()].filter((comment) => comment.parent_id === commentId),
+    );
+    if (cursor === undefined) return Object.freeze(replies.map(copyComment));
+    const cursorIndex = replies.findIndex((comment) => comment.id === cursor);
+    if (cursorIndex < 0) throw new Error("linear_comment_cursor_not_found");
+    return Object.freeze(replies.slice(cursorIndex + 1).map(copyComment));
   }
 
   async list_unfinished_descendants(rootId: string): Promise<readonly LinearUnfinishedDescendant[]> {
@@ -178,12 +222,55 @@ export class InMemoryLinearGateway implements LinearGateway {
     const comment = parseLinearComment({
       id,
       issue_id: issueId,
+      parent_id: null,
       body,
       creator_id: "in-memory-linear-gateway",
       created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, this.#commentSequence)).toISOString(),
     });
     this.#comments.set(id, comment);
     return copyComment(comment);
+  }
+
+  async create_comment_reply(issueId: string, commentId: string, body: string): Promise<LinearComment> {
+    const parent = this.#comments.get(commentId);
+    if (parent === undefined) throw new Error(`linear_comment_not_found:${commentId}`);
+    if (parent.issue_id !== issueId) throw new Error("linear_comment_issue_mismatch");
+    if (parent.parent_id !== null) throw new Error("linear_nested_comment_reply");
+    this.#commentSequence += 1;
+    const comment = parseLinearComment({
+      id: `fake-comment-${this.#commentSequence}`,
+      issue_id: issueId,
+      parent_id: commentId,
+      body,
+      creator_id: "in-memory-linear-gateway",
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, this.#commentSequence)).toISOString(),
+    });
+    this.#comments.set(comment.id, comment);
+    return copyComment(comment);
+  }
+
+  async create_comment_reaction(
+    replyId: string,
+    emoji: LinearReactionEmoji,
+  ): Promise<LinearReaction> {
+    const reply = this.#comments.get(replyId);
+    if (reply === undefined) throw new Error(`linear_comment_not_found:${replyId}`);
+    if (reply.parent_id === null) throw new Error("linear_comment_reaction_target_invalid");
+    if (!(LINEAR_REACTION_EMOJIS as readonly string[]).includes(emoji)) {
+      throw new Error("linear_comment_reaction_emoji_invalid");
+    }
+    this.#reactionSequence += 1;
+    const reaction = parseLinearReaction({
+      id: `fake-reaction-${this.#reactionSequence}`,
+      reply_id: replyId,
+      emoji,
+    });
+    this.#reactions.set(reaction.id, reaction);
+    return copyReaction(reaction);
+  }
+
+  get reactions(): readonly LinearReaction[] {
+    return Object.freeze([...this.#reactions.values()].map(copyReaction));
   }
 
   get attachments(): readonly InMemoryLinearAttachment[] {
