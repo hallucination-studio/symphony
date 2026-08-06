@@ -106,7 +106,7 @@ only as evidence-path compatibility. They are not target domain concepts.
 | Scenario | Observable pass condition |
 |---|---|
 | minimal launch | the only public execution command accepts independent `--reconcile-*`, `--artist-*`, and `--critic-*` role values, one Root, an optional preferred workspace, and one supplied external run directory |
-| visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Artist/Critic transition follows the Workflow Model matrix |
+| visible status plane | startup binds or creates six exact Root statuses, descendants exclude `Needs Human`, name/type ambiguity fails closed, and every transition follows the Workflow Model matrix |
 | exact topology | Linear shows `Root -> Cycle -> Artist + Critic`; at most one Cycle is active |
 | visible snapshots | Root description has exactly one managed snapshot block refreshed with a presentation-only local `Updated at` line; Artist/Critic each receive exactly one terminal report append with the same local format |
 | frozen input | a Root comment arriving during Artist/Critic appears only in the next Cycle |
@@ -149,9 +149,10 @@ access token into each Conductor environment. Codex remains fixed; private
 per-role connection overrides are injected directly without an Agent catalog.
 Conductor owns Root Reconcile, Cycle execution, Critic judgment, Root
 State promotion, and terminal delivery. There is no cross-machine lease, SQLite
-store, daemon IPC, or Web surface. This round does not add Podium scheduling,
-UI, or E2E behavior for Conductor `NeedsHuman`; the existing V1 terminal state
-and workflow remain unchanged.
+store, daemon IPC, or Web surface. `Needs Human` is a Root-only visible state.
+Podium discovers a reply after the latest question comment and submits that Root
+to the unchanged ordinary queue; it adds no recovery priority, label, answer UI,
+or Resume path.
 
 ## Verification layers
 
