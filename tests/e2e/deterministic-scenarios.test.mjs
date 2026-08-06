@@ -1,277 +1,274 @@
 import assert from "node:assert/strict";
-import { readFile, symlink } from "node:fs/promises";
-import path from "node:path";
 import test from "node:test";
 
 import { AgentDriver } from "./agent-driver.mjs";
 import { runDeterministicScenario } from "./deterministic-runner.mjs";
 import { LinearDriver } from "./linear-driver.mjs";
 import { createScenarioWorld } from "./scenario-world.mjs";
+import { DETERMINISTIC_SCENARIOS, scenarioRootIdentity } from "./scenario-catalog.mjs";
 
-function statusTransitions(state) {
-  return state.events
-    .filter(({ event }) => event === "status_transition")
-    .map(({ issue_id: issueId, from, to }) => ({ issue_id: issueId, from, to }));
+const selected = process.env.SYMPHONY_E2E_SCENARIO;
+
+function scenarioTest(name, callback) {
+  test(name, { skip: selected !== undefined && selected !== name }, callback);
 }
 
-test("serial fake Linear and Agent flow uses real filesystem/Git and publishes one PR", async (context) => {
-  const world = await createScenarioWorld();
-  context.after(() => world.cleanup());
-  await symlink(`${world.workspace}/README.md`, `${world.runDirectory}/diagnostic-link`);
-  const linear = new LinearDriver({ root: { id: world.rootId, identifier: "ENG-1" } });
-  assert.equal((await linear.readRoot()).status, "todo");
-  await linear.addRootComment("Write the verified result.");
-  const agent = new AgentDriver({
-    artist: [async (request, currentWorld) => {
-      assert.equal(request.sandbox, "workspace_write");
-      await currentWorld.write("result.txt", "verified\n");
-      await currentWorld.writeRunFile("cycle-001-artist-result.md", [
-        "## Summary",
-        "Created the requested result file and ran the focused verification.",
-        "",
-        "## File Changes",
-        "### Created",
-        "- result.txt (+1/-0 lines)",
-        "### Updated",
-        "- None",
-        "### Deleted",
-        "- None",
-        "",
-        "## Verification",
-        "- Read back result.txt and confirmed the expected content.",
-        "",
-      ].join("\n"));
-      return { launch_status: "exited", exit_code: 0, final_output: "untrusted execute prose" };
-    }],
-    critic: [async (request, currentWorld) => {
-      assert.equal(request.sandbox, "read_only");
-      assert.equal(await currentWorld.read("result.txt"), "verified\n");
-      await currentWorld.writeRunFile("cycle-001-critic-result.md", [
-        "```json",
-        JSON.stringify({ verdict: "accepted", task_state_markdown: "The verified result is present." }),
-        "```",
-        "",
-        "## Audit",
-        "Inspected the complete workspace diff and result.txt.",
-        "",
-        "The requested file is present with the expected content.",
-        "",
-        "## Verification",
-        "- result.txt matches the frozen acceptance",
-        "- Read-only inspection passed",
-        "",
-      ].join("\n"));
-      return {
-        verdict: "accepted",
-        task_state_markdown: "The verified result is present.",
-      };
-    }],
-  });
-  const result = await runDeterministicScenario({
-    world,
-    linear,
-    agent,
-    createPullRequest: async (request) => {
-      assert.equal(request.root_branch, world.rootBranch);
-      assert.equal(await world.remoteHas("result.txt"), "verified\n");
-      return "https://github.example/pull/1";
-    },
-  });
+function cycleNumber(request) {
+  return /cycle-([0-9]{3})-/u.exec(request.final_response_path)?.[1] ?? "001";
+}
 
-  assert.equal(result.status, "done");
-  assert.equal(result.pull_request_url, "https://github.example/pull/1");
-  assert.equal(result.evidence.workspace.status, "");
-  assert.equal(result.evidence.publicState.root.status, "done");
-  assert.equal(result.evidence.publicState.cycles[0].result, "succeeded");
-  const cycle = result.evidence.publicState.cycles[0];
-  assert.equal(cycle.status, "done");
-  assert.equal(cycle.artist_issue.status, "done");
-  assert.equal(cycle.critic_issue.status, "done");
-  assert.deepEqual(statusTransitions(result.evidence.publicState), [
-    { issue_id: cycle.id, from: "todo", to: "in_progress" },
-    { issue_id: world.rootId, from: "todo", to: "in_progress" },
-    { issue_id: cycle.artist_issue.id, from: "todo", to: "in_progress" },
-    { issue_id: cycle.artist_issue.id, from: "in_progress", to: "done" },
-    { issue_id: cycle.id, from: "in_progress", to: "in_review" },
-    { issue_id: cycle.critic_issue.id, from: "todo", to: "in_review" },
-    { issue_id: cycle.critic_issue.id, from: "in_review", to: "done" },
-    { issue_id: cycle.id, from: "in_review", to: "done" },
-    { issue_id: world.rootId, from: "in_progress", to: "in_review" },
-    { issue_id: world.rootId, from: "in_review", to: "done" },
-  ]);
-  assert.equal(result.evidence.runEvidence.length, 4);
-  assert.deepEqual(result.evidence.runEvidence.map(({ name }) => name).sort(), [
-    "cycle-001-artist-result.md", "cycle-001-critic-result.md", "cycle-001-critique-result.json", "deterministic-evidence.jsonl",
-  ]);
-  assert.equal(result.evidence.publicState.cycles[0].artist.final_output, undefined);
-  const artistIssueId = result.evidence.publicState.cycles[0].artist_issue.id;
-  const criticIssueId = result.evidence.publicState.cycles[0].critic_issue.id;
-  const cycleId = result.evidence.publicState.cycles[0].id;
-  const comments = result.evidence.publicState.comments;
-  const artistDescription = result.evidence.publicState.cycles[0].artist_issue.description;
-  assert.match(artistDescription, /^# Task\n/u);
-  assert.match(artistDescription, /# Symphony Metadata\n/u);
-  assert.match(artistDescription, /# Result\n/u);
-  assert.match(artistDescription, /## Summary\n/u);
-  assert.match(artistDescription, /## File Changes/u);
-  assert.match(artistDescription, /result\.txt \(\+1\/-0 lines\)/u);
-  const criticDescription = result.evidence.publicState.cycles[0].critic_issue.description;
-  assert.match(criticDescription, /^# Task\n/u);
-  assert.match(criticDescription, /# Symphony Metadata\n/u);
-  assert.match(criticDescription, /# Result\n/u);
-  assert.equal(criticDescription.includes([
+function artistReport(number, name = "result.txt") {
+  return [
+    "## Summary",
+    `Created the verified result for Cycle ${number}.`,
+    "",
+    "## File Changes",
+    "### Created",
+    `- ${name} (+1/-0 lines)`,
+    "### Updated",
+    "- None",
+    "### Deleted",
+    "- None",
+    "",
+    "## Verification",
+    "- Read back the result file.",
+    "",
+  ].join("\n");
+}
+
+function criticReport(verdict, taskState = "The verified result is present.") {
+  return [
     "```json",
-    JSON.stringify({ verdict: "accepted", task_state_markdown: "The verified result is present." }),
+    JSON.stringify({
+      verdict,
+      task_state_markdown: taskState,
+      ...(verdict === "incomplete" ? { pending_finding: "Complete the result file." } : {}),
+    }),
     "```",
-  ].join("\n")), true);
-  assert.match(criticDescription, /## Audit[\s\S]*## Verification/u);
-  assert.equal(comments.some((comment) => comment.issue_id === artistIssueId), false);
-  assert.equal(comments.some((comment) => comment.issue_id === criticIssueId), false);
-  const cycleComments = comments.filter((comment) => comment.issue_id === cycleId).map((comment) => comment.body);
-  assert.equal(cycleComments.some((body) => body.includes("## Audit")), false);
-  assert.match(cycleComments.at(-1) ?? "", /- Critique: \[cycle-001-critique-result\.json\]\(https:\/\/linear\.example\/upload\/1\)/u);
-  assert.deepEqual(result.evidence.publicState.uploads.map(({ filename, content_type }) => ({ filename, content_type })), [
-    { filename: "cycle-001-critique-result.json", content_type: "application/json" },
-  ]);
-  const critiqueJsonText = await readFile(path.join(world.runDirectory, "cycle-001-critique-result.json"), "utf8");
-  assert.deepEqual(JSON.parse(critiqueJsonText), result.artifact);
-  assert.equal(result.evidence.publicState.uploads[0].contents, critiqueJsonText);
-  assert.deepEqual(result.evidence.publicState.root_state.latest_critique, result.critic);
-  assert.deepEqual(agent.calls.map((call) => call.role), ["artist", "critic"]);
-});
+    "",
+    "## Audit",
+    "Inspected the complete workspace and the requested result file.",
+    "",
+    "## Verification",
+    `- Critic verdict: ${verdict}`,
+    "",
+  ].join("\n");
+}
 
-test("failed Artist still gets a fresh Critic and leaves partial workspace changes for inspection", async (context) => {
-  const world = await createScenarioWorld();
-  context.after(() => world.cleanup());
-  const linear = new LinearDriver({ root: { id: world.rootId, identifier: "ENG-1" } });
-  const agent = new AgentDriver({
-    artist: [async (_request, currentWorld) => {
-      await currentWorld.write("partial.txt", "partial change\n");
-      await currentWorld.writeRunFile("cycle-001-artist-result.md", [
-        "## Summary",
-        "The workspace change was left partial after the process timed out.",
-        "",
-        "## File Changes",
-        "### Created",
-        "- partial.txt (+1/-0 lines)",
-        "### Updated",
-        "- None",
-        "### Deleted",
-        "- None",
-        "",
-        "## Verification",
-        "- Process timed out before full verification.",
-        "",
-      ].join("\n"));
-      return { launch_status: "timed_out", sanitized_reason: "agent_timeout" };
-    }],
-    critic: [async (request, currentWorld) => {
-      assert.equal(request.sandbox, "read_only");
-      assert.equal(await currentWorld.read("partial.txt"), "partial change\n");
-      await currentWorld.writeRunFile("cycle-001-critic-result.md", [
-        "```json",
-        JSON.stringify({
-          verdict: "blocked",
-          task_state_markdown: "No independently audited task progress yet.",
-          pending_finding: "Repair the partial change.",
-        }),
-        "```",
-        "",
-        "## Audit",
-        "Inspected the complete workspace diff after the timed-out Artist.",
-        "",
-        "The partial file does not establish the requested completed behavior.",
-        "",
-        "## Verification",
-        "- partial workspace inspected",
-        "- The requested behavior is incomplete.",
-        "",
-      ].join("\n"));
-      return {
-        verdict: "blocked",
-        task_state_markdown: "No independently audited task progress yet.",
-        pending_finding: "Repair the partial change.",
-      };
-    }],
-  });
-  let createPullRequestCalls = 0;
-  const result = await runDeterministicScenario({
-    world,
-    linear,
-    agent,
-    createPullRequest: async () => {
-      createPullRequestCalls += 1;
-      return "https://github.example/pull/never";
-    },
-  });
-
-  assert.equal(result.status, "rejected");
-  assert.equal(result.cycle_result, "failed");
-  assert.equal(createPullRequestCalls, 0);
-  assert.match(await world.status(), /\?\? partial\.txt/u);
-  assert.equal((await linear.readRoot()).status, "in_review");
-  const state = result.evidence.publicState;
-  const cycle = state.cycles[0];
-  assert.equal(cycle.status, "done");
-  assert.equal(cycle.artist_issue.status, "done");
-  assert.equal(cycle.critic_issue.status, "done");
-  assert.deepEqual(statusTransitions(state), [
-    { issue_id: cycle.id, from: "todo", to: "in_progress" },
-    { issue_id: world.rootId, from: "todo", to: "in_progress" },
-    { issue_id: cycle.artist_issue.id, from: "todo", to: "in_progress" },
-    { issue_id: cycle.artist_issue.id, from: "in_progress", to: "done" },
-    { issue_id: cycle.id, from: "in_progress", to: "in_review" },
-    { issue_id: cycle.critic_issue.id, from: "todo", to: "in_review" },
-    { issue_id: cycle.critic_issue.id, from: "in_review", to: "done" },
-    { issue_id: cycle.id, from: "in_review", to: "done" },
-    { issue_id: world.rootId, from: "in_progress", to: "in_review" },
-  ]);
-  assert.deepEqual(agent.calls.map((call) => call.role), ["artist", "critic"]);
-});
-
-test("Critic JSON upload failure is visible without changing the Critic verdict", async (context) => {
-  const world = await createScenarioWorld();
-  context.after(() => world.cleanup());
-  const linear = new LinearDriver({
-    root: { id: world.rootId, identifier: "ENG-1" },
-    uploadFailures: ["provider file upload failed after the current boundary message grows"],
-  });
-  const agent = new AgentDriver({
-    artist: [async (_request, currentWorld) => {
-      await currentWorld.write("result.txt", "verified\n");
-      await currentWorld.writeRunFile("cycle-001-artist-result.md", [
-        "## Summary", "Created the verified result file.", "", "## File Changes",
-        "### Created", "- result.txt (+1/-0 lines)", "### Updated", "- None",
-        "### Deleted", "- None", "", "## Verification", "- Read back result.txt.", "",
-      ].join("\n"));
+function scriptedAgent({ criticVerdicts = ["accepted"], writeName = "result.txt" } = {}) {
+  let criticIndex = 0;
+  return new AgentDriver({
+    artist: [async (request, world) => {
+      const number = cycleNumber(request);
+      if (number === "001" && criticVerdicts[0] === "incomplete") {
+        await world.write("partial.txt", "partial\n");
+      } else {
+        await world.write(writeName, "verified\n");
+      }
+      await world.writeRunFile(
+        `cycle-${number}-artist-result.md`,
+        artistReport(number, number === "001" && criticVerdicts[0] === "incomplete" ? "partial.txt" : writeName),
+      );
+      return { launch_status: "exited", exit_code: 0 };
+    }, async (request, world) => {
+      const number = cycleNumber(request);
+      await world.write(writeName, "verified\n");
+      await world.writeRunFile(`cycle-${number}-artist-result.md`, artistReport(number, writeName));
       return { launch_status: "exited", exit_code: 0 };
     }],
-    critic: [async (_request, currentWorld) => {
-      await currentWorld.writeRunFile("cycle-001-critic-result.md", [
-        "```json", JSON.stringify({ verdict: "accepted", task_state_markdown: "Verified." }), "```", "",
-        "## Audit", "Inspected the complete workspace diff.", "",
-        "## Verification", "- Read-only inspection passed", "",
-      ].join("\n"));
+    critic: [async (request, world) => {
+      const number = cycleNumber(request);
+      const verdict = criticVerdicts[Math.min(criticIndex++, criticVerdicts.length - 1)];
+      const report = criticReport(verdict, verdict === "incomplete"
+        ? "No independently audited task progress yet."
+        : "The verified result is present.");
+      await world.writeRunFile(`cycle-${number}-critic-result.md`, report);
       return {
-        verdict: "accepted", task_state_markdown: "Verified.",
+        verdict,
+        task_state_markdown: verdict === "incomplete"
+          ? "No independently audited task progress yet."
+          : "The verified result is present.",
+        ...(verdict === "incomplete" ? { pending_finding: "Complete the result file." } : {}),
       };
+    }, async (request, world) => {
+      const number = cycleNumber(request);
+      const verdict = criticVerdicts[Math.min(criticIndex++, criticVerdicts.length - 1)];
+      await world.writeRunFile(`cycle-${number}-critic-result.md`, criticReport(verdict));
+      return { verdict, task_state_markdown: "The verified result is present." };
     }],
   });
-  const result = await runDeterministicScenario({
-    world,
-    linear,
-    agent,
-    createPullRequest: async () => "https://github.example/pull/attachment-failure",
-  });
+}
 
+async function independentFixture(name, options = {}) {
+  const identity = scenarioRootIdentity(name);
+  const world = await createScenarioWorld({
+    rootId: identity.id,
+    rootBranch: identity.branch,
+  });
+  const linear = new LinearDriver({ root: { id: identity.id, identifier: identity.identifier } });
+  const agent = options.agent ?? scriptedAgent(options);
+  return { world, linear, agent };
+}
+
+async function runWithFixture(name, options = {}) {
+  const fixture = await independentFixture(name, options);
+  try {
+    const result = await runDeterministicScenario({
+      scenario: name,
+      ...fixture,
+      createPullRequest: async ({ root_branch: branch }) => {
+        assert.equal(branch, fixture.world.rootBranch);
+        if (!(await fixture.world.remoteHas("README.md")).includes("Root workspace")) {
+          throw new Error("scenario_remote_fixture_invalid");
+        }
+        return `https://github.example/pull/${name}`;
+      },
+    });
+    return { ...fixture, result };
+  } finally {
+    await fixture.world.cleanup();
+  }
+}
+
+function assertSuccessfulRoot(result, scenario) {
+  assert.equal(result.scenario, scenario);
   assert.equal(result.status, "done");
-  assert.equal(result.critic.verdict, "accepted");
-  assert.equal(result.evidence.publicState.root_state.latest_critique.verdict, "accepted");
-  assert.equal(result.evidence.publicState.cycles[0].upload_outcome.status, "failed");
-  assert.equal(result.evidence.publicState.cycles[0].upload_outcome.reason,
-    "provider file upload failed after the current boundary message grows".slice(0, 50));
-  const cycleComment = result.evidence.publicState.comments
-    .filter((comment) => comment.issue_id === result.evidence.publicState.cycles[0].id)
-    .at(-1)?.body ?? "";
-  assert.match(cycleComment, /- Critique: upload failed \(provider file upload failed/u);
+  assert.equal(result.evidence.publicState.root.status, "done");
+  assert.equal(result.evidence.publicState.cycles.at(-1).result, "succeeded");
+}
+
+function assertArchitectureDecision(decision, { actionId, replyIds }) {
+  assert.deepEqual(Object.keys(decision).sort(), [
+    "consequences",
+    "decided_at",
+    "decision",
+    "id",
+    "rationale",
+    "source_action_comment_id",
+    "source_reply_ids",
+    "title",
+  ]);
+  assert.equal(decision.id, "ADR-001");
+  assert.equal(decision.title, "Choose the caller-owned boundary");
+  assert.equal(decision.decision, "Use the caller-owned boundary.");
+  assert.equal(decision.rationale, "The accepted reply gives the caller control of transaction boundaries.");
+  assert.deepEqual(decision.consequences, [
+    "Callers control transaction boundaries.",
+    "The service remains composable within existing transactions.",
+  ]);
+  assert.equal(decision.source_action_comment_id, actionId);
+  assert.deepEqual(decision.source_reply_ids, replyIds);
+  assert.match(decision.decided_at, /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT[+-][0-9]{2}:[0-9]{2}$/u);
+}
+
+scenarioTest("single-cycle", async () => {
+  const { result } = await runWithFixture("single-cycle");
+  assertSuccessfulRoot(result, "single-cycle");
+  assert.equal(result.evidence.publicState.cycles.length, 1);
+  assert.deepEqual(result.evidence.publicState.cycles[0].architecture_decisions, []);
+  assert.deepEqual(result.evidence.publicState.root_comments.filter(({ parent_id: parentId }) => parentId), []);
 });
+
+scenarioTest("multi-cycle", async () => {
+  const { result } = await runWithFixture("multi-cycle", { criticVerdicts: ["incomplete", "accepted"] });
+  assertSuccessfulRoot(result, "multi-cycle");
+  assert.equal(result.evidence.publicState.cycles.length, 2);
+  assert.equal(result.evidence.publicState.cycles[0].result, "rejected");
+  assert.equal(result.evidence.publicState.cycles[1].result, "succeeded");
+  assert.equal(result.evidence.publicState.cycles[0].architecture_decisions.length, 0);
+});
+
+scenarioTest("single-cycle-human-action", async () => {
+  const { result } = await runWithFixture("single-cycle-human-action");
+  assertSuccessfulRoot(result, "single-cycle-human-action");
+  const state = result.evidence.publicState;
+  const request = state.root_comments.find(({ body }) => body.startsWith("# Symphony Harness: Human Action"));
+  const reply = state.root_comments.find(({ parent_id: parentId }) => parentId === request.id && parentId !== null);
+  assert.ok(request);
+  assert.equal(reply.parent_id, request.id);
+  assert.deepEqual(state.reactions.map(({ comment_id: commentId, emoji }) => ({ comment_id: commentId, emoji })), [
+    { comment_id: reply.id, emoji: "white_check_mark" },
+  ]);
+  assertArchitectureDecision(state.root_state.architecture_decisions[0], {
+    actionId: request.id,
+    replyIds: [reply.id],
+  });
+  assert.match(state.root.description, /ADR-001/u);
+  assert.match(state.cycles[0].description, /ADR-001/u);
+  assert.doesNotMatch(state.cycles[0].artist_issue.description, /ADR-001/u);
+  assert.doesNotMatch(state.cycles[0].critic_issue.description, /ADR-001/u);
+});
+
+scenarioTest("cycle-human-action-cycle", async () => {
+  const { result } = await runWithFixture("cycle-human-action-cycle", { criticVerdicts: ["accepted", "accepted"] });
+  assertSuccessfulRoot(result, "cycle-human-action-cycle");
+  const state = result.evidence.publicState;
+  assert.equal(state.cycles.length, 2);
+  assert.deepEqual(state.cycles[0].architecture_decisions, []);
+  const request = state.root_comments.find(({ body }) => body.startsWith("# Symphony Harness: Human Action"));
+  const reply = state.root_comments.find(({ parent_id: parentId }) => parentId === request.id && parentId !== null);
+  assertArchitectureDecision(state.cycles[1].architecture_decisions[0], {
+    actionId: request.id,
+    replyIds: [reply.id],
+  });
+  assert.match(state.cycles[1].description, /## ADR-001/u);
+  assert.doesNotMatch(state.cycles[1].artist_issue.description, /## ADR-001/u);
+  assert.doesNotMatch(state.cycles[1].critic_issue.description, /## ADR-001/u);
+  assert.match(state.root.description, /ADR-001/u);
+});
+
+scenarioTest("human-action-rejected-supplement", async () => {
+  const { result } = await runWithFixture("human-action-rejected-supplement");
+  assertSuccessfulRoot(result, "human-action-rejected-supplement");
+  const state = result.evidence.publicState;
+  const request = state.root_comments.find(({ body }) => body.startsWith("# Symphony Harness: Human Action"));
+  const userReplies = state.root_comments.filter(({ creator_id: creatorId, parent_id: parentId }) => (
+    creatorId === "user-1" && parentId === request.id
+  ));
+  assert.equal(userReplies.length, 3);
+  assert.deepEqual(state.reactions.map(({ comment_id: commentId, emoji }) => ({ comment_id: commentId, emoji })), [
+    { comment_id: userReplies[0].id, emoji: "x" },
+    { comment_id: userReplies[1].id, emoji: "x" },
+    { comment_id: userReplies[2].id, emoji: "white_check_mark" },
+  ]);
+  const followUp = state.root_comments.find(({ creator_id: creatorId, parent_id: parentId }) => (
+    creatorId === "harness-1" && parentId === request.id && parentId !== null
+  ));
+  assert.ok(followUp);
+  assert.match(followUp.body, /\*\*A\. Service-owned\*\*/u);
+  assert.match(state.root.description, /ADR-001/u);
+  assertArchitectureDecision(state.cycles[0].architecture_decisions[0], {
+    actionId: request.id,
+    replyIds: [userReplies[2].id],
+  });
+});
+
+scenarioTest("human-action-unanswered", async () => {
+  const fixture = await independentFixture("human-action-unanswered");
+  try {
+    const result = await runDeterministicScenario({
+      scenario: "human-action-unanswered",
+      ...fixture,
+      createPullRequest: async () => { throw new Error("unanswered_must_not_deliver"); },
+    });
+    const state = result.evidence.publicState;
+    assert.equal(result.status, "needs_human");
+    assert.equal(state.root.status, "needs_human");
+    assert.equal(state.cycles.length, 0);
+    assert.equal(state.reactions.length, 0);
+    assert.equal(state.root_comments.filter(({ body }) => body.startsWith("# Symphony Harness: Human Action")).length, 1);
+    assert.equal(state.root_comments.filter(({ parent_id: parentId }) => parentId !== null).length, 0);
+    assert.equal(fixture.agent.calls.length, 0);
+  } finally {
+    await fixture.world.cleanup();
+  }
+});
+
+assert.deepEqual(DETERMINISTIC_SCENARIOS, [
+  "single-cycle",
+  "multi-cycle",
+  "single-cycle-human-action",
+  "cycle-human-action-cycle",
+  "human-action-rejected-supplement",
+  "human-action-unanswered",
+]);

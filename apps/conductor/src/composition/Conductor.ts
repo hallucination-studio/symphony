@@ -18,6 +18,7 @@ import { parseLinearIssue } from "../contracts/task-management.js";
 import type { PerformerProcessResult, PerformerTokenUsage } from "../contracts/performer.js";
 import type { LinearComment } from "../contracts/task-management.js";
 import type { LinearWorkflow } from "../contracts/task-management.js";
+import { isHarnessComment } from "../linear/LinearMarkers.js";
 import type { Delivery, RootWorkspace } from "../contracts/workspace.js";
 import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js";
 import type { CycleRunner, CycleRunOutcome } from "../cycle-runner/CycleRunner.js";
@@ -51,6 +52,8 @@ export type ConductorResult =
   | { readonly status: "needs_human"; readonly reason: string };
 
 const ROOT_RECONCILE_COMMENT_MARKER = "# Symphony Harness: Reconcile";
+const ROOT_HUMAN_ACTION_COMMENT_MARKER = "# Symphony Harness: Human Action";
+const ROOT_HUMAN_ACTION_FOLLOW_UP_MARKER = "# Symphony Harness: Human Action Follow-up";
 const GIT_SUMMARY_TIMEOUT_MS = 10_000;
 const GIT_SUMMARY_OUTPUT_BYTES = 2 * 1024 * 1024;
 const UNTRACKED_FILE_SUMMARY_BYTES = GIT_SUMMARY_OUTPUT_BYTES;
@@ -307,6 +310,81 @@ function rootDecisionComment(report: MarkdownText): MarkdownText {
   return parseMarkdownText(`${ROOT_RECONCILE_COMMENT_MARKER}\n\n${report}`);
 }
 
+function humanActionBody(
+  marker: string,
+  decision: Extract<RootReconcileDecision, { kind: "needs_human" }>,
+): MarkdownText {
+  const questions = decision.questions.flatMap((question, questionIndex) => [
+    `### ${questionIndex + 1}. ${question.question}`,
+    "",
+    ...question.options.map((option) => (
+      `- **${option.key}. ${option.label}**: ${option.consequence}`
+    )),
+    "",
+  ]);
+  return parseMarkdownText([
+    marker,
+    "",
+    "## Reason",
+    "",
+    decision.reason,
+    "",
+    "## Questions",
+    "",
+    ...questions,
+  ].join("\n").trimEnd());
+}
+
+function needsHumanComment(decision: Extract<RootReconcileDecision, { kind: "needs_human" }>): MarkdownText {
+  return humanActionBody(ROOT_HUMAN_ACTION_COMMENT_MARKER, decision);
+}
+
+function needsHumanFollowUp(decision: Extract<RootReconcileDecision, { kind: "needs_human" }>): MarkdownText {
+  return humanActionBody(ROOT_HUMAN_ACTION_FOLLOW_UP_MARKER, decision);
+}
+
+function nextArchitectureDecisions(
+  state: RootState,
+  decision: RootReconcileDecision,
+  actionCommentId: string,
+  replies: readonly LinearComment[],
+  decidedAt: string,
+): RootState["architecture_decisions"] {
+  if (decision.reply_disposition !== "accepted" || decision.architecture_decisions === undefined) {
+    return state.architecture_decisions;
+  }
+  const start = state.architecture_decisions.length + 1;
+  return Object.freeze([
+    ...state.architecture_decisions,
+    ...decision.architecture_decisions.map((draft, index) => Object.freeze({
+      ...draft,
+      id: `ADR-${String(start + index).padStart(3, "0")}`,
+      source_action_comment_id: actionCommentId,
+      source_reply_ids: Object.freeze(replies.map(({ id }) => id)),
+      decided_at: decidedAt,
+    })),
+  ]);
+}
+
+function architectureDecisionsMatch(
+  expected: RootState["architecture_decisions"],
+  actual: RootState["architecture_decisions"],
+): boolean {
+  return JSON.stringify(expected) === JSON.stringify(actual);
+}
+
+async function readHumanActionReplies(
+  gateway: LinearGateway,
+  state: RootState,
+): Promise<readonly LinearComment[]> {
+  if (state.human_action === undefined) return Object.freeze([]);
+  const replies = await gateway.list_comment_replies_after(
+    state.human_action.comment_id,
+    state.human_action.reply_cursor,
+  );
+  return Object.freeze(replies.filter((reply) => !isHarnessComment(reply.body)));
+}
+
 function matchesWorkspace(state: RootState, workspace: RootWorkspace): boolean {
   return state.workspace_path === workspace.workspace_path
     && state.run_directory === workspace.run_directory
@@ -320,7 +398,7 @@ function nextCursor(comments: readonly LinearComment[], current?: string): strin
 function withState(state: RootState, changes: Partial<RootState>): RootState {
   const value = { ...state, ...changes } as Record<string, unknown>;
   for (const key of [
-    "latest_critique", "harness_feedback", "comment_cursor", "delivery",
+    "latest_critique", "harness_feedback", "comment_cursor", "human_action", "delivery",
     "token_usage",
   ]) {
     if (value[key] === undefined) delete value[key];
@@ -383,6 +461,7 @@ export class Conductor {
         root_branch: workspace.root_branch,
         current_phase: "idle",
         task_state_markdown: "No independently audited task progress yet.",
+        architecture_decisions: [],
         token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
       });
       projection = await updateRootDescription(
@@ -412,7 +491,7 @@ export class Conductor {
       try {
         await updateRootStatus(this.options.workflow.in_review_status_id);
         await updateState(withState(state, {
-          current_phase: "NeedsHuman",
+          current_phase: "failed",
           harness_feedback: reason,
         }));
       } catch (projectionError) {
@@ -425,23 +504,10 @@ export class Conductor {
     const reconcileRoot = parseLinearIssue({ ...root, description: projection.requirement });
 
     if (!matchesWorkspace(state, workspace)) {
-      const reason = "supplied_workspace_binding_mismatch";
-      await updateRootStatus(this.options.workflow.in_review_status_id);
-      await updateState(withState(state, { current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason) }));
-      return { status: "needs_human", reason };
+      return failVisible(new Error("supplied_workspace_binding_mismatch"));
     }
-    if (state.current_phase === "NeedsHuman") {
-      await updateRootStatus(this.options.workflow.in_review_status_id);
-      const humanInput = await readRootInbox(this.options.gateway, root.id, state.comment_cursor);
-      if (humanInput.length === 0) {
-        const latestFinding = state.latest_critique?.verdict === "process_error"
-          ? state.latest_critique.reason
-          : state.latest_critique?.pending_finding;
-        return {
-          status: "needs_human",
-          reason: state.harness_feedback ?? latestFinding ?? "human_input_required",
-        };
-      }
+    if (state.current_phase === "NeedsHuman" && state.human_action === undefined) {
+      return failVisible(new Error("human_action_state_missing"));
     }
 
     const unfinished = await this.options.gateway.list_unfinished_descendants(root.id);
@@ -450,18 +516,20 @@ export class Conductor {
         await this.options.gateway.update_issue_status(descendant.id, this.options.workflow.canceled_status_id);
       }
       await updateState(withState(state, {
-        current_phase: "idle",
+        current_phase: state.human_action === undefined ? "idle" : "NeedsHuman",
         harness_feedback: parseMarkdownText("Startup abandoned unfinished descendants; workspace may contain unaudited changes."),
       }));
     }
 
-    // A fresh Root Reconcile starts from the canonical waiting status. Later
-    // Reconciles begin from the In Review checkpoint written after each Cycle.
-    await updateRootStatus(this.options.workflow.todo_status_id);
-
     let cyclesRun = 0;
     while (cyclesRun < this.options.maxCycles) {
       const inbox = await readRootInbox(this.options.gateway, root.id, state.comment_cursor);
+      const humanAction = state.human_action;
+      const humanReplies = await readHumanActionReplies(this.options.gateway, state);
+      if (humanAction !== undefined && humanReplies.length === 0) {
+        await updateRootStatus(this.options.workflow.needs_human_status_id);
+        return { status: "needs_human", reason: state.harness_feedback ?? "human_input_required" };
+      }
       const worktreeSummary = await (this.options.worktreeSummary ?? collectRootWorktreeSummary)(workspace);
       let decision: RootReconcileDecision;
       let reconcileProcess: PerformerProcessResult | undefined;
@@ -469,6 +537,7 @@ export class Conductor {
       try {
         const reconcileOutcome = await this.options.reconciler.reconcile(parseRootReconcileRequest({
           phase: "reconcile", root: reconcileRoot, root_state: state, new_root_comments: inbox, worktree_summary: worktreeSummary,
+          human_action_replies: humanReplies,
         }), signal);
         decision = reconcileOutcome.decision;
         reconcileProcess = reconcileOutcome.process;
@@ -480,21 +549,87 @@ export class Conductor {
       }
       this.options.log?.({ event: "root_reconciled", root_id: root.id, decision: decision.kind });
 
+      const reactToHumanReplies = async (): Promise<void> => {
+        if (humanAction === undefined || humanReplies.length === 0) return;
+        const emoji = decision.reply_disposition === "accepted" ? "white_check_mark" : "x";
+        for (const reply of humanReplies) {
+          await this.options.gateway.create_comment_reaction(reply.id, emoji);
+        }
+      };
+      const acceptHumanReplies = async (): Promise<void> => {
+        if (humanAction === undefined || decision.reply_disposition !== "accepted") return;
+        await reactToHumanReplies();
+        const acceptedState = withState(state, {
+          human_action: undefined,
+          architecture_decisions: nextArchitectureDecisions(
+            state,
+            decision,
+            humanAction.comment_id,
+            humanReplies,
+            currentLinearDescriptionTimestamp(),
+          ),
+          harness_feedback: undefined,
+        });
+        const acceptedProjection = await updateRootDescription(
+          this.options.gateway,
+          root.id,
+          projection.requirement,
+          acceptedState,
+          reconcileReport,
+          currentLinearDescriptionTimestamp(),
+        );
+        const persistedRoot = await this.options.gateway.get_issue(root.id);
+        const persistedProjection = parseRootDescription(persistedRoot.description);
+        if (
+          persistedProjection.state === undefined
+          || persistedProjection.state.human_action !== undefined
+          || !architectureDecisionsMatch(
+            acceptedProjection.state?.architecture_decisions ?? [],
+            persistedProjection.state.architecture_decisions,
+          )
+        ) {
+          throw new Error("accepted_architecture_decision_readback_mismatch");
+        }
+        projection = persistedProjection;
+        state = persistedProjection.state;
+      };
+
       if (decision.kind === "needs_human") {
-        await updateRootStatus(this.options.workflow.in_review_status_id);
+        if (humanAction !== undefined && decision.reply_disposition === "rejected") {
+          await reactToHumanReplies();
+          await this.options.gateway.create_comment_reply(
+            root.id,
+            humanAction.comment_id,
+            needsHumanFollowUp(decision),
+          );
+          await updateState(withState(state, {
+            current_phase: "NeedsHuman",
+            harness_feedback: decision.reason,
+            human_action: {
+              comment_id: humanAction.comment_id,
+              reply_cursor: humanReplies.at(-1)?.id,
+            },
+          }), reconcileReport);
+          await updateRootStatus(this.options.workflow.needs_human_status_id);
+          return { status: "needs_human", reason: decision.reason };
+        }
+        await acceptHumanReplies();
+        const questionComment = await this.options.gateway.create_comment(root.id, needsHumanComment(decision));
         await updateState(withState(state, {
-          current_phase: "NeedsHuman", harness_feedback: decision.reason,
-        }));
+          current_phase: "NeedsHuman",
+          harness_feedback: decision.reason,
+          human_action: { comment_id: questionComment.id },
+        }), reconcileReport);
+        await updateRootStatus(this.options.workflow.needs_human_status_id);
         return { status: "needs_human", reason: decision.reason };
       }
       if (decision.kind === "complete") {
+        await acceptHumanReplies();
         await updateRootStatus(this.options.workflow.in_review_status_id);
         if (inbox.length > 0) {
-          const reason = "completion_with_unconsumed_root_input";
           await updateState(withState(state, {
-            current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason),
+            comment_cursor: nextCursor(inbox, state.comment_cursor),
           }));
-          return { status: "needs_human", reason };
         }
         const finalInbox = await readRootInbox(this.options.gateway, root.id, state.comment_cursor);
         if (finalInbox.length > 0) continue;
@@ -514,11 +649,13 @@ export class Conductor {
       let spec: CycleSpec;
       let outcome: CycleRunOutcome;
       try {
+        await acceptHumanReplies();
         cycleNumber = await nextCycleNumber(state.run_directory);
         spec = parseCycleSpec({
           cycle_number: cycleNumber,
           ...decision.cycle,
           consumed_comment_ids: inbox.map(({ id }) => id),
+          architecture_decisions: state.architecture_decisions,
         });
         const consumedCursor = nextCursor(inbox, state.comment_cursor);
         outcome = await this.options.cycleRunner.run({
@@ -561,10 +698,7 @@ export class Conductor {
       await updateRootStatus(this.options.workflow.in_review_status_id);
     }
 
-    const reason = "maximum_cycle_count_reached";
-    await updateRootStatus(this.options.workflow.in_review_status_id);
-    await updateState(withState(state, { current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason) }));
-    return { status: "needs_human", reason };
+    return failVisible(new Error("maximum_cycle_count_reached"));
   }
 
 }
