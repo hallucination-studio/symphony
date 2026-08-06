@@ -12,7 +12,7 @@ import {
 } from "../contracts/root.js";
 import type { Performer } from "../performer/api/Performer.js";
 import type { LinearIssue } from "../contracts/task-management.js";
-import { parseMarkdownText } from "../contracts/validation.js";
+import { parseEnum, parseMarkdownText } from "../contracts/validation.js";
 import { parseRootWorkspace, type RootWorkspace } from "../contracts/workspace.js";
 import { renderRootReconcilePrompt } from "./RootReconcilePrompt.js";
 import { bindRootWorkspace } from "../workspace/RootWorkspace.js";
@@ -30,7 +30,21 @@ export interface RootReconcilerOptions {
   readonly timeoutMs: number;
 }
 
-function parseSections(source: string): RootReconcileDecision {
+function parseQuestions(source: string): unknown {
+  const match = /^```json\n([^\r\n]+)\n```$/u.exec(source.trim());
+  if (match?.[1] === undefined) throw new Error("invalid_root_reconcile_response");
+  try {
+    return JSON.parse(match[1]) as unknown;
+  } catch {
+    throw new Error("invalid_root_reconcile_response");
+  }
+}
+
+function parseArchitectureDecisions(source: string): unknown {
+  return parseQuestions(source);
+}
+
+function parseSections(source: string, request: RootReconcileRequest): RootReconcileDecision {
   const normalized = source.replace(/\r\n?/gu, "\n").trim();
   const lines = normalized.split("\n");
   const header = lines.shift()?.trim();
@@ -58,35 +72,58 @@ function parseSections(source: string): RootReconcileDecision {
   }
   flush();
 
-  const hasExactSections = (...expected: readonly string[]) =>
-    sections.size === expected.length && expected.every((name) => sections.has(name));
+  const hasExactSections = (...expected: readonly string[]) => {
+    const optional = [
+      ...(sections.has("Reply Disposition") ? ["Reply Disposition"] : []),
+      ...(sections.has("Architecture Decisions") ? ["Architecture Decisions"] : []),
+    ];
+    const names = [...optional, ...expected];
+    return sections.size === names.length
+      && [...sections.keys()].every((name, index) => name === names[index]);
+  };
+  const replyDisposition = sections.has("Reply Disposition")
+    ? parseEnum(sections.get("Reply Disposition"), ["accepted", "rejected"] as const)
+    : undefined;
+  const architectureDecisions = sections.has("Architecture Decisions")
+    ? parseArchitectureDecisions(sections.get("Architecture Decisions") ?? "")
+    : undefined;
+  const context = {
+    current_phase: request.root_state.current_phase,
+    has_human_action_replies: request.human_action_replies.length > 0,
+  } as const;
 
-  if (decision === "cycle" && sections.size === 4 && sections.has("Report")) {
+  if (decision === "cycle" && hasExactSections("Objective", "Acceptance", "Boundaries", "Report")) {
     return parseRootReconcileDecision({
       kind: "create_cycle",
+      ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+      ...(architectureDecisions === undefined ? {} : { architecture_decisions: architectureDecisions }),
       cycle: {
         objective: sections.get("Objective"), acceptance: sections.get("Acceptance"), boundaries: sections.get("Boundaries"),
       },
       report: sections.get("Report"),
-    });
+    }, context);
   }
-  if (decision === "complete" && sections.size === 3 && sections.has("Report") && sections.has("Delivery")) {
+  if (decision === "complete" && hasExactSections("Summary", "Delivery", "Report")) {
     let delivery: unknown;
     try { delivery = JSON.parse(sections.get("Delivery") as string); } catch { throw new Error("invalid_root_reconcile_response"); }
-    return parseRootReconcileDecision({ kind: "complete", summary: sections.get("Summary"), report: sections.get("Report"), delivery });
+    return parseRootReconcileDecision({
+      kind: "complete",
+      ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+      ...(architectureDecisions === undefined ? {} : { architecture_decisions: architectureDecisions }),
+      summary: sections.get("Summary"), report: sections.get("Report"), delivery,
+    }, context);
   }
   if (
     decision === "needs_human"
-    && (
-      hasExactSections("Reason", "Report")
-      || hasExactSections("Reason", "Question", "Report")
-    )
+    && hasExactSections("Reason", "Questions", "Report")
   ) {
     return parseRootReconcileDecision({
       kind: "needs_human", reason: sections.get("Reason"),
+      questions: parseQuestions(sections.get("Questions") ?? ""),
       report: sections.get("Report"),
-      ...(sections.has("Question") ? { question: sections.get("Question") } : {}),
-    });
+      ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+      ...(architectureDecisions === undefined ? {} : { architecture_decisions: architectureDecisions }),
+    }, context);
   }
   throw new Error("invalid_root_reconcile_response");
 }
@@ -167,48 +204,17 @@ export class RootReconciler {
       processResult = await this.options.performer.launch(launch, signal);
       if (processResult.launch_status !== "exited" || processResult.exit_code !== 0) {
         const reason = visibleErrorMessage(processFailureReason(processResult), "Process failed");
-        return {
-          decision: parseRootReconcileDecision({
-            kind: "needs_human",
-            reason,
-            report: [
-              "### Reason", reason, "",
-              "### Question", "No question is available until the process can run.", "",
-              "### Next Step", "Inspect the visible process reason and retry with human guidance.",
-            ].join("\n"),
-            }),
-          process: processResult,
-        };
+        throw new Error(reason);
       }
       if (
         processResult.diagnostic_jsonl_ref !== diagnosticJsonlPath
         || processResult.diagnostic_stderr_ref !== diagnosticStderrPath
         || processResult.sanitized_reason === "Diagnostic capture failed"
       ) {
-        return {
-          decision: parseRootReconcileDecision({
-            kind: "needs_human", reason: "Diagnostic capture failed",
-            report: [
-              "### Reason", "Private diagnostic capture failed.", "",
-              "### Question", "No question is available until diagnostics are restored.", "",
-              "### Next Step", "Inspect the run directory and retry.",
-            ].join("\n"),
-          }),
-          process: processResult,
-        };
+        throw new Error("Diagnostic capture failed");
       }
       if (processResult.final_response_ref !== finalResponsePath) {
-        return {
-          decision: parseRootReconcileDecision({
-            kind: "needs_human", reason: "Final response unavailable",
-            report: [
-              "### Reason", "The Root Reconcile final response was unavailable.", "",
-              "### Question", "No question is available until the response is restored.", "",
-              "### Next Step", "Inspect the final response path and retry.",
-            ].join("\n"),
-          }),
-          process: processResult,
-        };
+        throw new Error("Final response unavailable");
       }
       let response: Buffer;
       try {
@@ -232,21 +238,10 @@ export class RootReconciler {
       } catch {
         throw new Error("invalid_root_reconcile_response");
       }
-      return { decision: parseSections(decoded), process: processResult };
+      return { decision: parseSections(decoded, request), process: processResult };
     } catch (error) {
       const reason = visibleErrorMessage(error, "Unknown error");
-      return {
-        decision: parseRootReconcileDecision({
-          kind: "needs_human",
-          reason,
-          report: [
-            "### Reason", reason, "",
-            "### Question", "No question is available until the error is resolved.", "",
-            "### Next Step", "Inspect the bounded reason and retry.",
-          ].join("\n"),
-        }),
-        ...(processResult === undefined ? {} : { process: processResult }),
-      };
+      throw new Error(reason);
     }
   }
 }
