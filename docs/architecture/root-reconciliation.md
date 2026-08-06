@@ -69,9 +69,12 @@ complete { summary, report, delivery }
 delivery = pull_request | branch | files
 ```
 
-Root Reconcile may use Git and installed `gh`. A local-files delivery is valid
-when it names the absolute workspace and delivered files. Conductor must not
-run Git commands, reinterpret the choice, or require remote publication.
+Root Reconcile must attempt delivery in strict order: commit/push and create or
+locate a pull request with installed Git and `gh`; if that attempt fails, verify
+and return the pushed remote branch; only if both remote attempts fail, return
+local files that exist in the named workspace. Change size or perceived need
+never permits skipping a higher-priority delivery. Conductor validates the
+returned value but does not run Git commands or reinterpret the attempt results.
 
 ## Root State
 
@@ -104,4 +107,4 @@ Conductor sets Root `Done` only after a valid Delivery is durably projected.
 | workspace | Prepare binding, final delivery, and mechanical reporting | using self-inspection to overrule Critic quality judgment |
 | Linear | none directly | GraphQL, child-tree reads, Issue mutation, or comment rendering |
 | context | Root requirement, trusted Critic/Root State, new Root comments | child DAG, Artist output, raw diagnostics, hidden workflow state |
-| delivery | Git/`gh` when useful, or explicit local files | automatic merge, destructive cleanup, or invented delivery locations |
+| delivery | required PR, branch, files fallback order | skipping available remote delivery; automatic merge, destructive cleanup, or invented locations |

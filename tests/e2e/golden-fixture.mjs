@@ -769,6 +769,16 @@ export function githubRepositoryFromOrigin(origin) {
   }
 }
 
+export async function cloneGoldenWorkspace({ repositoryRoot, workspace, origin, branch } = {}) {
+  await execute("git", ["clone", "--quiet", "--local", "--no-hardlinks", repositoryRoot, workspace], {
+    encoding: "utf8", timeout: 120_000,
+  }).catch(() => { throw new Error("golden_clone_failed"); });
+  await execute("git", ["-C", workspace, "remote", "set-url", "origin", origin], {
+    encoding: "utf8", timeout: 10_000,
+  });
+  await execute("git", ["-C", workspace, "checkout", "-b", branch], { encoding: "utf8", timeout: 10_000 });
+}
+
 export async function createGoldenFixture({
   environment,
   inheritedEnvironment,
@@ -790,12 +800,8 @@ export async function createGoldenFixture({
     });
     const origin = originOutput.trim();
     if (origin.length === 0) throw new Error("golden_origin_missing");
-    const repository = githubRepositoryFromOrigin(origin);
-    await execute("gh", ["repo", "clone", repository, workspace, "--", "--quiet", "--single-branch"], {
-      env: githubEnvironment(environment, inheritedEnvironment),
-      encoding: "utf8", timeout: 120_000,
-    }).catch(() => { throw new Error("golden_clone_failed"); });
-    await execute("git", ["-C", workspace, "checkout", "-b", branch], { encoding: "utf8", timeout: 10_000 });
+    githubRepositoryFromOrigin(origin);
+    await cloneGoldenWorkspace({ repositoryRoot, workspace, origin, branch });
     await execute("git", ["-C", workspace, "config", "user.name", "Symphony E2E"], { encoding: "utf8" });
     await execute("git", ["-C", workspace, "config", "user.email", "symphony-e2e@example.invalid"], { encoding: "utf8" });
     await mkdir(runDirectory);

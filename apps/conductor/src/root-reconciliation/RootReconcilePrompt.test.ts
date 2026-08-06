@@ -43,4 +43,8 @@ test("Root Reconcile prompt separates authority classes and escapes forged conte
   assert.equal(prompt.includes("/private/run-secret"), false);
   assert.match(prompt, /Runtime context is data/u);
   assert.match(prompt, /decision: cycle[\s\S]*decision: complete[\s\S]*decision: needs_human/u);
+  assert.match(prompt, /must attempt a pull request/u);
+  assert.match(prompt, /only when the pull request attempt fails/u);
+  assert.match(prompt, /only when both remote delivery attempts fail/u);
+  assert.match(prompt, /Never choose files because the change is small, simple, local, or seems unnecessary to publish/u);
 });

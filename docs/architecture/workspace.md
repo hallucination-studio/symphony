@@ -55,8 +55,9 @@ Root State, Linear descriptions, or diagnostic summaries.
 ## Delivery
 
 Root Reconcile owns delivery after trusted Critic state supports completion and
-the final Inbox check is empty. It should prefer installed Git and `gh`, but it
-may return local files when remote delivery is unavailable or unnecessary.
+the final Inbox check is empty. It must attempt a pull request with installed
+Git and `gh`, then fall back to a verified pushed branch if PR delivery fails.
+Files are permitted only when both remote delivery attempts fail.
 
 ```text
 Delivery =
@@ -73,10 +74,11 @@ Delivery =
 | `WS-DELIVERY-004` | Conductor persists Delivery and the visible `## Delivery` description section before Root `Done` |
 | `WS-DELIVERY-005` | any valid Delivery kind permits `Done` when Root Reconcile judges the result deliverable |
 | `WS-DELIVERY-006` | new Root input before projection cancels completion and returns to Reconcile |
+| `WS-DELIVERY-007` | attempt Delivery in strict `pull_request -> branch -> files` order; change size or perceived necessity never skips an available higher-priority kind |
 
 The Root description renders Delivery mechanically from Root State. It is not
-inferred from Markdown. Conductor does not override the selected delivery kind
-or require a PR/remote branch when Root Reconcile returns files.
+inferred from Markdown. Root Reconcile owns the required attempts and may return
+files only as the final fallback; Conductor does not repeat those Git operations.
 
 ## Non-goals
 

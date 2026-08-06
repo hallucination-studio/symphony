@@ -85,6 +85,19 @@ export function preserveGoldenFailureContext(context, error) {
     : context;
 }
 
+export function requireGoldenPullRequest(terminal) {
+  const delivery = terminal?.delivery;
+  if (delivery?.kind !== "pull_request" || typeof delivery.url !== "string") {
+    throw new Error("golden_delivery_not_pull_request");
+  }
+  let url;
+  try { url = new URL(delivery.url); } catch { throw new Error("golden_delivery_not_pull_request"); }
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || !/^\/[^/]+\/[^/]+\/pull\/[1-9][0-9]*$/u.test(url.pathname)) {
+    throw new Error("golden_delivery_not_pull_request");
+  }
+  return delivery.url;
+}
+
 export function partitionGoldenEnvironment(environment = {}, inherited = process.env) {
   const result = {};
   for (const key of GOLDEN_ENVIRONMENT_KEYS) {
@@ -216,7 +229,7 @@ export async function runGoldenScenario({
       throw error;
     }
     await fixture.verifyVisibleCompletion?.();
-    pullRequestUrl = terminal.pull_request_url;
+    pullRequestUrl = requireGoldenPullRequest(terminal);
     return { status: terminal.status, root: fixture.root.identifier };
   });
   let outcome;
