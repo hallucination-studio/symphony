@@ -33,6 +33,15 @@ const PRIVATE_FILE_MODE = 0o600;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const MAX_GOLDEN_CRITIC_RESULT_BYTES = 64 * 1024;
 const GOLDEN_CRITIC_RESULT_TIMEOUT_MS = 15_000;
+const GOLDEN_NEEDS_HUMAN_MARKER = "# Symphony Harness: Human Action";
+const GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION = "default_file";
+const GOLDEN_NEEDS_HUMAN_ALTERNATE_OPTION = "alternate_file";
+const GOLDEN_HUMAN_ACTION_SCENARIOS = Object.freeze([
+  "single-cycle-human-action",
+  "cycle-human-action-cycle",
+  "human-action-rejected-supplement",
+  "human-action-unanswered",
+]);
 
 function absolutePath(value) {
   return typeof value === "string" && value.length > 0 && path.isAbsolute(value) && !value.includes("\0");
@@ -286,19 +295,19 @@ export async function archiveGoldenFailure({
   }
 }
 
-async function graphql(token, query, variables) {
+export async function graphql(token, query, variables, request = fetch) {
   let response;
   try {
-    response = await fetch(ENDPOINT, {
+    response = await request(ENDPOINT, {
       method: "POST",
       headers: { Authorization: token, "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables }),
       signal: AbortSignal.timeout(30_000),
     });
-  } catch {
-    throw new Error("golden_linear_request_failed");
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error));
   }
-  if (!response.ok) throw new Error("golden_linear_request_failed");
+  if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`);
   const envelope = await response.json().catch(() => null);
   if (envelope === null || typeof envelope !== "object" || !envelope.data || envelope.errors?.length) {
     throw new Error("golden_linear_response_invalid");
@@ -306,7 +315,7 @@ async function graphql(token, query, variables) {
   return envelope.data;
 }
 
-export async function createLinearRoot(environment, runId) {
+export async function createLinearRoot(environment, runId, scenario = "single-cycle-human-action") {
   const token = environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN;
   const slug = environment.SYMPHONY_E2E_PROJECT_SLUG_ID;
   const catalog = await graphql(token, `query GoldenProject($slug: String!) {
@@ -345,6 +354,37 @@ export async function createLinearRoot(environment, runId) {
   }
   const stateId = todoStates[0].id;
   const filename = `symphony-golden-${runId}.txt`;
+  const expectedContent = `Symphony golden E2E ${runId}`;
+  const expectedBytes = Buffer.byteLength(expectedContent, "utf8");
+  const stagingFilename = `symphony-golden-${runId}-staging.txt`;
+  const stagingContent = `Symphony staging E2E ${runId}`;
+  const stagingBytes = Buffer.byteLength(stagingContent, "utf8");
+  const humanGate = GOLDEN_HUMAN_ACTION_SCENARIOS.includes(scenario);
+  const scenarioRequirement = scenario === "multi-cycle"
+    ? "The first Cycle must be rejected as incomplete, then a repair Cycle must produce the accepted result."
+    : scenario === "cycle-human-action-cycle"
+      ? `The first Cycle must create ${stagingFilename} containing exactly these ${stagingBytes} UTF-8 bytes: ${stagingContent}. It must receive an accepted Critic before asking the filename Human Action question. After the reply, the second Cycle must delete the staging file and create the selected final file.`
+      : scenario === "human-action-rejected-supplement"
+        ? "Reject the first batch of Human Action replies, ask one follow-up in the same thread, then accept the later supplement without creating another top-level action."
+        : scenario === "human-action-unanswered"
+          ? "Leave the Human Action unanswered. The Root must remain Needs Human without creating a Cycle or attempting delivery."
+      : "";
+  const humanRequirement = scenario === "cycle-human-action-cycle"
+    ? [
+      "Do not ask for Human Action before the first Cycle and its accepted Critic are complete.",
+      "After that first accepted Cycle, ask exactly one concrete question: Which output filename should this run create?",
+      "Use these two mutually exclusive options in that question:",
+      `- ${GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION}: create ${filename} with the exact bytes below.`,
+      `- ${GOLDEN_NEEDS_HUMAN_ALTERNATE_OPTION}: create symphony-golden-${runId}-alternate.txt instead.`,
+      `Do not create the final output until a Root reply explicitly selects ${GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION}.`,
+    ]
+    : humanGate ? [
+      "The first Root Reconcile decision MUST be `needs_human` before any workspace change, with exactly one concrete question: Which output filename should this run create?",
+      "Use these two mutually exclusive options in that question:",
+      `- ${GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION}: create ${filename} with the exact bytes below.`,
+      `- ${GOLDEN_NEEDS_HUMAN_ALTERNATE_OPTION}: create symphony-golden-${runId}-alternate.txt instead.`,
+      `Do not create a Cycle or modify the workspace until a Root reply explicitly selects ${GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION}.`,
+    ] : [];
   const created = await graphql(token, `mutation GoldenRoot($input: IssueCreateInput!) {
     issueCreate(input: $input) { success issue { id identifier url } }
   }`, {
@@ -354,7 +394,9 @@ export async function createLinearRoot(environment, runId) {
       stateId,
       title: `[E2E] Symphony golden Root ${runId}`,
       description: [
-        `Create ${filename} containing exactly: Symphony golden E2E ${runId}`,
+        ...humanRequirement,
+        scenarioRequirement,
+        `Create ${filename} containing exactly these ${expectedBytes} UTF-8 bytes: ${expectedContent}`,
         "The file must match those bytes exactly, with no trailing newline or other additional content.",
         "Verify the byte-for-byte file content and the complete workspace diff.",
         "Do not modify .env, credentials, Git configuration, or unrelated files.",
@@ -365,6 +407,270 @@ export async function createLinearRoot(environment, runId) {
     throw new Error("golden_root_create_failed");
   }
   return Object.freeze({ ...created.issueCreate.issue, filename });
+}
+
+function parseGoldenNeedsHumanQuestionBody(body, expectedOptionKeys = []) {
+  if (typeof body !== "string" || !body.startsWith(`${GOLDEN_NEEDS_HUMAN_MARKER}\n`)) {
+    throw new Error("golden_needs_human_question_invalid");
+  }
+  const lines = body.split(/\r?\n/u);
+  if (!lines.includes("## Questions")) throw new Error("golden_needs_human_question_invalid");
+  const questions = [];
+  let current;
+  for (const line of lines) {
+    const question = /^### [1-9][0-9]*\. ([^\r\n]+)$/u.exec(line);
+    if (question !== null) {
+      current = { question: question[1], options: [] };
+      questions.push(current);
+      continue;
+    }
+    const option = /^- \*\*([A-Za-z][A-Za-z0-9_-]{0,63})\. ([^*\r\n]+)\*\*: ([^\r\n]+)$/u.exec(line);
+    if (option !== null && current !== undefined) {
+      current.options.push({ key: option[1], label: option[2], consequence: option[3] });
+    }
+  }
+  if (questions.length < 1 || questions.some((question) => (
+    question.options.length < 2
+    || question.options.length > 4
+    || new Set(question.options.map(({ key }) => key)).size !== question.options.length
+    || question.options.some(({ label, consequence }) => label.trim().length === 0 || consequence.trim().length === 0)
+  ))) {
+    throw new Error("golden_needs_human_question_options_invalid");
+  }
+  const expected = [...expectedOptionKeys];
+  if (expected.length > 0 && expected.some((key) => !questions[0].options.some((option) => option.key === key))) {
+    throw new Error("golden_needs_human_question_options_invalid");
+  }
+  return Object.freeze({ body, questions: Object.freeze(questions.map((question) => Object.freeze({
+    question: question.question,
+    options: Object.freeze(question.options.map((option) => Object.freeze({ ...option }))),
+  }))) });
+}
+
+function goldenRootCommentBodies(comments) {
+  if (!Array.isArray(comments) || comments.some((comment) => (
+    comment === null || typeof comment !== "object" || typeof comment.body !== "string"
+  ))) {
+    throw new Error("golden_needs_human_comments_invalid");
+  }
+  return comments;
+}
+
+export function validateGoldenNeedsHumanQuestion(comments, expectedOptionKeys = []) {
+  const entries = goldenRootCommentBodies(comments);
+  const questionComments = entries.filter(({ body }) => body.startsWith(`${GOLDEN_NEEDS_HUMAN_MARKER}\n`));
+  if (questionComments.length !== 1
+    || entries.some(({ body }) => body.startsWith("# Symphony Harness:")
+      && !body.startsWith(`${GOLDEN_NEEDS_HUMAN_MARKER}\n`))) {
+    throw new Error("golden_needs_human_question_count_invalid");
+  }
+  return parseGoldenNeedsHumanQuestionBody(questionComments[0].body, expectedOptionKeys);
+}
+
+export function validateGoldenNeedsHumanReply(comments, replyId, expectedBody) {
+  const entries = goldenRootCommentBodies(comments);
+  const question = entries.find(({ body }) => body.startsWith(`${GOLDEN_NEEDS_HUMAN_MARKER}\n`));
+  validateGoldenNeedsHumanQuestion(entries);
+  const replies = entries.filter(({ body }) => !body.startsWith(`${GOLDEN_NEEDS_HUMAN_MARKER}\n`));
+  if (replies.length !== 1) throw new Error("golden_needs_human_reply_count_invalid");
+  const reply = replies[0];
+  if ((replyId !== undefined && reply.id !== replyId)
+    || (expectedBody !== undefined && reply.body !== expectedBody)) {
+    throw new Error("golden_needs_human_reply_invalid");
+  }
+  if (question?.id !== undefined && reply.parent?.id !== question.id) {
+    throw new Error("golden_needs_human_reply_parent_invalid");
+  }
+  const reactions = goldenCommentReactions(reply);
+  if (!reactions.includes("white_check_mark")) {
+    throw new Error("golden_needs_human_reply_not_accepted");
+  }
+  return reply;
+}
+
+function goldenNeedsHumanQuestion(entries) {
+  const questions = entries.filter(({ body, parent }) => (
+    body.startsWith(`${GOLDEN_NEEDS_HUMAN_MARKER}\n`)
+      && (parent?.id === undefined || parent?.id === null)
+  ));
+  if (questions.length !== 1) throw new Error("golden_needs_human_question_count_invalid");
+  parseGoldenNeedsHumanQuestionBody(questions[0].body);
+  return questions[0];
+}
+
+function goldenCommentReactions(comment) {
+  const reactions = comment?.reactions;
+  if (!Array.isArray(reactions)
+    || reactions.some((reaction) => reaction === null || typeof reaction !== "object")) {
+    throw new Error("golden_needs_human_reply_reactions_invalid");
+  }
+  return reactions.map(({ emoji }) => emoji);
+}
+
+/**
+ * Validate one rejected direct-reply batch and its in-thread Harness follow-up.
+ * The user replies are intentionally identified by their non-Harness body: the
+ * fixture token is human-authored, while Conductor follow-ups carry its marker.
+ */
+export function validateGoldenNeedsHumanRejectedBatch(comments, expectedReplyIds = []) {
+  const entries = goldenRootCommentBodies(comments);
+  const question = goldenNeedsHumanQuestion(entries);
+  const directReplies = entries.filter(({ parent }) => parent?.id === question.id);
+  const userReplies = directReplies.filter(({ body }) => !body.startsWith("# Symphony Harness:"));
+  const followUps = directReplies.filter(({ body }) => body.startsWith("# Symphony Harness:"));
+  if (userReplies.length < 1 || followUps.length !== 1) {
+    throw new Error("golden_needs_human_rejection_thread_invalid");
+  }
+  const expected = [...expectedReplyIds];
+  if (expected.length > 0
+    && (expected.length !== userReplies.length || expected.some((id) => !userReplies.some((reply) => reply.id === id)))) {
+    throw new Error("golden_needs_human_rejection_reply_invalid");
+  }
+  for (const reply of userReplies) {
+    const reactions = goldenCommentReactions(reply);
+    if (reactions.filter((emoji) => emoji === "x").length !== 1
+      || reactions.includes("white_check_mark")) {
+      throw new Error("golden_needs_human_rejection_not_marked");
+    }
+  }
+  if (goldenCommentReactions(followUps[0]).length !== 0
+    || !followUps[0].body.includes("## Questions")) {
+    throw new Error("golden_needs_human_follow_up_invalid");
+  }
+  return Object.freeze({ question, userReplies, followUp: followUps[0] });
+}
+
+export function validateGoldenNeedsHumanSupplement(comments, supplementReplyId) {
+  const entries = goldenRootCommentBodies(comments);
+  const question = goldenNeedsHumanQuestion(entries);
+  const directReplies = entries.filter(({ parent }) => parent?.id === question.id);
+  const supplement = directReplies.find(({ id }) => id === supplementReplyId);
+  if (supplement === undefined || supplement.body.startsWith("# Symphony Harness:")) {
+    throw new Error("golden_needs_human_supplement_invalid");
+  }
+  const reactions = goldenCommentReactions(supplement);
+  if (reactions.filter((emoji) => emoji === "white_check_mark").length !== 1
+    || reactions.includes("x")) {
+    throw new Error("golden_needs_human_supplement_not_accepted");
+  }
+  if (directReplies.filter(({ body }) => body.startsWith("# Symphony Harness:")).length !== 1) {
+    throw new Error("golden_needs_human_follow_up_count_invalid");
+  }
+  for (const reply of directReplies.filter(({ body, id }) => (
+    id !== supplementReplyId && !body.startsWith("# Symphony Harness:")
+  ))) {
+    const priorReactions = goldenCommentReactions(reply);
+    if (priorReactions.filter((emoji) => emoji === "x").length !== 1
+      || priorReactions.includes("white_check_mark")) {
+      throw new Error("golden_needs_human_rejection_not_marked");
+    }
+  }
+  return supplement;
+}
+
+export function validateGoldenNeedsHumanUnanswered(issue, comments) {
+  if (issue?.state?.name !== "Needs Human" || issue.state.type !== "started"
+    || !visibleConnection(issue.children) || issue.children.nodes.length !== 0) {
+    throw new Error("golden_needs_human_unanswered_state_invalid");
+  }
+  const entries = goldenRootCommentBodies(comments);
+  const question = goldenNeedsHumanQuestion(entries);
+  if (entries.some(({ parent }) => parent?.id === question.id)
+    || entries.some((comment) => goldenCommentReactions(comment).length > 0)) {
+    throw new Error("golden_needs_human_unanswered_reply_invalid");
+  }
+  return question;
+}
+
+async function listGoldenNeedsHumanComments(token, rootId, includeReactions = false) {
+  const reactionFields = includeReactions
+    ? "reactions { emoji }"
+    : "";
+  const data = await graphql(token, `query GoldenNeedsHuman($id: String!) {
+    issue(id: $id) {
+      comments(first: 50) {
+        nodes {
+          id body parent { id } ${reactionFields}
+          children(first: 50) {
+            nodes { id body parent { id } ${reactionFields} }
+            pageInfo { hasNextPage }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  }`, { id: rootId });
+  const connection = data.issue?.comments;
+  if (connection?.pageInfo?.hasNextPage !== false || !Array.isArray(connection?.nodes)) {
+    throw new Error("golden_needs_human_comments_incomplete");
+  }
+  const entries = [];
+  for (const comment of connection.nodes) {
+    if (comment?.children?.pageInfo?.hasNextPage !== false || !Array.isArray(comment?.children?.nodes)) {
+      throw new Error("golden_needs_human_replies_incomplete");
+    }
+    if (comment.parent?.id === undefined || comment.parent?.id === null) {
+      entries.push(comment);
+      entries.push(...comment.children.nodes);
+    }
+  }
+  return entries;
+}
+
+async function verifyGoldenNeedsHumanQuestion(token, rootId, expectedOptionKeys) {
+  const comments = await listGoldenNeedsHumanComments(token, rootId);
+  if (comments.length !== 1) throw new Error("golden_needs_human_initial_comments_invalid");
+  const parsed = validateGoldenNeedsHumanQuestion(comments, expectedOptionKeys);
+  return Object.freeze({ ...parsed, request_comment_id: comments[0].id });
+}
+
+async function createGoldenHumanReply(token, rootId, parentId, body) {
+  const created = await graphql(token, `mutation GoldenHumanReply($input: CommentCreateInput!) {
+    commentCreate(input: $input) { success comment { id body issue { id } parent { id } } }
+  }`, { input: { issueId: rootId, parentId, body } });
+  if (created.commentCreate?.success !== true
+    || typeof created.commentCreate.comment?.id !== "string"
+    || created.commentCreate.comment.issue?.id !== rootId
+    || created.commentCreate.comment.parent?.id !== parentId) {
+    throw new Error("golden_needs_human_reply_create_failed");
+  }
+  return Object.freeze({
+    id: created.commentCreate.comment.id,
+    body: created.commentCreate.comment.body,
+  });
+}
+
+async function verifyGoldenNeedsHumanAcceptance(token, rootId, replyId, replyBody) {
+  const comments = await listGoldenNeedsHumanComments(token, rootId, true);
+  validateGoldenNeedsHumanReply(comments, replyId, replyBody);
+}
+
+async function verifyGoldenNeedsHumanRejected(token, rootId, expectedReplyIds) {
+  const comments = await listGoldenNeedsHumanComments(token, rootId, true);
+  return validateGoldenNeedsHumanRejectedBatch(comments, expectedReplyIds);
+}
+
+async function verifyGoldenNeedsHumanSupplement(token, rootId, supplementReplyId) {
+  const comments = await listGoldenNeedsHumanComments(token, rootId, true);
+  return validateGoldenNeedsHumanSupplement(comments, supplementReplyId);
+}
+
+async function verifyGoldenNeedsHumanUnanswered(token, rootId) {
+  const data = await graphql(token, `query GoldenNeedsHumanUnanswered($id: String!) {
+    issue(id: $id) {
+      state { name type }
+      children(first: 10) {
+        nodes { id }
+        pageInfo { hasNextPage }
+      }
+    }
+  }`, { id: rootId });
+  const issue = data.issue;
+  if (issue?.children?.pageInfo?.hasNextPage !== false || !Array.isArray(issue?.children?.nodes)) {
+    throw new Error("golden_needs_human_unanswered_children_invalid");
+  }
+  const comments = await listGoldenNeedsHumanComments(token, rootId, true);
+  return validateGoldenNeedsHumanUnanswered(issue, comments);
 }
 
 export async function archiveIssueTree(token, rootId) {
@@ -529,7 +835,31 @@ function validRootReconcileReport(body, kind) {
     && lines.some((line) => /^Total tokens: (?:Unknown|[0-9]+(?:\.[0-9])?[kM]?)$/u.test(line));
 }
 
-export function validateGoldenResultComments(issue) {
+function validGoldenNeedsHumanRootComments(comments) {
+  if (!comments.some(({ body }) => body.startsWith("# Symphony Harness:"))) return true;
+  try {
+    goldenNeedsHumanQuestion(comments);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateArchitectureDecisionProjection(issue, scenario) {
+  const humanScenario = scenario === "single-cycle-human-action"
+    || scenario === "cycle-human-action-cycle"
+    || scenario === "human-action-rejected-supplement";
+  if (!humanScenario) return;
+  if (!issue.description.includes("ADR-001")) throw new Error("golden_architecture_decision_root_invalid");
+  const cycles = issue.children.nodes;
+  const targetNumber = scenario === "cycle-human-action-cycle" ? "002" : "001";
+  const target = cycles.find((cycle) => cycle.title?.startsWith(`[Cycle ${targetNumber}]`));
+  if (target === undefined || !target.description?.includes("ADR-001")) {
+    throw new Error("golden_architecture_decision_cycle_missing");
+  }
+}
+
+export function validateGoldenResultComments(issue, { scenario } = {}) {
   if (!exactObject(issue, ["description", "comments", "children"])
     || typeof issue.description !== "string"
     || !commentConnection(issue.comments)
@@ -548,7 +878,7 @@ export function validateGoldenResultComments(issue) {
     || (deliveryStart >= 0 && deliveryStart >= metadataStart)
     || !issue.description.includes("\n\n### Root State\n", managedStart)
     || !issue.description.slice(managedStart, managedEnd).split(/\r?\n/u).some((line) => LOCAL_TIMESTAMP.test(line))
-    || issue.comments.nodes.some(({ body }) => body.startsWith("# Symphony Harness:"))) {
+    || !validGoldenNeedsHumanRootComments(issue.comments.nodes)) {
     throw new Error("golden_root_description_invalid");
   }
   const completionReport = `# Symphony Harness: Reconcile\n${issue.description.slice(
@@ -610,6 +940,7 @@ export function validateGoldenResultComments(issue) {
     }
   }
   if (critiqueResultUrls.length !== 1) throw new Error("golden_result_comments_file_link_invalid");
+  validateArchitectureDecisionProjection(issue, scenario);
   return critiqueResultUrls[0];
 }
 
@@ -725,7 +1056,7 @@ async function verifyGoldenVisibleTree(token, rootId) {
   validateGoldenVisibleTree(data.issue);
 }
 
-async function verifyGoldenResultComments(token, rootId) {
+async function verifyGoldenResultComments(token, rootId, scenario) {
   const data = await graphql(token, `query GoldenResultComments($id: String!) {
     issue(id: $id) {
       description
@@ -757,7 +1088,7 @@ async function verifyGoldenResultComments(token, rootId) {
       }
     }
   }`, { id: rootId });
-  const url = validateGoldenResultComments(data.issue);
+  const url = validateGoldenResultComments(data.issue, { scenario });
   await fetchGoldenCriticResult(url, token);
 }
 
@@ -792,6 +1123,7 @@ export async function cleanupGoldenRemote({
 }
 
 export async function createGoldenFixture({
+  scenario = "single-cycle",
   environment,
   inheritedEnvironment,
   diagnosticRoot,
@@ -805,17 +1137,26 @@ export async function createGoldenFixture({
   let root;
   try {
     await mkdir(runDirectory);
-    root = await createLinearRoot(environment, runId);
+    root = await createLinearRoot(environment, runId, scenario);
   } catch (error) {
     await rm(base, { recursive: true, force: true });
     throw error instanceof Error && error.message.startsWith("golden_")
       ? error
       : new Error("golden_fixture_create_failed");
   }
+  let humanReply;
+  let rejectedReplies = [];
+  let humanActionRequestId;
+  const humanReplyBody = `I choose option ${GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION}: create ${root.filename} with the exact bytes from the Root requirement.`;
+  const rejectedReplyBodies = Object.freeze([
+    "I reject both options for now; please provide more detail before I choose.",
+    "I am not ready to select an option. Explain the trade-off first.",
+  ]);
 
   return Object.freeze({
     root,
     runDirectory,
+    workspace: path.join(base, "workspace"),
     async archiveFailure({ error, stdout, stderr } = {}) {
       return archiveGoldenFailure({
         archiveRoot: resolvedDiagnosticRoot,
@@ -825,9 +1166,89 @@ export async function createGoldenFixture({
         stderr,
       });
     },
+    async verifyNeedsHumanBoundary() {
+      if (!GOLDEN_HUMAN_ACTION_SCENARIOS.includes(scenario)) {
+        throw new Error("golden_needs_human_unexpected");
+      }
+      const question = await verifyGoldenNeedsHumanQuestion(
+        environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+        root.id,
+        [GOLDEN_NEEDS_HUMAN_DEFAULT_OPTION, GOLDEN_NEEDS_HUMAN_ALTERNATE_OPTION],
+      );
+      humanActionRequestId = question.request_comment_id;
+    },
+    async rejectNeedsHumanReplies() {
+      if (scenario !== "human-action-rejected-supplement") {
+        throw new Error("golden_needs_human_rejection_unexpected");
+      }
+      if (typeof humanActionRequestId !== "string" || rejectedReplies.length > 0) {
+        throw new Error("golden_needs_human_rejection_request_invalid");
+      }
+      rejectedReplies = [];
+      for (const body of rejectedReplyBodies) {
+        rejectedReplies.push(await createGoldenHumanReply(
+          environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+          root.id,
+          humanActionRequestId,
+          body,
+        ));
+      }
+      return Object.freeze(rejectedReplies.map(({ id }) => id));
+    },
+    async verifyRejectedNeedsHumanBoundary() {
+      if (scenario !== "human-action-rejected-supplement" || rejectedReplies.length === 0) {
+        throw new Error("golden_needs_human_rejection_missing");
+      }
+      await verifyGoldenNeedsHumanRejected(
+        environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+        root.id,
+        rejectedReplies.map(({ id }) => id),
+      );
+    },
+    async replyToNeedsHuman() {
+      if (humanReply !== undefined) throw new Error("golden_needs_human_reply_duplicated");
+      if (typeof humanActionRequestId !== "string") throw new Error("golden_needs_human_request_missing");
+      humanReply = await createGoldenHumanReply(
+        environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+        root.id,
+        humanActionRequestId,
+        humanReplyBody,
+      );
+    },
+    async verifyUnansweredNeedsHuman() {
+      if (scenario !== "human-action-unanswered") {
+        throw new Error("golden_needs_human_unanswered_unexpected");
+      }
+      await verifyGoldenNeedsHumanUnanswered(
+        environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+        root.id,
+      );
+    },
     async verifyVisibleCompletion() {
+      if (scenario === "human-action-unanswered") {
+        await this.verifyUnansweredNeedsHuman();
+        return;
+      }
       await verifyGoldenVisibleTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
-      await verifyGoldenResultComments(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
+      await verifyGoldenResultComments(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id, scenario);
+      if (scenario === "human-action-rejected-supplement") {
+        if (humanReply === undefined || rejectedReplies.length === 0) {
+          throw new Error("golden_needs_human_supplement_missing");
+        }
+        await verifyGoldenNeedsHumanSupplement(
+          environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+          root.id,
+          humanReply.id,
+        );
+      } else if (scenario === "single-cycle-human-action" || scenario === "cycle-human-action-cycle") {
+        if (humanReply === undefined) throw new Error("golden_needs_human_reply_missing");
+        await verifyGoldenNeedsHumanAcceptance(
+          environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN,
+          root.id,
+          humanReply.id,
+          humanReplyBody,
+        );
+      }
     },
     async cleanup(pullRequestUrl, {
       archiveIssueTree: shouldArchiveIssueTree = false,
