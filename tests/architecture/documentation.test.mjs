@@ -208,6 +208,7 @@ test("Linear statuses are canonical, visible, and explicitly projected", async (
     ["Todo", "unstarted"],
     ["In Progress", "started"],
     ["In Review", "started"],
+    ["Needs Human", "started"],
     ["Done", "completed"],
     ["Canceled", "canceled"],
   ]) {
@@ -216,7 +217,7 @@ test("Linear statuses are canonical, visible, and explicitly projected", async (
   assert.match(contracts, /LinearStateType = unstarted \| started \| completed \| canceled/);
   assert.match(contracts, /IssueStatus = todo \| active \| completed \| canceled/);
   assert.match(contracts, /Lifecycle decisions therefore\s+use the exact canonical `status_id`/);
-  assert.match(taskManagement, /resolves the five canonical statuses by exact name and expected type/);
+  assert.match(taskManagement, /resolves the six canonical statuses by exact name and expected type/);
   assert.match(taskManagement, /no exact-name state \| create the exact name\/type/);
   assert.match(taskManagement, /wrong type \| stop before an Agent starts or any Issue mutation/);
   assert.match(taskManagement, /more than one exact-name state/);
@@ -224,6 +225,7 @@ test("Linear statuses are canonical, visible, and explicitly projected", async (
   assert.match(taskManagement, /Any other user-defined state is ignored completely/);
   assert.match(taskManagement, /never treats another `started` state as/);
   assert.match(workflow, /Root \| `Todo` after Prepare[\s\S]*durable family -> `In Progress`[\s\S]*Critic checkpoint -> `In Review`[\s\S]*valid Delivery projection -> `Done`/);
+  assert.match(workflow, /Reconcile question -> `Needs Human`/);
   assert.match(workflow, /Cycle \| `Todo` when created[\s\S]*recorded family sets `In Progress`[\s\S]*starting Critic sets `In Review`[\s\S]*terminal Cycle result sets `Done`/);
   assert.match(workflow, /Artist \| `Todo` when created[\s\S]*process launch sets `In Progress`[\s\S]*process return, timeout, interruption, or start failure sets `Done`/);
   assert.match(workflow, /Critic \| `Todo` when created[\s\S]*Critic launch sets `In Review`[\s\S]*Critic report or process error sets `Done`; the report is exact Markdown/);
@@ -268,9 +270,9 @@ test("fresh Root Reconcile and visible Issue titles have closed contracts", asyn
   const taskManagement = sources.get("task-management.md");
   const conductor = sources.get("conductor.md");
 
-  assert.match(workflow, /startup gates normalize it to `Todo`/);
-  assert.match(reconciliation, /normalizes a\s+nonterminal Root to `Todo` before the first fresh Reconcile/);
-  assert.match(conductor, /normalize a nonterminal Root to canonical Todo before fresh Reconcile/);
+  assert.match(workflow, /Startup never rewrites a resumed Root to `Todo`/);
+  assert.match(reconciliation, /A resumed Reconcile leaves the Root there until its decision/);
+  assert.match(conductor, /startup does not normalize a resumed Root/);
   assert.match(rootIssue, /`\[Cycle NNN\] <objective>` with a concise imperative\s+objective and a maximum total title length of 80 characters/);
   assert.match(rootIssue, /exactly `\[Artist\] Cycle NNN` and\s+`\[Critic\] Cycle NNN`/);
   assert.match(taskManagement, /`\[Cycle NNN\] <objective>` \(concise imperative wording;\s+maximum 80 characters total with word-safe ellipsis fallback\), `\[Artist\] Cycle NNN`, and\s+`\[Critic\] Cycle NNN`/);
@@ -357,7 +359,8 @@ test("V2 Podium Desktop keeps local scheduling outside Conductor", async () => {
   assert.match(contracts, /ProjectBinding/);
   assert.match(contracts, /routing_label/);
   assert.match(conductor, /one `--linear-root`, one preferred `--workspace`, and one `--dir`/);
-  assert.match(conductor, /Podium scheduling, UI, or E2E behavior for `NeedsHuman`/);
+  assert.match(conductor, /let an unprocessed Human Action thread reply make it an ordinary candidate/);
+  assert.match(workflow, /use the ordinary queue; add no rank, label, priority mutation, or Resume command/);
 });
 
 test("Done Roots and terminal descendants are not modified", async () => {

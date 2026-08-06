@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 
 import { App } from "./App";
 import { createDemoState } from "./DesktopRuntime";
+import type { DesktopCommandResult } from "./ui/types";
 
 const confirmed = async () => ({ kind: "confirmed" as const });
 
@@ -141,6 +142,64 @@ test("settings blocks save until required fields are filled", () => {
   expect(screen.getByText("Select a Linear project.")).toBeInTheDocument();
   expect(screen.getByText("Repository path is required.")).toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Linear Project" })).toHaveAttribute("aria-invalid", "true");
+});
+
+test("settings disconnect asks for confirmation and reports the outcome", async () => {
+  const command = vi.fn().mockImplementation(confirmed);
+  render(<App initialState={createDemoState()} onCommand={command} />);
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+  const confirmation = screen.getByRole("dialog", { name: "Disconnect Linear?" });
+  fireEvent.click(within(confirmation).getByRole("button", { name: "Disconnect" }));
+  await screen.findByRole("status");
+  expect(command).toHaveBeenCalledWith({ kind: "disconnect_linear" });
+});
+
+test("connect failure is visible without opening the binding editor", async () => {
+  const command = vi.fn().mockImplementation(async (cmd: { kind: string }) =>
+    cmd.kind === "connect_linear"
+      ? { kind: "rejected" as const, sanitizedReason: "linear_application_unconfigured" }
+      : confirmed(),
+  );
+  const state = createDemoState();
+  state.overview.linear = { status: "disconnected" };
+  render(<App initialState={state} onCommand={command} />);
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
+  await screen.findByRole("alert");
+  expect(screen.getByRole("alert")).toHaveTextContent("linear_application_unconfigured");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("connect can be cancelled while waiting for the browser", async () => {
+  let resolveConnect: ((result: DesktopCommandResult) => void) | undefined;
+  const command = vi.fn().mockImplementation((cmd: { kind: string }) => {
+    if (cmd.kind === "connect_linear") {
+      return new Promise<DesktopCommandResult>((resolve) => {
+        resolveConnect = resolve;
+      });
+    }
+    return confirmed();
+  });
+  const state = createDemoState();
+  state.overview.linear = { status: "disconnected" };
+  render(<App initialState={state} onCommand={command} />);
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+  expect(command).toHaveBeenCalledWith({ kind: "cancel_linear_connect" });
+  resolveConnect?.({ kind: "rejected", sanitizedReason: "linear_authorization_cancelled" });
+  await screen.findByRole("status");
+  expect(screen.getByRole("status")).toHaveTextContent("Connection cancelled.");
+});
+
+test("overview guides to Settings while Linear is disconnected", () => {
+  const state = createDemoState();
+  state.overview.linear = { status: "disconnected" };
+  render(<App initialState={state} onCommand={confirmed} />);
+  expect(screen.getByText(/Linear is not connected/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
 });
 
 test("conductors exposes binding controls while assignments stay scheduler-owned", () => {
