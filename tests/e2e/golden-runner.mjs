@@ -114,7 +114,6 @@ export function partitionGoldenEnvironment(environment = {}, inherited = process
 export function resolveGoldenLaunchArguments({
   environment = {},
   root,
-  workspace,
   runDirectory,
 } = {}) {
   const configuration = resolveGoldenRoleConfiguration(environment);
@@ -124,7 +123,6 @@ export function resolveGoldenLaunchArguments({
     "--dir", runDirectory,
     "--max-cycles", environment.SYMPHONY_GOLDEN_MAX_CYCLES ?? "4",
   ];
-  if (workspace !== undefined) args.splice(3, 0, "--workspace", workspace);
   if (configuration.reconcile.agent !== undefined) {
     args.push("--reconcile-agent", configuration.reconcile.agent);
   }

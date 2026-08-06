@@ -128,13 +128,11 @@ test("golden launch omits generic --agent and forwards role options independentl
       SYMPHONY_GOLDEN_MAX_CYCLES: "3",
     },
     root: "ENG-1",
-    workspace: "/tmp/root-workspace",
     runDirectory: "/tmp/root-run",
   });
   assert.deepEqual(args, [
     "run",
     "--linear-root", "ENG-1",
-    "--workspace", "/tmp/root-workspace",
     "--dir", "/tmp/root-run",
     "--max-cycles", "3",
     "--reconcile-agent", "codex",
@@ -150,7 +148,7 @@ test("golden launch omits generic --agent and forwards role options independentl
 
 test("golden launch leaves workspace preparation to Root Reconcile", () => {
   const args = resolveGoldenLaunchArguments({
-    environment: {}, root: "ENG-1", runDirectory: "/tmp/root-run",
+    environment: {}, root: "ENG-1", workspace: "/tmp/must-be-ignored", runDirectory: "/tmp/root-run",
   });
   assert.deepEqual(args, [
     "run", "--linear-root", "ENG-1", "--dir", "/tmp/root-run", "--max-cycles", "4",
