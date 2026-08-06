@@ -48,7 +48,7 @@ test("defaults each role agent to Codex and leaves overrides optional", () => {
   });
 });
 
-test("omits a preferred workspace so Prepare adopts the current checkout", () => {
+test("omits a preferred workspace so Prepare owns worktree selection", () => {
   assert.deepEqual(parseCliArguments([
     "run", "--linear-root", "ENG-123", "--dir", "/tmp/root-run", "--max-cycles", "4",
   ]), {

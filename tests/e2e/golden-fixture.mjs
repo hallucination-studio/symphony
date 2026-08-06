@@ -201,17 +201,6 @@ async function copyRunDirectory(source, destination, state, depth = 0) {
   }
 }
 
-function commonAncestor(left, right) {
-  let candidate = path.resolve(left);
-  const other = path.resolve(right);
-  while (!inside(candidate, other)) {
-    const parent = path.dirname(candidate);
-    if (parent === candidate) return parent;
-    candidate = parent;
-  }
-  return candidate;
-}
-
 async function nearestExistingAncestor(directory) {
   let candidate = directory;
   for (;;) {
@@ -226,12 +215,10 @@ async function nearestExistingAncestor(directory) {
   }
 }
 
-async function archiveRootFor({ archiveRoot, workspace, runDirectory }) {
-  if (!absolutePath(workspace)) throw new Error("golden_diagnostic_archive_unsafe");
+async function archiveRootFor({ archiveRoot, runDirectory }) {
   if (!absolutePath(runDirectory)) throw new Error("golden_diagnostic_archive_unsafe");
-  const workspaceReal = await realpath(workspace).catch(() => { throw new Error("golden_diagnostic_archive_unsafe"); });
   const runReal = await realpath(runDirectory).catch(() => { throw new Error("golden_diagnostic_archive_unsafe"); });
-  const fixtureRoot = commonAncestor(workspaceReal, runReal);
+  const fixtureRoot = path.dirname(runReal);
   const requestedInput = archiveRoot ?? path.join(os.tmpdir(), DIAGNOSTIC_ROOT_NAME);
   if (!absolutePath(requestedInput)) throw new Error("golden_diagnostic_archive_unsafe");
   const requested = path.resolve(requestedInput);
@@ -255,7 +242,6 @@ async function archiveRootFor({ archiveRoot, workspace, runDirectory }) {
  */
 export async function archiveGoldenFailure({
   archiveRoot,
-  workspace,
   runDirectory,
   error,
   stdout,
@@ -266,7 +252,7 @@ export async function archiveGoldenFailure({
   if (!runMetadata.isDirectory() || runMetadata.isSymbolicLink()) {
     throw new Error("golden_diagnostic_archive_unsafe");
   }
-  const root = await archiveRootFor({ archiveRoot, workspace, runDirectory });
+  const root = await archiveRootFor({ archiveRoot, runDirectory });
   const runReal = await realpath(runDirectory).catch(() => { throw new Error("golden_diagnostic_archive_unsafe"); });
   if (inside(runReal, root)) throw new Error("golden_diagnostic_archive_unsafe");
   const archiveDirectory = await mkdtemp(path.join(root, DIAGNOSTIC_DIR_PREFIX));
@@ -754,40 +740,13 @@ function githubEnvironment(environment, inherited) {
     : [[key, environment[key] ?? inherited[key]]]));
 }
 
-export function githubRepositoryFromOrigin(origin) {
-  try {
-    const parsed = new URL(origin);
-    const parts = parsed.pathname.replace(/\.git$/u, "").split("/").filter(Boolean);
-    if (parsed.protocol !== "https:" || parsed.hostname !== "github.com"
-      || parsed.username.length > 0 || parsed.password.length > 0
-      || parsed.search.length > 0 || parsed.hash.length > 0 || parts.length !== 2) {
-      throw new Error("golden_origin_invalid");
-    }
-    return `${parts[0]}/${parts[1]}`;
-  } catch {
-    throw new Error("golden_origin_invalid");
-  }
-}
-
-export async function cloneGoldenWorkspace({ repositoryRoot, workspace, origin, branch } = {}) {
-  await execute("git", ["clone", "--quiet", "--local", "--no-hardlinks", repositoryRoot, workspace], {
-    encoding: "utf8", timeout: 120_000,
-  }).catch(() => { throw new Error("golden_clone_failed"); });
-  await execute("git", ["-C", workspace, "remote", "set-url", "origin", origin], {
-    encoding: "utf8", timeout: 10_000,
-  });
-  await execute("git", ["-C", workspace, "checkout", "-b", branch], { encoding: "utf8", timeout: 10_000 });
-}
-
 export async function createGoldenFixture({
   environment,
   inheritedEnvironment,
-  repositoryRoot,
   diagnosticRoot,
 } = {}) {
   const runId = crypto.randomUUID().slice(0, 8);
   const base = await mkdtemp(path.join(os.tmpdir(), "symphony-golden-"));
-  const workspace = path.join(base, "workspace");
   const runDirectory = path.join(base, "run");
   const branch = `symphony/golden-${runId}`;
   const resolvedDiagnosticRoot = diagnosticRoot
@@ -795,15 +754,6 @@ export async function createGoldenFixture({
     ?? environment?.SYMPHONY_E2E_DIAGNOSTIC_DIR;
   let root;
   try {
-    const { stdout: originOutput } = await execute("git", ["-C", repositoryRoot, "remote", "get-url", "origin"], {
-      encoding: "utf8", timeout: 10_000,
-    });
-    const origin = originOutput.trim();
-    if (origin.length === 0) throw new Error("golden_origin_missing");
-    githubRepositoryFromOrigin(origin);
-    await cloneGoldenWorkspace({ repositoryRoot, workspace, origin, branch });
-    await execute("git", ["-C", workspace, "config", "user.name", "Symphony E2E"], { encoding: "utf8" });
-    await execute("git", ["-C", workspace, "config", "user.email", "symphony-e2e@example.invalid"], { encoding: "utf8" });
     await mkdir(runDirectory);
     root = await createLinearRoot(environment, runId);
   } catch (error) {
@@ -815,13 +765,11 @@ export async function createGoldenFixture({
 
   return Object.freeze({
     root,
-    workspace,
     runDirectory,
     branch,
     async archiveFailure({ error, stdout, stderr } = {}) {
       return archiveGoldenFailure({
         archiveRoot: resolvedDiagnosticRoot,
-        workspace,
         runDirectory,
         error,
         stdout,
@@ -840,7 +788,7 @@ export async function createGoldenFixture({
           encoding: "utf8", timeout: 30_000,
         }).catch(() => failures.push("golden_pr_cleanup_failed"));
       } else {
-        await execute("git", ["-C", workspace, "push", "origin", "--delete", branch], {
+        await execute("git", ["push", "origin", "--delete", branch], {
           encoding: "utf8", timeout: 30_000,
         }).catch(() => undefined);
       }

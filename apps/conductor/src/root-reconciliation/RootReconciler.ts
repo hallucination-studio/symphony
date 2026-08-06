@@ -121,7 +121,7 @@ export class RootReconciler {
     const currentDirectory = process.cwd();
     const workingDirectory = currentDirectory;
     const target = preferredWorkspace === undefined
-      ? "No preferred workspace was supplied. Adopt the current working directory and its current branch without switching, cleaning, or resetting."
+      ? "No preferred workspace was supplied. First try to create a dedicated Root worktree and branch under the current repository's parent directory. Only if worktree creation is unavailable, adopt the current working directory and branch without switching, cleaning, or resetting."
       : `The preferred workspace is ${preferredWorkspace}. If it does not exist, create a dedicated git worktree and Root branch at exactly that path. Do not silently fall back to another path.`;
     const prompt = parseMarkdownText([
       "You are Symphony's Root Reconcile role executing the Prepare phase.",
@@ -137,7 +137,7 @@ export class RootReconciler {
       ...(this.options.reconcileModel === undefined ? {} : { model: this.options.reconcileModel }),
       ...(this.options.reconcileReasoningEffort === undefined ? {} : { reasoning_effort: this.options.reconcileReasoningEffort }),
       prompt, working_directory: workingDirectory, sandbox: "workspace_write",
-      ...(preferredWorkspace === undefined ? {} : { additional_writable_directories: [path.dirname(preferredWorkspace)] }),
+      additional_writable_directories: [path.dirname(preferredWorkspace ?? currentDirectory)],
       final_response_path: finalResponsePath, diagnostic_jsonl_path: diagnosticJsonlPath,
       diagnostic_stderr_path: diagnosticStderrPath, timeout_ms: this.options.timeoutMs,
     }, signal);
@@ -156,7 +156,6 @@ export class RootReconciler {
     const workspace = parseRootWorkspace(value);
     if (workspace.run_directory !== this.options.runDirectory) throw new Error("prepared_run_directory_mismatch");
     if (preferredWorkspace !== undefined && workspace.workspace_path !== preferredWorkspace) throw new Error("prepared_workspace_mismatch");
-    if (preferredWorkspace === undefined && workspace.workspace_path !== currentDirectory) throw new Error("prepared_workspace_mismatch");
     return workspace;
   }
 

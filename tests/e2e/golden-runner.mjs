@@ -121,10 +121,10 @@ export function resolveGoldenLaunchArguments({
   const args = [
     "run",
     "--linear-root", root,
-    "--workspace", workspace,
     "--dir", runDirectory,
     "--max-cycles", environment.SYMPHONY_GOLDEN_MAX_CYCLES ?? "4",
   ];
+  if (workspace !== undefined) args.splice(3, 0, "--workspace", workspace);
   if (configuration.reconcile.agent !== undefined) {
     args.push("--reconcile-agent", configuration.reconcile.agent);
   }
@@ -187,7 +187,6 @@ export async function runGoldenScenario({
     const args = [entry, ...resolveGoldenLaunchArguments({
       environment,
       root: fixture.root.identifier,
-      workspace: fixture.workspace,
       runDirectory: fixture.runDirectory,
     })];
     let result;
@@ -249,7 +248,6 @@ export async function runGoldenScenario({
           ? await fixture.archiveFailure(context)
           : await archiveGoldenFailure({
             archiveRoot: diagnosticRoot,
-            workspace: fixture.workspace,
             runDirectory: fixture.runDirectory,
             ...context,
           });

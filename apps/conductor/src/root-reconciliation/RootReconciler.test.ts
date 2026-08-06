@@ -103,6 +103,24 @@ test("Prepare delegates the exact preferred worktree binding to Root Reconcile",
   assert.equal(launches[0]?.prompt.includes(preferred), true);
 });
 
+test("Prepare without a preferred path lets Root Reconcile create a sibling worktree", async () => {
+  const world = await fixture();
+  const prepared = path.join(path.dirname(process.cwd()), "symphony-root-eng-1");
+  const launches: PerformerLaunchRequest[] = [];
+  const reconciler = createReconciler(performerWith([
+    "decision: prepared", "", "## Workspace",
+    JSON.stringify({ workspace_path: prepared, run_directory: world.runDirectory, root_branch: "root/ENG-1" }),
+    "", "## Report", "### Summary", "Created a dedicated Root worktree.", "", "### Evidence", "The Root branch is attached.",
+  ].join("\n"), launches), world.runDirectory);
+
+  assert.deepEqual(await reconciler.prepare(world.request.root), {
+    workspace_path: prepared, run_directory: world.runDirectory, root_branch: "root/ENG-1",
+  });
+  assert.deepEqual(launches[0]?.additional_writable_directories, [path.dirname(process.cwd())]);
+  assert.match(launches[0]?.prompt ?? "", /First try to create a dedicated Root worktree/u);
+  assert.match(launches[0]?.prompt ?? "", /Only if worktree creation is unavailable/u);
+});
+
 test("returns one Cycle draft from Root-owned inputs without exposing workspace paths", async () => {
   const world = await fixture();
   const launches: PerformerLaunchRequest[] = [];

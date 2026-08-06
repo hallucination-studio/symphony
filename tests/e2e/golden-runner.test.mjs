@@ -1,18 +1,14 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
 
 import {
   archiveGoldenFailure,
   archiveIssueTree,
-  cloneGoldenWorkspace,
   createLinearRoot,
   fetchGoldenCriticResult,
-  githubRepositoryFromOrigin,
   MAX_GOLDEN_ISSUE_TREE_DEPTH,
   MAX_DIAGNOSTIC_STREAM_BYTES,
   validateGoldenResultComments,
@@ -28,8 +24,6 @@ import {
   runGoldenScenario,
 } from "./golden-runner.mjs";
 import { formatLocalTimestamp } from "./linear-driver.mjs";
-
-const execute = promisify(execFile);
 
 test("golden completion requires a pull request and rejects temporary file delivery", () => {
   assert.equal(requireGoldenPullRequest({
@@ -47,49 +41,6 @@ test("golden completion requires a pull request and rejects temporary file deliv
     status: "done",
     delivery: { kind: "branch", branch: "root/ENG-7", remote: "origin" },
   }), /golden_delivery_not_pull_request/u);
-});
-
-test("golden resolves only a credential-free GitHub origin", () => {
-  assert.equal(
-    githubRepositoryFromOrigin("https://github.com/hallucination-studio/symphony.git"),
-    "hallucination-studio/symphony",
-  );
-  assert.throws(() => githubRepositoryFromOrigin("https://token@github.com/org/repo.git"), /golden_origin_invalid/u);
-  assert.throws(() => githubRepositoryFromOrigin("https://example.test/org/repo.git"), /golden_origin_invalid/u);
-  assert.throws(() => githubRepositoryFromOrigin("https://github.com/org/extra/repo.git"), /golden_origin_invalid/u);
-});
-
-test("golden workspace starts from the tested local HEAD and restores the GitHub origin", async (context) => {
-  const base = await mkdtemp(path.join(os.tmpdir(), "symphony-golden-clone-test-"));
-  context.after(() => rm(base, { recursive: true, force: true }));
-  const source = path.join(base, "source");
-  const workspace = path.join(base, "workspace");
-  await mkdir(source);
-  await execute("git", ["init", "--initial-branch=main"], { cwd: source });
-  await execute("git", ["config", "user.name", "Golden Test"], { cwd: source });
-  await execute("git", ["config", "user.email", "golden@example.invalid"], { cwd: source });
-  await writeFile(path.join(source, "current.txt"), "current local baseline\n", "utf8");
-  await execute("git", ["add", "current.txt"], { cwd: source });
-  await execute("git", ["commit", "-m", "test baseline"], { cwd: source });
-  await execute("git", ["remote", "add", "origin", "https://github.com/acme/symphony.git"], { cwd: source });
-  const { stdout: sourceHead } = await execute("git", ["rev-parse", "HEAD"], { cwd: source });
-
-  await cloneGoldenWorkspace({
-    repositoryRoot: source,
-    workspace,
-    origin: "https://github.com/acme/symphony.git",
-    branch: "symphony/golden-test",
-  });
-
-  const [{ stdout: workspaceHead }, { stdout: branch }, { stdout: origin }] = await Promise.all([
-    execute("git", ["rev-parse", "HEAD"], { cwd: workspace }),
-    execute("git", ["branch", "--show-current"], { cwd: workspace }),
-    execute("git", ["remote", "get-url", "origin"], { cwd: workspace }),
-  ]);
-  assert.equal(workspaceHead.trim(), sourceHead.trim());
-  assert.equal(branch.trim(), "symphony/golden-test");
-  assert.equal(origin.trim(), "https://github.com/acme/symphony.git");
-  assert.equal(await readFile(path.join(workspace, "current.txt"), "utf8"), "current local baseline\n");
 });
 
 test("golden keeps only a structured Conductor failure reason", () => {
@@ -175,6 +126,16 @@ test("golden launch omits generic --agent and forwards role options independentl
     "--critic-reasoning-effort", "xhigh",
   ]);
   assert.equal(args.includes("--agent"), false);
+});
+
+test("golden launch leaves workspace preparation to Root Reconcile", () => {
+  const args = resolveGoldenLaunchArguments({
+    environment: {}, root: "ENG-1", runDirectory: "/tmp/root-run",
+  });
+  assert.deepEqual(args, [
+    "run", "--linear-root", "ENG-1", "--dir", "/tmp/root-run", "--max-cycles", "4",
+  ]);
+  assert.equal(args.includes("--workspace"), false);
 });
 
 test("golden forwards only role credentials without fixture or generic secrets", () => {

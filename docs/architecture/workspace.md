@@ -13,7 +13,7 @@ phase and validates its structured result; it must not execute Git commands.
 ```text
 Root Reconcile Prepare
   -> supplied preferred path: validate it or create a worktree and Root branch there
-  -> no preferred path: adopt the invocation current directory and current branch
+  -> no preferred path: prefer a dedicated Root worktree and branch; fall back to the current checkout only when creation is unavailable
   -> return workspace_path, run_directory, root_branch
   -> Conductor persists the exact binding in Root State
 ```
@@ -22,7 +22,7 @@ Root Reconcile Prepare
 |---|---|
 | `WS-PREP-001` | when a preferred workspace is supplied, Root Reconcile uses that exact valid workspace or creates a worktree there |
 | `WS-PREP-002` | failure at a supplied path is visible and must not silently fall back to another path |
-| `WS-PREP-003` | without a supplied workspace, adopt the current directory and branch without switching, cleaning, or resetting |
+| `WS-PREP-003` | without a supplied workspace, Root Reconcile first attempts a dedicated Root worktree and branch; only when unavailable may it adopt the current directory and branch without switching, cleaning, or resetting |
 | `WS-PREP-004` | keep the external run directory outside the workspace for private diagnostics |
 | `WS-PREP-005` | Conductor validates and persists the returned binding but runs no worktree or branch command |
 | `WS-PREP-006` | restart reuses the Root State binding and does not prepare a replacement |

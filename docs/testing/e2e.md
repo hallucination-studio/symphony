@@ -237,7 +237,7 @@ The suite covers these observable outcomes:
 | empty or invalid external setup | boundary result is `blocked` with a bounded reason |
 | credential partition | secrets are available only to their owning real boundary and never emitted |
 | diagnostic boundary | raw Agent JSONL/stderr/error context stays private in the external run directory; only refs are observable |
-| golden fixture ownership | the runner clones the repository under test at its current local `HEAD`, restores its credential-free GitHub `origin`, and creates its own Root, workspace, run directory, branch, and cleanup scope |
+| golden fixture ownership | the runner creates only its Root Issue and private run directory; Root Reconcile Prepare owns any worktree/branch creation from the invocation checkout |
 | golden delivery | the temporary Golden workspace is successful only with a structured GitHub pull-request Delivery; branch or files Delivery fails before cleanup and is archived for diagnosis |
 | golden failure archive | evidence is archived before owned external cleanup; result reports only `diagnostic_ref` |
 | golden prerequisites absent | overall runner reports `blocked` before creating external resources |
