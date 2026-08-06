@@ -28,14 +28,14 @@ export function parseCliArguments(arguments_: readonly string[]): HarnessRunRequ
     if (values.has(key)) throw new Error("duplicate_option");
     values.set(key, value);
   }
-  for (const key of ["linear_root", "workspace_path", "run_directory", "max_cycles"] as const) {
+  for (const key of ["linear_root", "run_directory", "max_cycles"] as const) {
     if (!values.has(key)) throw new Error("missing_option");
   }
 
   const maximumCycles = Number(values.get("max_cycles"));
   return parseHarnessRunRequest({
     linear_root: values.get("linear_root"),
-    workspace_path: values.get("workspace_path"),
+    ...(values.has("workspace_path") ? { workspace_path: values.get("workspace_path") } : {}),
     run_directory: values.get("run_directory"),
     ...(values.has("reconcile_agent") ? { reconcile_agent: values.get("reconcile_agent") } : {}),
     ...(values.has("reconcile_model") ? { reconcile_model: values.get("reconcile_model") } : {}),

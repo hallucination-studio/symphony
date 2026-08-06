@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentKind } from "../contracts/identity.js";
@@ -11,6 +10,9 @@ import {
   type RootReconcileRequest,
 } from "../contracts/root.js";
 import type { Performer } from "../performer/api/Performer.js";
+import type { LinearIssue } from "../contracts/task-management.js";
+import { parseRootWorkspace, type RootWorkspace } from "../contracts/workspace.js";
+import { parseMarkdownText } from "../contracts/validation.js";
 import { renderRootReconcilePrompt } from "./RootReconcilePrompt.js";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -62,8 +64,10 @@ function parseSections(source: string): RootReconcileDecision {
       report: sections.get("Report"),
     });
   }
-  if (decision === "complete" && sections.size === 2 && sections.has("Report")) {
-    return parseRootReconcileDecision({ kind: "complete", summary: sections.get("Summary"), report: sections.get("Report") });
+  if (decision === "complete" && sections.size === 3 && sections.has("Report") && sections.has("Delivery")) {
+    let delivery: unknown;
+    try { delivery = JSON.parse(sections.get("Delivery") as string); } catch { throw new Error("invalid_root_reconcile_response"); }
+    return parseRootReconcileDecision({ kind: "complete", summary: sections.get("Summary"), report: sections.get("Report"), delivery });
   }
   if (
     decision === "needs_human"
@@ -109,8 +113,54 @@ function processFailureReason(result: {
 export class RootReconciler {
   constructor(private readonly options: RootReconcilerOptions) {}
 
+  async prepare(root: LinearIssue, preferredWorkspace?: string, signal?: AbortSignal): Promise<RootWorkspace> {
+    const runId = crypto.randomUUID();
+    const finalResponsePath = path.join(this.options.runDirectory, `root-prepare-${runId}.md`);
+    const diagnosticJsonlPath = path.join(this.options.runDirectory, `root-prepare-${runId}.jsonl`);
+    const diagnosticStderrPath = path.join(this.options.runDirectory, `root-prepare-${runId}.stderr`);
+    const currentDirectory = process.cwd();
+    const workingDirectory = currentDirectory;
+    const target = preferredWorkspace === undefined
+      ? "No preferred workspace was supplied. Adopt the current working directory and its current branch without switching, cleaning, or resetting."
+      : `The preferred workspace is ${preferredWorkspace}. If it does not exist, create a dedicated git worktree and Root branch at exactly that path. Do not silently fall back to another path.`;
+    const prompt = parseMarkdownText([
+      "You are Symphony's Root Reconcile role executing the Prepare phase.",
+      "Prepare or adopt the Root workspace. You may run git commands. Do not implement the task, create a Cycle, or deliver it in this phase.",
+      target,
+      `Root: ${root.identifier} - ${root.title}`,
+      `External diagnostic run directory: ${this.options.runDirectory}`,
+      "Return only:",
+      "decision: prepared\n\n## Workspace\n{\"workspace_path\":\"absolute path\",\"run_directory\":\"absolute path\",\"root_branch\":\"branch\"}\n\n## Report\n### Summary\n[what was adopted or created]\n\n### Evidence\n[git evidence]",
+    ].join("\n\n"));
+    const processResult = await this.options.performer.launch({
+      agent: this.options.reconcileAgent,
+      ...(this.options.reconcileModel === undefined ? {} : { model: this.options.reconcileModel }),
+      ...(this.options.reconcileReasoningEffort === undefined ? {} : { reasoning_effort: this.options.reconcileReasoningEffort }),
+      prompt, working_directory: workingDirectory, sandbox: "workspace_write",
+      ...(preferredWorkspace === undefined ? {} : { additional_writable_directories: [path.dirname(preferredWorkspace)] }),
+      final_response_path: finalResponsePath, diagnostic_jsonl_path: diagnosticJsonlPath,
+      diagnostic_stderr_path: diagnosticStderrPath, timeout_ms: this.options.timeoutMs,
+    }, signal);
+    if (processResult.launch_status !== "exited" || processResult.exit_code !== 0) {
+      throw new Error(visibleErrorMessage(processFailureReason(processResult), "Prepare failed"));
+    }
+    if (processResult.diagnostic_jsonl_ref !== diagnosticJsonlPath || processResult.diagnostic_stderr_ref !== diagnosticStderrPath) {
+      throw new Error("Diagnostic capture failed");
+    }
+    if (processResult.final_response_ref !== finalResponsePath) throw new Error("Final response unavailable");
+    const response = await readFile(finalResponsePath, "utf8");
+    const match = /^decision: prepared\n\n## Workspace\n([^\n]+)\n\n## Report\n[\s\S]+$/u.exec(response.trim());
+    if (match?.[1] === undefined) throw new Error("invalid_root_prepare_response");
+    let value: unknown;
+    try { value = JSON.parse(match[1]); } catch { throw new Error("invalid_root_prepare_response"); }
+    const workspace = parseRootWorkspace(value);
+    if (workspace.run_directory !== this.options.runDirectory) throw new Error("prepared_run_directory_mismatch");
+    if (preferredWorkspace !== undefined && workspace.workspace_path !== preferredWorkspace) throw new Error("prepared_workspace_mismatch");
+    if (preferredWorkspace === undefined && workspace.workspace_path !== currentDirectory) throw new Error("prepared_workspace_mismatch");
+    return workspace;
+  }
+
   async reconcile(request: RootReconcileRequest, signal?: AbortSignal): Promise<RootReconcileOutcome> {
-    const noWorkspaceDirectory = await mkdtemp(path.join(os.tmpdir(), "symphony-reconcile-"));
     const runId = crypto.randomUUID();
     const finalResponsePath = path.join(
       this.options.runDirectory,
@@ -124,8 +174,8 @@ export class RootReconciler {
       ...(this.options.reconcileReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.reconcileReasoningEffort }),
       prompt: renderRootReconcilePrompt(request),
-      working_directory: noWorkspaceDirectory,
-      sandbox: "no_workspace",
+      working_directory: request.root_state.workspace_path,
+      sandbox: "workspace_write",
       final_response_path: finalResponsePath,
       diagnostic_jsonl_path: diagnosticJsonlPath,
       diagnostic_stderr_path: diagnosticStderrPath,
@@ -196,8 +246,6 @@ export class RootReconciler {
         }),
         ...(processResult === undefined ? {} : { process: processResult }),
       };
-    } finally {
-      await rm(noWorkspaceDirectory, { recursive: true, force: true });
     }
   }
 }

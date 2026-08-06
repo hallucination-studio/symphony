@@ -565,6 +565,7 @@ where
 
         let request = LaunchRequest::new(
             root_id.clone(),
+            PathBuf::from(&binding.repository_path),
             PathBuf::from(&allocation.workspace_path),
             PathBuf::from(&allocation.run_directory),
             DEFAULT_MAX_CYCLES,

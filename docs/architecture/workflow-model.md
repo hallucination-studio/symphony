@@ -18,7 +18,7 @@ but must not define another transition for the same fact.
 | `WF-AUTH-005` | implementation state | current Root workspace | Execute effects, Audit evidence, and final PR content |
 | `WF-AUTH-006` | human-readable workflow view | Linear statuses, child Issues, Root managed snapshot, role terminal descriptions, and Cycle history comments | sole operator view; no Dashboard projection |
 | `WF-AUTH-007` | next step | one fresh Root Reconcile session over Root and Root State inputs | create one Cycle, recommend completion, or request human input |
-| `WF-AUTH-008` | terminal delivery success | a recorded pull request URL or, when PR creation is unavailable after push, the pushed Root branch | only fact that allows Root `Done` |
+| `WF-AUTH-008` | terminal delivery success | one valid Root Reconcile Delivery: pull request, branch, or local files | only fact that allows Root `Done` |
 | `WF-AUTH-009` | real-state verification | fresh Audit against the Root workspace | Reconcile never substitutes workspace inspection or Executor claims |
 | `WF-AUTH-010` | visible workflow status | the five canonical Linear statuses resolved for the Root team | arbitrary user states, status-order inference, or hidden local state |
 | `WF-AUTH-011` | latest audit detail | `RootState.latest_audit`, the complete typed `AuditRunResult` from the newest terminal Audit | any Cycle DAG, child comment, or reconstructed audit history |
@@ -54,8 +54,8 @@ re-read value for Cycle and Root progression. Only this JSON file is uploaded to
 the Cycle as `application/json`; the Cycle Result comment records its resource
 link or the current upload error's first 50 characters. Root Reconcile sees the
 latest audit detail only through Root State and never reads the Cycle DAG or role
-content. A Reconcile completion decision is a recommendation, not Root
-completion; the final Inbox check and PR function must succeed first.
+content. A Reconcile completion decision includes a structured Delivery and is
+not Root completion until the final Inbox check and durable projection succeed.
 
 Every `create_cycle`, `complete`, and `needs_human` decision also contains a
 validated human report which Conductor copies to Root under a Harness marker.
@@ -119,6 +119,8 @@ mutate an Issue. Their provider IDs are internal projection data, never caller
 inputs or CLI flags. Other team-defined states are ignored completely: the
 harness does not infer meaning from type uniqueness, list order, or a similar
 name, and never edits or deletes those state definitions.
+After Prepare, startup gates normalize it to `Todo` before the first fresh
+Reconcile; Prepare itself does not add another Linear status.
 
 The following matrix is the only role-status transition model. Conductor
 performs each update at the named boundary, so Linear shows what is happening
@@ -126,7 +128,7 @@ without waiting for a comment or a local checkpoint.
 
 | Issue | Creation | Start or advance | Terminal transition |
 |---|---|---|---|
-| Root | `Todo` before first fresh Reconcile; startup gates normalize it to `Todo` | durable Cycle family -> `In Progress`; complete Audit writes `latest_audit` -> `In Review`; later decisions remain `In Review` | delivery -> `Done` |
+| Root | `Todo` after Prepare and before first fresh Reconcile | durable Cycle family -> `In Progress`; complete Audit writes `latest_audit` -> `In Review`; later decisions remain `In Review` | valid Delivery projection -> `Done` |
 | Cycle | `Todo` when created | recorded family sets `In Progress`; starting Audit sets `In Review` | a terminal Cycle result sets `Done` |
 | Execute | `Todo` when created | process launch sets `In Progress` | process return, timeout, interruption, or start failure sets `Done` |
 | Audit | `Todo` when created | Audit launch sets `In Review` | Audit report or process error sets `Done`; the report is exact Markdown |
@@ -136,7 +138,7 @@ The terminal `Done` status on Execute, Audit, and Cycle does not imply success;
 the role terminal descriptions, Cycle result comment, and typed Audit verdict retain those facts.
 Root Reconcile remains the only semantic authority for `create_cycle`, `complete`,
 and `needs_human`; status updates merely project that decision. Only the
-terminal delivery function may project `Done` onto Root.
+validated Root Reconcile Delivery may project `Done` onto Root.
 
 ## Topology
 
@@ -163,8 +165,8 @@ flowchart TD
   Result --> State[Promoted Root State]
   State --> Reconcile[Root Reconcile]
   Reconcile -->|next step| Cycle
-  Reconcile -->|complete recommendation| PR[Commit, push, create PR]
-  PR --> Done[Root Done]
+  Reconcile -->|complete| Delivery[Root Reconcile Delivery]
+  Delivery --> Done[Root Done]
 ```
 
 Cycle, Execute, and Audit are created before execution. Execute must terminate
@@ -175,7 +177,7 @@ one caller-supplied Root workspace bound at process startup.
 
 | Rule | Resource | From | Condition | To | Required effect |
 |---|---|---|---|---|---|
-| `WF-TR-001` | Root workspace | supplied | first Root startup validates workspace and run directory | ready | bind both paths to Root State; later starts require exact matches |
+| `WF-TR-001` | Root workspace | unprepared | Root Reconcile Prepare adopts current checkout or prepares the preferred path | ready | validate and bind returned workspace/run directory/branch; later starts reuse them |
 | `WF-TR-002` | Root | `Todo` | startup gates pass before the first fresh Reconcile | `Todo` | normalize the canonical Root status and initialize the Root State checkpoint |
 | `WF-TR-003` | Cycle family | absent | Reconcile selects a step | all three Issues `Todo` | create and persist the family, then set Cycle and Root `In Progress` before Execute starts |
 | `WF-TR-004` | Execute | `Todo` | Cycle starts | `In Progress` | set status, then start one fresh workspace-write session |
@@ -185,8 +187,8 @@ one caller-supplied Root workspace bound at process startup.
 | `WF-TR-008` | Cycle | `In Progress` or `In Review` | complete Audit result resolves | `Done` | persist/re-read typed JSON, upload only that file, record its link/error, then finish Cycle and Root projection |
 | `WF-TR-009` | prior unfinished descendants | nonterminal | process starts | `Canceled` | mechanically cancel all before fresh Reconcile |
 | `WF-TR-010` | Root | `Todo` or `In Progress` | Reconcile recommends completion or needs human input | `In Review` | perform final Inbox check or record the human gate; do not mark Done yet |
-| `WF-TR-011` | delivery function | absent | final Inbox is empty and workspace has changes | running | record phase `publishing`, then commit, push, and attempt one PR through `gh` in order |
-| `WF-TR-012` | Root | `In Review` | PR URL or pushed delivery branch is recorded in Root State | `Done` | stop successfully and retain local evidence |
+| `WF-TR-011` | Root Reconcile Delivery | absent | final Inbox is empty and trusted state supports completion | running | Root Reconcile creates the best available PR, branch, or files delivery |
+| `WF-TR-012` | Root | `In Review` | a valid Delivery is recorded in Root State and description | `Done` | stop successfully and retain local evidence |
 | `WF-TR-013` | Root | `Done` | later launch or poll | `Done` | after the team workflow-contract check, perform no Root-owned mutation; exit successfully |
 
 Terminal Issues are never reopened or rewritten.
@@ -246,7 +248,7 @@ Rows are evaluated in order and exactly one action runs at a time.
 | `WF-ROUTE-005` | Cycle terminal | write the complete `latest_audit`, update Root State and Root view to `In Review`, then Reconcile |
 | `WF-ROUTE-006` | no Cycle and no completion recommendation | Reconcile |
 | `WF-ROUTE-007` | completion recommendation and new Root input exists | discard completion recommendation and Reconcile again |
-| `WF-ROUTE-008` | completion recommendation, empty Inbox, no active Cycle | run terminal delivery function |
+| `WF-ROUTE-008` | completion decision, empty Inbox, no active Cycle | validate and persist Root Reconcile Delivery |
 | `WF-ROUTE-009` | active Cycle and new Root comments arrive | show pending; do not change the active Cycle |
 | `WF-ROUTE-010` | no actionable fact or human input required | record the reason and exit |
 
@@ -258,19 +260,17 @@ Rows are evaluated in order and exactly one action runs at a time.
 | `WF-FAIL-002` | Audit is incomplete or blocked | persist findings and apply the result table | let Execute self-report override Audit |
 | `WF-FAIL-003` | Auditor process errors | persist bounded error and fail Cycle | infer a clean result or mutate workspace |
 | `WF-FAIL-004` | Linear action fails | expose error and stop | use another task mode, guess state, or duplicate resources |
-| `WF-FAIL-005` | supplied workspace or run directory is invalid | start no Agent | allocate, replace, clean, or silently adopt another path |
-| `WF-FAIL-006` | commit or push fails | leave Root `In Review` and open, expose failed step, retain workspace and evidence | retry automatically, roll back, repair, or mark Root Done |
-| `WF-FAIL-007` | workspace has no PR change | enter `NeedsHuman`, project Root `In Review`, and leave Root open | create an empty commit or claim success |
+| `WF-FAIL-005` | Prepare cannot use/create the supplied preferred workspace | expose the Root Reconcile failure and require human input | silently adopt another path |
+| `WF-FAIL-006` | Root Reconcile cannot produce any valid Delivery | leave Root `In Review` and retain workspace/evidence | Conductor retries Git, invents a location, or marks Root Done |
+| `WF-FAIL-007` | remote publication is unavailable | Root Reconcile may return an explicit files Delivery | require an empty commit or hide the local result |
 | `WF-FAIL-008` | unfinished descendants at startup | cancel all, warn of possible unaudited workspace changes, then Reconcile | resume, audit, parse, or synthesize their results |
 | `WF-FAIL-009` | maximum Cycle count reached | set Root State `NeedsHuman`, project Root `In Review`, and stop with the reason visible | create another Cycle or deliver |
 | `WF-FAIL-010` | saved workspace or run directory is missing, invalid, or mismatched | set Root State `NeedsHuman`, project Root `In Review`, and stop | create a replacement path or infer files from child Issues |
-| `WF-FAIL-011` | startup sees incomplete `publishing` | set `NeedsHuman` and Root `In Review`; stop before Reconcile | retry, inspect provider state, or adopt a branch/PR |
 | `WF-FAIL-012` | any visible process or upload error | show only the current `error.message`, first 50 characters | walk causes, add prefixes or codes, publish raw context, or change the Audit verdict for an upload failure |
 | `WF-FAIL-013` | a runtime error escapes normal Cycle or decision handling | persist the bounded current message on Root, project Root `In Review`, then fail the process | leave Root `In Progress` or hide the visible failure |
 
-Failure to create a PR after a successful push is not a delivery failure. The
-function records the pushed `delivery_branch` and completes Root. It does not
-call a token-specific HTTP API or retry another PR mechanism.
+Failure to create a PR is not necessarily a delivery failure. Root Reconcile
+may return a branch or files Delivery; Conductor does not call an HTTP fallback.
 
 The only automatic repair loop is domain-level: Audit exposes real workspace
 findings and the next Reconcile may create a repair Cycle. Infrastructure and

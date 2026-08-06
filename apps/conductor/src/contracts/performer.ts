@@ -6,6 +6,7 @@ import {
   asRecord,
   freezeObject,
   parseAbsolutePath,
+  parseArray,
   parseBoundedString,
   parseEnum,
   parseMarkdownText,
@@ -33,6 +34,7 @@ export interface PerformerLaunchRequest {
   readonly prompt: MarkdownText;
   readonly working_directory: string;
   readonly sandbox: PerformerSandbox;
+  readonly additional_writable_directories?: readonly string[] | undefined;
   readonly final_response_path?: string | undefined;
   readonly diagnostic_jsonl_path?: string | undefined;
   readonly diagnostic_stderr_path?: string | undefined;
@@ -129,6 +131,7 @@ export function parsePerformerLaunchRequest(value: unknown): PerformerLaunchRequ
       "final_response_path",
       "diagnostic_jsonl_path",
       "diagnostic_stderr_path",
+      "additional_writable_directories",
     ],
   );
   const finalResponsePath = optionalPath(record.final_response_path, "invalid_final_response_path");
@@ -139,6 +142,9 @@ export function parsePerformerLaunchRequest(value: unknown): PerformerLaunchRequ
     record.reasoning_effort,
     (entry) => parseBoundedString(entry, "invalid_reasoning_effort", 64),
   );
+  const writableDirectories = parseOptional(record.additional_writable_directories, (entry) => (
+    parseArray(entry, (directory) => parseAbsolutePath(directory, "invalid_additional_writable_directory"))
+  ));
   const parsed = {
     agent: parseAgentKind(record.agent),
     ...(model === undefined ? {} : { model }),
@@ -146,6 +152,7 @@ export function parsePerformerLaunchRequest(value: unknown): PerformerLaunchRequ
     prompt: parseMarkdownText(record.prompt, "invalid_performer_prompt"),
     working_directory: parseAbsolutePath(record.working_directory, "invalid_working_directory"),
     sandbox: parseEnum(record.sandbox, PERFORMER_SANDBOXES),
+    ...(writableDirectories === undefined ? {} : { additional_writable_directories: writableDirectories }),
     timeout_ms: parsePositiveInteger(record.timeout_ms, "invalid_timeout_ms"),
     ...(finalResponsePath === undefined ? {} : { final_response_path: finalResponsePath }),
     ...(diagnosticJsonlPath === undefined ? {} : { diagnostic_jsonl_path: diagnosticJsonlPath }),

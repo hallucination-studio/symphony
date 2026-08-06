@@ -20,8 +20,8 @@ flowchart TD
   Result --> State[Trusted fields in Root State]
   State --> Reconcile
   Inbox[New Root comments] --> Reconcile
-  Reconcile -->|complete| PR[Commit, push, create PR]
-  PR --> Done[Root Done]
+  Reconcile -->|complete| Delivery[Root Reconcile Delivery<br/>PR, branch, or files]
+  Delivery --> Done[Root Done]
 ```
 
 Each Cycle contains exactly one Execute and one Audit Issue. Audit runs after
@@ -58,13 +58,13 @@ does not own Cycle semantics, Root State, role prompts, or Audit judgment.
 
 | Owner | Owns | Must not own |
 |---|---|---|
-| Root Reconciler | choose one small `CycleSpec` from Root-owned inputs and promoted Audit fields in Root State | workspace access, Linear calls, or active-Cycle changes |
+| Root Reconciler | Prepare the Root workspace, choose one small `CycleSpec`, and produce final Delivery from promoted Audit fields | Linear calls, Audit judgment, or active-Cycle changes |
 | Cycle | immutable objective, acceptance, boundaries, and consumed Root comment IDs | long-lived Root state or later input |
 | Cycle Runner | Execute/Audit order, exact role Markdown capture, Audit JSON result, and mechanical Cycle file-link projection | next-step invention or Root State mutation |
 | Performer | mechanically start one configured Agent CLI process and capture its process output | prompts, semantic interpretation, routing, Linear, or trust decisions |
 | Linear Gateway | normalized GraphQL reads/writes, canonical status resolution, and Issue projection behind an injectable protocol | workflow reasoning, Markdown policy, or hidden state |
 | Root State | persist the minimal checkpoint and promote trusted fields only from Succeeded Cycles | original requirement, child history, or a Trusted State service |
-| Conductor | deterministic serial orchestration, visible status projection, startup cancellation, and fixed terminal delivery function | semantic next-step, audit judgment, or recovery protocol |
+| Conductor | deterministic serial orchestration, validation, persistence, visible status projection, and startup cancellation | semantic next-step, Audit judgment, Git/worktree/delivery execution, or recovery protocol |
 | Podium Desktop | persist Bindings and stable Root paths, prioritize local assignments, and supervise bound Conductors | Cycle semantics, Root State, role prompts, Audit judgment, Web, or cross-machine leases |
 
 ## V1 boundaries
@@ -79,16 +79,16 @@ does not own Cycle semantics, Root State, role prompts, or Audit judgment.
 | new Root comments become next-Reconcile input | old-comment replay or descendant comments as instructions |
 | Root State locates the existing workspace after restart | Agent-session resume, state reconstruction from children, or replacement workspace |
 | startup cancels all unfinished descendants before fresh Reconcile | continuing, auditing, or interpreting old active children |
-| caller supplies one Root workspace and one external run directory | Root claiming or workspace allocation inside Conductor; V2 Podium Desktop owns local allocation |
-| one terminal commit/push/PR function before Root Done | delivery subsystem, retry/finalizer/convergence, automatic merge |
+| Root Reconcile Prepare adopts the current checkout or creates the supplied preferred worktree; caller supplies an external run directory | worktree creation inside Conductor or per-Cycle workspaces |
+| Root Reconcile returns one PR, branch, or files Delivery before Root Done | delivery subsystem, retry/finalizer/convergence, automatic merge |
 | one public Root-run command | one-shot role commands or any second Linear mutation path |
 
 The harness never modifies a created Cycle title or description and does not
 detect unrelated manual edits. It owns only the exact Root snapshot block and
 one terminal append to each Execute/Audit description. Root Reconcile receives
 the Root requirement after the snapshot block is stripped, Root State (including
-the parsed `latest_audit` fields), and new Root comments, with no workspace
-access. Each Execute and Audit prompt requires its role to finish with one
+the parsed `latest_audit` fields), and new Root comments. Workspace access never
+lets it replace Audit judgment. Each Execute and Audit prompt requires its role to finish with one
 Markdown result at the prescribed local `cycle-NNN-*-result.md` path. Conductor
 appends the exact Executor Markdown to the Execute description and exact Audit
 Markdown to the Audit description, each with one local RFC3339 `Updated at` line;

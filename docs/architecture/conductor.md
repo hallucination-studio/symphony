@@ -315,14 +315,14 @@ publishPullRequest(root, rootState)
   -> git add --all
   -> git commit
   -> git push --set-upstream
-  -> attempt pull request through installed `gh`
+  -> validate Root Reconcile Delivery
   -> return URL; if unavailable, return the already-pushed delivery branch
 ```
 
 No commit hash enters a contract. This is one ordered publication attempt, not
 an exactly-once protocol. Commit or push failure leaves Root open. After a
 successful push, unavailable `gh`, missing `gh` authentication, or PR creation
-failure records `delivery_branch` and completes Root without an HTTP/API-token
+files Delivery completes Root without an HTTP/API-token
 fallback. If a process later starts with phase `publishing` but neither a PR URL
 nor delivery branch, it sets `NeedsHuman` and stops without another publication
 attempt. It does not retry, read back, adopt an existing PR, roll back, or repair.

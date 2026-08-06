@@ -223,7 +223,7 @@ test("Linear statuses are canonical, visible, and explicitly projected", async (
   assert.match(taskManagement, /canonical-state creation fails \| expose the provider error and stop/);
   assert.match(taskManagement, /Any other user-defined state is ignored completely/);
   assert.match(taskManagement, /never treats another `started` state as/);
-  assert.match(workflow, /Root \| `Todo` before first fresh Reconcile[\s\S]*durable Cycle family -> `In Progress`[\s\S]*latest_audit[\s\S]*`In Review`[\s\S]*delivery -> `Done`/);
+  assert.match(workflow, /Root \| `Todo` after Prepare and before first fresh Reconcile[\s\S]*durable Cycle family -> `In Progress`[\s\S]*latest_audit[\s\S]*`In Review`[\s\S]*valid Delivery projection -> `Done`/);
   assert.match(workflow, /Cycle \| `Todo` when created[\s\S]*recorded family sets `In Progress`[\s\S]*starting Audit sets `In Review`[\s\S]*terminal Cycle result sets `Done`/);
   assert.match(workflow, /Execute \| `Todo` when created[\s\S]*process launch sets `In Progress`[\s\S]*process return, timeout, interruption, or start failure sets `Done`/);
   assert.match(workflow, /Audit \| `Todo` when created[\s\S]*Audit launch sets `In Review`[\s\S]*Audit report or process error sets `Done`; the report is exact Markdown/);

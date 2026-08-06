@@ -3,7 +3,6 @@ import { pathToFileURL } from "node:url";
 
 import { createProductionRootRun } from "./composition/Production.js";
 import { loadStartup } from "./composition/startup.js";
-import { createGitHubCliPullRequest } from "./workspace/GitHubCliPullRequest.js";
 import { writeFailureEvidence } from "./diagnostics/DiagnosticEvidence.js";
 
 function line(stream: NodeJS.WritableStream, value: object): void {
@@ -31,7 +30,6 @@ export async function runMain(
     phase = "composition";
     const conductor = await createProductionRootRun(
       startup,
-      createGitHubCliPullRequest({ environment }),
       (event) => line(stdout, { ...event, run_id: runId }),
     );
     phase = "runtime";

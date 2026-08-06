@@ -14,7 +14,7 @@ import {
 
 export interface HarnessRunRequest {
   readonly linear_root: RootIssueId;
-  readonly workspace_path: string;
+  readonly workspace_path?: string | undefined;
   readonly run_directory: string;
   readonly reconcile_agent: AgentKind;
   readonly reconcile_model?: string;
@@ -32,12 +32,12 @@ export function parseHarnessRunRequest(value: unknown): HarnessRunRequest {
   const record = asRecord(value, "invalid_harness_run_request");
   const requiredKeys = [
     "linear_root",
-    "workspace_path",
     "run_directory",
     "max_cycles",
   ];
   const allowedKeys = new Set([
     ...requiredKeys,
+    "workspace_path",
     "reconcile_agent", "reconcile_model", "reconcile_reasoning_effort",
     "execute_agent", "execute_model", "execute_reasoning_effort",
     "audit_agent", "audit_model", "audit_reasoning_effort",
@@ -57,7 +57,7 @@ export function parseHarnessRunRequest(value: unknown): HarnessRunRequest {
   const auditReasoningEffort = optional("audit_reasoning_effort", 64);
   return freezeObject({
     linear_root: parseRootIssueId(record.linear_root),
-    workspace_path: parseAbsolutePath(record.workspace_path, "invalid_workspace_path"),
+    ...(record.workspace_path === undefined ? {} : { workspace_path: parseAbsolutePath(record.workspace_path, "invalid_workspace_path") }),
     run_directory: parseAbsolutePath(record.run_directory, "invalid_run_directory"),
     reconcile_agent: parseAgentKind(record.reconcile_agent === undefined ? "codex" : record.reconcile_agent),
     ...(reconcileModel === undefined ? {} : { reconcile_model: reconcileModel }),

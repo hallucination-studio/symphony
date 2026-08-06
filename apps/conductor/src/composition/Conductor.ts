@@ -18,7 +18,7 @@ import { parseLinearIssue } from "../contracts/task-management.js";
 import type { PerformerProcessResult, PerformerTokenUsage } from "../contracts/performer.js";
 import type { LinearComment } from "../contracts/task-management.js";
 import type { LinearWorkflow } from "../contracts/task-management.js";
-import type { PullRequestResult, RootWorkspace } from "../contracts/workspace.js";
+import type { Delivery, RootWorkspace } from "../contracts/workspace.js";
 import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js";
 import type { CycleRunner, CycleRunOutcome } from "../cycle-runner/CycleRunner.js";
 import { readRootInbox } from "../linear/LinearInbox.js";
@@ -34,16 +34,11 @@ interface Reconciler {
   reconcile(request: RootReconcileRequest, signal?: AbortSignal): Promise<RootReconcileOutcome>;
 }
 
-interface Publisher {
-  publish(workspace: RootWorkspace, onPublishing: () => Promise<void>): Promise<PullRequestResult>;
-}
-
 export interface ConductorOptions {
   readonly gateway: LinearGateway;
   readonly workflow: LinearWorkflow;
   readonly reconciler: Reconciler;
   readonly cycleRunner: CycleRunner;
-  readonly publisher: Publisher;
   readonly workspace: RootWorkspace | (() => Promise<RootWorkspace>);
   readonly maxCycles: number;
   readonly worktreeSummary?: (workspace: RootWorkspace) => Promise<RootWorktreeSummary>;
@@ -51,7 +46,7 @@ export interface ConductorOptions {
 }
 
 export type ConductorResult =
-  | { readonly status: "done"; readonly pull_request_url?: string; readonly delivery_branch?: string }
+  | { readonly status: "done"; readonly delivery?: Delivery }
   | { readonly status: "needs_human"; readonly reason: string };
 
 const ROOT_RECONCILE_COMMENT_MARKER = "# Symphony Harness: Reconcile";
@@ -306,7 +301,7 @@ function nextCursor(comments: readonly LinearComment[], current?: string): strin
 function withState(state: RootState, changes: Partial<RootState>): RootState {
   const value = { ...state, ...changes } as Record<string, unknown>;
   for (const key of [
-    "pending_finding", "latest_audit", "harness_feedback", "comment_cursor", "pull_request_url", "delivery_branch",
+    "pending_finding", "latest_audit", "harness_feedback", "comment_cursor", "delivery",
     "token_usage",
   ]) {
     if (value[key] === undefined) delete value[key];
@@ -353,36 +348,14 @@ export class Conductor {
       await this.options.gateway.update_issue_status(root.id, statusId);
       currentRootStatusId = statusId;
     };
-    if (
-      existingState?.current_phase === "publishing"
-      && existingState.pull_request_url === undefined
-      && existingState.delivery_branch === undefined
-    ) {
-      const reason = "publication_outcome_unknown";
-      await updateRootStatus(this.options.workflow.in_review_status_id);
-      await updateRootDescription(
-        this.options.gateway,
-        root.id,
-        rootDescription.requirement,
-        withState(existingState, { current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason) }),
-        rootDescription.reconcile_report,
-        currentLinearDescriptionTimestamp(),
-      );
-      return { status: "needs_human", reason };
-    }
-
-    if (existingState?.pull_request_url !== undefined || existingState?.delivery_branch !== undefined) {
+    if (existingState?.delivery !== undefined) {
       await updateRootStatus(this.options.workflow.done_status_id);
-      return {
-        status: "done",
-        ...(existingState.pull_request_url === undefined ? {} : { pull_request_url: existingState.pull_request_url }),
-        ...(existingState.delivery_branch === undefined ? {} : { delivery_branch: existingState.delivery_branch }),
-      };
+      return { status: "done", delivery: existingState.delivery };
     }
 
-    const workspace = await (typeof this.options.workspace === "function"
-      ? this.options.workspace()
-      : this.options.workspace);
+    const workspace = existingState === undefined
+      ? await (typeof this.options.workspace === "function" ? this.options.workspace() : this.options.workspace)
+      : { workspace_path: existingState.workspace_path, run_directory: existingState.run_directory, root_branch: existingState.root_branch };
     let projection = rootDescription;
     if (projection.state === undefined) {
       const initialState = parseRootState({
@@ -470,7 +443,7 @@ export class Conductor {
       let reconcileReport: MarkdownText;
       try {
         const reconcileOutcome = await this.options.reconciler.reconcile(parseRootReconcileRequest({
-          root: reconcileRoot, root_state: state, new_root_comments: inbox, worktree_summary: worktreeSummary,
+          phase: "reconcile", root: reconcileRoot, root_state: state, new_root_comments: inbox, worktree_summary: worktreeSummary,
         }), signal);
         decision = reconcileOutcome.decision;
         reconcileProcess = reconcileOutcome.process;
@@ -500,40 +473,16 @@ export class Conductor {
         }
         const finalInbox = await readRootInbox(this.options.gateway, root.id, state.comment_cursor);
         if (finalInbox.length > 0) continue;
-        let result: PullRequestResult;
-        try {
-          result = await this.options.publisher.publish(workspace, async () => {
-            await updateState(withState(state, { current_phase: "publishing" }));
-          });
-        } catch (error) {
-          return failVisible(error);
-        }
-        if (result.status === "failed") {
-          const reason = `pull_request_${result.step}_failed: ${result.reason}`;
-          await updateState(withState(state, { current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason) }));
-          return { status: "needs_human", reason };
-        }
-        if (result.root_branch !== workspace.root_branch) {
-          const reason = "pull_request_branch_mismatch";
-          await updateState(withState(state, {
-            current_phase: "NeedsHuman", harness_feedback: parseMarkdownText(reason),
-          }));
-          return { status: "needs_human", reason };
+        if (decision.delivery.kind === "files" && decision.delivery.workspace_path !== workspace.workspace_path) {
+          return failVisible(new Error("delivery_workspace_mismatch"));
         }
         await updateState(withState(state, {
           current_phase: "completed",
-          ...(result.status === "created"
-            ? { pull_request_url: result.pull_request_url }
-            : { delivery_branch: result.root_branch }),
-          harness_feedback: result.status === "created" ? undefined : parseMarkdownText(result.reason),
+          delivery: decision.delivery,
+          harness_feedback: undefined,
         }));
         await updateRootStatus(this.options.workflow.done_status_id);
-        return {
-          status: "done",
-          ...(result.status === "created"
-            ? { pull_request_url: result.pull_request_url }
-            : { delivery_branch: result.root_branch }),
-        };
+        return { status: "done", delivery: decision.delivery };
       }
 
       let cycleNumber: number;

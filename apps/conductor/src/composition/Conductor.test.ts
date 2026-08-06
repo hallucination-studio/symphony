@@ -131,6 +131,7 @@ const cycle = (objective: string): RootReconcileDecision => ({
 
 const complete = (summary: string): RootReconcileDecision => ({
   kind: "complete", summary: summary as never,
+  delivery: { kind: "branch", branch: "root/ENG-1" },
   report: [
     "### Overview", summary, "",
     "### File Changes", "#### Created", "- None", "", "#### Updated", "- None", "", "#### Deleted", "- None", "",
@@ -194,19 +195,12 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
-  let published = 0;
   const conductor = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
-    publisher: { publish: async (_workspace, onPublishing) => {
-      published += 1;
-      await onPublishing();
-      return { status: "created", pull_request_url: "https://github.com/acme/repo/pull/1", root_branch: "root/ENG-1" };
-    } },
     workspace: world.workspace, maxCycles: 3,
   });
 
-  assert.deepEqual(await conductor.run("ENG-1"), { status: "done", pull_request_url: "https://github.com/acme/repo/pull/1" });
-  assert.equal(published, 1);
+  assert.deepEqual(await conductor.run("ENG-1"), { status: "done", delivery: { kind: "branch", branch: "root/ENG-1" } });
   assert.equal(launches.length, 4);
   assert.equal((await world.gateway.get_issue("ENG-1")).status, "completed");
   const state = (await rootProjection(world)).state;
@@ -214,7 +208,7 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
   if (state === undefined) throw new Error("missing_root_state");
   assert.equal(state.task_state_markdown, "Strict parser behavior is verified");
   assert.equal(state.pending_finding, undefined);
-  assert.equal(state.pull_request_url, "https://github.com/acme/repo/pull/1");
+  assert.equal(state.delivery?.kind, "branch");
   assert.equal(reconcileRequests[1]?.root_state.pending_finding, "ambiguous token accepted");
   assert.deepEqual(rootStatusesAtReconcile, ["todo-id", "review-id", "review-id"]);
   assert.deepEqual(reconcileRequests[1]?.root_state.latest_audit, {
@@ -253,7 +247,6 @@ test("normalizes an unfinished Root to Todo before its first fresh Reconcile", a
       },
     },
     cycleRunner: {} as CycleRunner,
-    publisher: { publish: async () => { throw new Error("unexpected_publish"); } },
     workspace: world.workspace,
     maxCycles: 1,
   });
@@ -298,15 +291,12 @@ test("final Inbox input cancels completion and enters the next frozen Cycle", as
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
   });
-  let published = 0;
   const conductor = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
-    publisher: { publish: async () => { published += 1; return { status: "failed", step: "validate", reason: "unexpected" }; } },
     workspace: world.workspace, maxCycles: 2,
   });
 
   assert.deepEqual(await conductor.run("ENG-1"), { status: "needs_human", reason: "Stop after proving the fence" });
-  assert.equal(published, 0);
   assert.equal(launches.length, 2);
   assert.equal(reconcilerRequests[1]?.new_root_comments[0]?.body, "Late user requirement");
 });
@@ -323,7 +313,6 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([needsHuman("Choose an API boundary")], []),
     cycleRunner: runner,
-    publisher: { publish: async () => { throw new Error("unexpected_publish"); } },
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await stopped.run("ENG-1"), { status: "needs_human", reason: "Choose an API boundary" });
@@ -333,7 +322,6 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: { reconcile: async () => { reconciles += 1; throw new Error("unexpected_reconcile"); } },
     cycleRunner: runner,
-    publisher: { publish: async () => { throw new Error("unexpected_publish"); } },
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await withoutInput.run("ENG-1"), { status: "needs_human", reason: "Choose an API boundary" });
@@ -345,14 +333,13 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([needsHuman("Input acknowledged")], requests),
     cycleRunner: runner,
-    publisher: { publish: async () => { throw new Error("unexpected_publish"); } },
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await withInput.run("ENG-1"), { status: "needs_human", reason: "Input acknowledged" });
   assert.equal(requests[0]?.new_root_comments[0]?.body, "Use the existing parser boundary.");
 });
 
-test("a recorded PR URL completes Root without repeating publication", async () => {
+test("a recorded delivery completes Root without resolving the workspace", async () => {
   const world = await scenario();
   await setRootState(world, parseRootState({
     workspace_path: world.workspacePath,
@@ -360,76 +347,40 @@ test("a recorded PR URL completes Root without repeating publication", async () 
     root_branch: "root/ENG-1",
     current_phase: "completed",
     task_state_markdown: "All acceptance checks passed",
-    pull_request_url: "https://github.com/acme/repo/pull/9",
+    delivery: { kind: "pull_request", url: "https://github.com/acme/repo/pull/9", branch: "root/ENG-1" },
   }));
-  let publications = 0;
   let workspaceResolutions = 0;
   const conductor = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: { reconcile: async () => { throw new Error("unexpected_reconcile"); } },
     cycleRunner: {} as CycleRunner,
-    publisher: { publish: async () => { publications += 1; throw new Error("unexpected_publish"); } },
     workspace: async () => {
       workspaceResolutions += 1;
       throw new Error("workspace_must_not_be_resolved");
     }, maxCycles: 1,
   });
   assert.deepEqual(await conductor.run("ENG-1"), {
-    status: "done", pull_request_url: "https://github.com/acme/repo/pull/9",
+    status: "done", delivery: { kind: "pull_request", url: "https://github.com/acme/repo/pull/9", branch: "root/ENG-1" },
   });
-  assert.equal(publications, 0);
   assert.equal(workspaceResolutions, 0);
   assert.equal((await world.gateway.get_issue("ENG-1")).status, "completed");
-});
-
-test("publishing without a recorded PR URL stops before resolving the workspace", async () => {
-  const world = await scenario();
-  await setRootState(world, parseRootState({
-    workspace_path: world.workspacePath,
-    run_directory: world.runDirectory,
-    root_branch: "root/ENG-1",
-    current_phase: "publishing",
-    task_state_markdown: "All acceptance checks passed",
-  }));
-  let workspaceResolutions = 0;
-  const conductor = new Conductor({
-    gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    reconciler: { reconcile: async () => { throw new Error("unexpected_reconcile"); } },
-    cycleRunner: {} as CycleRunner,
-    publisher: { publish: async () => { throw new Error("unexpected_publish"); } },
-    workspace: async () => {
-      workspaceResolutions += 1;
-      throw new Error("workspace_must_not_be_resolved");
-    }, maxCycles: 1,
-  });
-
-  assert.deepEqual(await conductor.run("ENG-1"), {
-    status: "needs_human", reason: "publication_outcome_unknown",
-  });
-  assert.equal(workspaceResolutions, 0);
-  const state = (await rootProjection(world)).state;
-  assert.notEqual(state, undefined);
-  assert.equal(state?.current_phase, "NeedsHuman");
 });
 
 test("fails closed when Reconcile completes with unconsumed Root input", async () => {
   const world = await scenario();
   await world.gateway.create_comment("root-id", "New requirement");
-  let publications = 0;
   const conductor = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([complete("Already done")], []),
     cycleRunner: {} as CycleRunner,
-    publisher: { publish: async () => { publications += 1; throw new Error("unexpected_publish"); } },
     workspace: world.workspace, maxCycles: 1,
   });
   assert.deepEqual(await conductor.run("ENG-1"), {
     status: "needs_human", reason: "completion_with_unconsumed_root_input",
   });
-  assert.equal(publications, 0);
 });
 
-test("a recorded delivered branch completes Root without repeating publication", async () => {
+test("a recorded branch delivery completes Root", async () => {
   const world = await scenario();
   await setRootState(world, parseRootState({
     workspace_path: world.workspacePath,
@@ -437,21 +388,18 @@ test("a recorded delivered branch completes Root without repeating publication",
     root_branch: "root/ENG-1",
     current_phase: "completed",
     task_state_markdown: "All acceptance checks passed",
-    delivery_branch: "root/ENG-1",
+    delivery: { kind: "branch", branch: "root/ENG-1" },
   }));
-  let publications = 0;
   const conductor = new Conductor({
     gateway: world.gateway,
     workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: { reconcile: async () => { throw new Error("unexpected_reconcile"); } },
     cycleRunner: {} as CycleRunner,
-    publisher: { publish: async () => { publications += 1; throw new Error("unexpected_publish"); } },
     workspace: async () => { throw new Error("workspace_must_not_be_resolved"); },
     maxCycles: 1,
   });
 
-  assert.deepEqual(await conductor.run("ENG-1"), { status: "done", delivery_branch: "root/ENG-1" });
-  assert.equal(publications, 0);
+  assert.deepEqual(await conductor.run("ENG-1"), { status: "done", delivery: { kind: "branch", branch: "root/ENG-1" } });
   assert.equal((await world.gateway.get_issue("ENG-1")).status_id, "completed-id");
 });
 
@@ -463,7 +411,6 @@ test("an escaped Cycle failure records the current message and moves Root to In 
     workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler: scriptedReconciler([cycle("Trigger one runtime failure")], []),
     cycleRunner: { run: async () => { throw error; } } as unknown as CycleRunner,
-    publisher: { publish: async () => { throw new Error("unexpected_publish"); } },
     workspace: world.workspace,
     maxCycles: 1,
   });
@@ -553,10 +500,6 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
     gateway: world.gateway,
     workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
     reconciler, cycleRunner,
-    publisher: { publish: async (_workspace, onPublishing) => {
-      await onPublishing();
-      return { status: "created", pull_request_url: "https://github.com/acme/repo/pull/2", root_branch: "root/ENG-1" };
-    } },
     workspace: world.workspace, maxCycles: 2,
   });
 

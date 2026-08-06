@@ -15,10 +15,10 @@ semantic evidence.
 | Interface | Responsibility |
 |---|---|
 | `LinearGateway` | normalized Root, Root State, managed-description, new-comment, unfinished-descendant, comment, and uploaded-file projection operations |
-| `RootReconciler` | current Root snapshot to one next-Cycle, completion, or human-gate decision |
+| `RootReconciler` | Prepare a workspace, choose the next Cycle, or return final structured Delivery/human gate |
 | `Performer` | mechanically launch one configured Agent CLI process |
 | `CycleRunner` | Execute then Audit and calculate the Cycle result |
-| Conductor PR function | after completion, run one fixed commit/push/create-PR sequence |
+| Conductor projection | validate and persist Root Reconcile output, then project Linear description/status |
 | `ProjectBinding` | persisted Podium Desktop routing, repository, concurrency, and role launch values |
 
 There is no generic Task Manager, capability matrix, MCP command schema,
@@ -57,7 +57,7 @@ never infer a canonical state from `IssueStatus`.
 ```text
 HarnessRunRequest {
   linear_root: string,
-  workspace_path: string,
+  workspace_path?: string,
   run_directory: string,
   reconcile_agent: codex,
   reconcile_model?: string,
@@ -75,7 +75,7 @@ HarnessRunRequest {
 | Contract | Constraint |
 |---|---|
 | Root | one identifier or UUID is required; no local task mode or Root discovery |
-| workspace | caller supplies one existing isolated Git workspace already bound to the Root |
+| workspace | optional preferred absolute path; Root Reconcile Prepare creates/adopts it, or adopts current directory when omitted |
 | run directory | caller supplies one writable directory outside the workspace for checkpoint and evidence files |
 | Reconcile role | `--reconcile-agent` is `codex`; model and reasoning overrides are optional |
 | Execute role | `--execute-agent` is `codex`; model and reasoning overrides are optional |
@@ -177,8 +177,7 @@ RootState {
   pending_finding?,
   harness_feedback?,
   comment_cursor?,
-  pull_request_url?,
-  delivery_branch?,
+  delivery?: Delivery,
   token_usage?: PerformerTokenUsage
 }
 ```
@@ -262,22 +261,22 @@ RootReconcileRequest {
 
 RootReconcileDecision =
   | { kind: create_cycle, cycle: CycleSpec, report }
-  | { kind: complete, summary, report }
+  | { kind: complete, summary, delivery: Delivery, report }
   | { kind: needs_human, reason, question?, report }
 
 RootReconcileOutcome { decision, process? }
 ```
 
-Reconcile has no workspace mount, workspace tools, Linear capability, or PR
-credentials. Conductor removes the exact managed Root snapshot block before
+Reconcile has workspace-write access for Prepare and Delivery, but no Linear
+capability. Conductor removes the exact managed Root snapshot block before
 passing Root. Reconcile reads only the immutable requirement, Root State, and new Root comments; trusted
 Audit fields have already been promoted into Root State. It never reads the
 Cycle DAG or Execute/Audit content. Root Reconcile runs through its independent
 `reconcile_agent`, `reconcile_model`, and `reconcile_reasoning_effort` values.
 Execute and Audit use their corresponding role values; startup API keys and base
 URLs remain backend environment resolution, and no role inherits another role. A
-`complete` decision is a recommendation: Conductor must perform
-the final Inbox check and terminal delivery function before setting Root `Done`.
+`complete` decision includes the Root Reconcile-produced Delivery: Conductor
+performs the final Inbox check and durable projection before setting Root `Done`.
 Every report has a fixed decision-specific Markdown shape. Conductor copies it
 once to Root and mechanically replaces completion file/line/token sections with
 trusted facts. `process.token_usage` is accumulated with Execute and Audit
@@ -417,27 +416,22 @@ Root comments use the normalized `LinearComment` value directly. A comment
 remains pending until Cycle, Execute, and Audit exist and the local Cycle record
 durably contains its ID. Reading or selecting it does not consume it.
 
-## Root workspace and PR publication
+## Root workspace and Delivery
 
 ```text
-PullRequestResult =
-  | { status: created, pull_request_url, root_branch }
-  | { status: branch_delivered, root_branch, reason }
-  | { status: failed, step: validate | commit | push, reason }
+Delivery =
+  | { kind: pull_request, url, branch }
+  | { kind: branch, branch, remote? }
+  | { kind: files, workspace_path, files[] }
 ```
 
-The Conductor delivery function makes one ordered attempt after a completion
-recommendation, an empty final Inbox read, and no active Cycle. It stages the
-Root workspace, requires a non-empty change, creates one commit, pushes the Root
-branch, and attempts one pull request through `gh`. If PR creation is
-unavailable after the push, it returns `branch_delivered`. It does not return or
-compare commit hashes.
+Root Reconcile produces one Delivery after trusted completion and an empty final
+Inbox. It may use Git and `gh`, or return explicit local files. Conductor only
+validates and persists this value; it runs no Git command and does not compare
+commit hashes.
 
-Before external commands it records phase `publishing`. An interrupted
-publication with neither a recorded URL nor delivery branch becomes
-`NeedsHuman` on the next process; it is not retried or inspected automatically.
-Commit or push failure leaves Root nonterminal and retains the workspace and
-local logs. There is no delivery
+Any valid Delivery kind permits Root `Done` after the value and visible
+`## Delivery` section are durably projected. There is no delivery
 record, convergence readback, rollback, branch repair, or existing-PR adoption.
 
 Visible failures use the current boundary's original `error.message` limited to

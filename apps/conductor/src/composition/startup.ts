@@ -1,9 +1,7 @@
 import { parseCliArguments } from "./cli.js";
 import type { HarnessRunRequest } from "../contracts/harness.js";
-import { parseRootWorkspace, type RootWorkspace } from "../contracts/workspace.js";
 import { createProductionLinearGateway } from "../linear/LinearGraphqlGateway.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
-import { bindRootWorkspace } from "../workspace/RootWorkspace.js";
 import {
   CodexCliPerformer,
   type CodexCliPerformerOptions,
@@ -12,7 +10,6 @@ import type { Performer } from "../performer/api/Performer.js";
 
 export interface ConductorStartup {
   readonly request: HarnessRunRequest;
-  readonly resolveWorkspace: () => Promise<RootWorkspace>;
   readonly gateway: LinearGateway;
   readonly reconcilePerformer: Performer;
   readonly executePerformer: Performer;
@@ -60,22 +57,8 @@ export async function loadStartup(
     throw error;
   }
   const gateway = createProductionLinearGateway(env);
-  let resolvedWorkspace: Promise<RootWorkspace> | undefined;
-  const resolveWorkspace = (): Promise<RootWorkspace> => {
-    resolvedWorkspace ??= bindRootWorkspace({
-      rootId: request.linear_root,
-      workspace: request.workspace_path,
-      runDirectory: request.run_directory,
-    }).then((bound) => parseRootWorkspace({
-      workspace_path: bound.workspacePath,
-      run_directory: bound.runDirectory,
-      root_branch: bound.rootBranch,
-    }));
-    return resolvedWorkspace;
-  };
   return Object.freeze({
     request,
-    resolveWorkspace,
     gateway,
     reconcilePerformer: performerForRole(env, "RECONCILE"),
     executePerformer: performerForRole(env, "EXECUTE"),

@@ -15,16 +15,15 @@ finalizer code and attempt to keep both paths valid.
 | 1 | delete obsolete implementation and tests | remove every system listed in the permanent subtraction gate and its field-shaped tests | removed-symbol and dependency search |
 | 2 | minimal contracts | Root state/`latest_audit`, managed snapshot, terminal role descriptions, Cycle history, typed Audit JSON, Performer, Gateway, workspace, and PR values | focused contract tests |
 | 3 | Linear boundary and CLI | injectable Gateway, GraphQL adapter, and one Root-run command | fake Gateway and built CLI scenarios |
-| 4 | supplied Root resources | validate and bind one caller-supplied workspace and external run directory | real Git and filesystem boundary scenario |
+| 4 | Root Prepare resources | Root Reconcile adopts current checkout or creates the preferred worktree; bind its result and external run directory | real Agent/Git/filesystem boundary scenario |
 | 5 | Root Reconcile and Cycle projection | frozen small-step contract, managed snapshot, terminal role reports, Cycle history, typed Audit JSON, and Root/Cycle/Execute/Audit hierarchy | semantic and fake Linear tests |
 | 6 | Execute and Audit | fresh workspace-write Execute and distinct fresh read-only Audit each deliver one final Markdown file; Audit remains sole semantic authority, including failed Execute inspection | real Agent CLI boundary tests |
 | 7 | Root State and Inbox | save every complete terminal Audit as `latest_audit`; promote only `accepted` Audits; checkpoint supplied paths, task state, pending finding, and comment cursor | focused transaction scenarios |
-| 8 | terminal delivery function | final Inbox check, one commit, one push, one `gh` PR attempt; PR unavailable records the pushed branch, then Root Done | temporary remote and fake PR CLI scenario |
+| 8 | Root Reconcile Delivery | final Inbox check, structured PR/branch/files result, visible projection, then Root Done | real Agent boundary plus three contract scenarios |
 | 9 | scenario suite and docs | rebuild tests around reusable business scenarios and prove the complete manual single-machine flow | black-box suite |
 
 Root comment injection starts only after frozen Cycle projection and role
-isolation pass. The PR function starts only after Root completion and trusted
-Root State gates pass.
+isolation pass. Delivery starts only after trusted Root State gates pass.
 
 ## Permanent subtraction gate
 
@@ -85,10 +84,10 @@ Only these direct replacements are allowed:
 | revision, seal, digest, mutation comparison | none; immutable Root requirement plus managed snapshot and audited Root State |
 | execution graph, Plan, multi-Work | one serial immutable Cycle with Execute then Audit |
 | recovery, registry, generation, quarantine | cancel unfinished descendants, add Harness feedback, run fresh Reconcile |
-| delivery subsystem and finalizer | one fixed Conductor commit/push/create-PR function |
+| delivery subsystem and finalizer | one Root Reconcile Delivery decision; Conductor only validates and projects it |
 | app-server, tool bridge, session resume | one fresh process from the run-selected thin Agent CLI adapter per role |
 | generic Task Manager and capabilities | one injectable `LinearGateway` with the listed operations |
-| Reconcile workspace inspection | audited task state, one pending finding, and Harness feedback |
+| Reconcile quality inference from workspace | audited task state, one pending finding, and Harness feedback |
 | Trusted State subsystem | one task-state field, one pending finding, and parsed Audit fields in `latest_audit` updated mechanically in Root State |
 | PR exactly-once/recovery protocol | one ordered attempt; ambiguous restart becomes `NeedsHuman` |
 | per-role Agent/model configuration | optional independent Reconcile, Execute, and Audit role configuration fixed for the Root run |
@@ -114,8 +113,8 @@ only as evidence-path compatibility. They are not target domain concepts.
 | trust gate | only an `accepted` Audit adopts the Auditor-supported task state and optional pending finding; Execute exit facts cannot pre-judge the result |
 | Markdown/JSON result projection | role Markdown appends once; typed Audit JSON is the only Cycle upload; history uses Linear `createdAt`; Reconcile sees only parsed `latest_audit` |
 | comment transaction | failed family creation does not consume selected Root comments or start Execute |
-| final delivery | completion with no new Root input creates one commit, pushes one branch, prefers a `gh` PR, records its URL or the pushed branch, then sets Root Done |
-| PR failure | any commit/push/PR error leaves Root open and workspace intact; no automatic retry or recovery runs |
+| final delivery | Root Reconcile returns a PR, branch, or files Delivery; Conductor persists it, renders `## Delivery`, then sets Root Done |
+| remote delivery failure | Root Reconcile may return local files; Conductor never retries or runs Git |
 
 ## V2 Podium Desktop
 

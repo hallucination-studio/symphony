@@ -3,12 +3,9 @@ import type { ConductorStartup } from "./startup.js";
 import { CycleRunner } from "../cycle-runner/CycleRunner.js";
 import { ensureLinearWorkflow } from "../linear/LinearWorkflow.js";
 import { RootReconciler } from "../root-reconciliation/RootReconciler.js";
-import type { CreatePullRequest } from "../workspace/TerminalPullRequest.js";
-import { TerminalPullRequest } from "../workspace/TerminalPullRequest.js";
 
 export async function createProductionRootRun(
   startup: ConductorStartup,
-  createPullRequest: CreatePullRequest,
   log?: (event: Readonly<Record<string, unknown>>) => void,
 ): Promise<Conductor> {
   const root = await startup.gateway.get_issue(startup.request.linear_root);
@@ -42,13 +39,7 @@ export async function createProductionRootRun(
     workflow,
     reconciler,
     cycleRunner,
-    publisher: {
-      publish: (workspace, onPublishing) => new TerminalPullRequest({
-        createPullRequest,
-        onPublishing,
-      }).publish(workspace),
-    },
-    workspace: startup.resolveWorkspace,
+    workspace: () => reconciler.prepare(root, startup.request.workspace_path),
     maxCycles: startup.request.max_cycles,
     ...(log === undefined ? {} : { log }),
   });

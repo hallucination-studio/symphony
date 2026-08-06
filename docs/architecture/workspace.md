@@ -1,152 +1,87 @@
-# Root Workspace and Pull Request
+# Root Workspace and Delivery
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | one Root-owned workspace, role access, and one PR-first terminal delivery sequence | Cycle decisions, delivery subsystem, merge, provider reconciliation, or Podium queue semantics |
+| target proposal | Root Reconcile Prepare, one Root workspace, role access, and structured terminal Delivery | Cycle decisions, merge, retries, cleanup, or Podium queue semantics |
 
-## Root workspace
+## Prepare
 
-The caller supplies exactly one isolated Git workspace and branch already bound
-to the Root. Every Cycle for that Root uses the same workspace. There are no
-per-Cycle worktrees, patch stores, repository snapshots, or workspace versions.
+`Prepare` is the first phase of the Root Reconcile role. It is not another
+Agent role, Linear Issue, or Linear workflow status. Conductor launches the
+phase and validates its structured result; it must not execute Git commands.
 
 ```text
-manual V1 caller or Podium Desktop V2
-  -> allocate Root branch, workspace, and external run directory
-  -> start Conductor with those exact paths
-  -> Execute/Audit sessions use that workspace; Reconcile has no workspace access
-  -> successful Root completion creates one PR
+Root Reconcile Prepare
+  -> supplied preferred path: validate it or create a worktree and Root branch there
+  -> no preferred path: adopt the invocation current directory and current branch
+  -> return workspace_path, run_directory, root_branch
+  -> Conductor persists the exact binding in Root State
 ```
 
-| Rule | Boundary | Required behavior |
-|---|---|---|
-| `WS-ROOT-001` | startup | validate the supplied workspace is an isolated Git workspace with a usable branch and remote |
-| `WS-ROOT-002` | evidence | validate the supplied run directory is writable, outside the workspace, and bound to the same Root |
-| `WS-ROOT-003` | lifetime | require both supplied paths to stay bound to one Root for the complete run |
-| `WS-ROOT-004` | failure | preserve the workspace for inspection; do not reset, clean, rollback, or delete it |
-| `WS-ROOT-005` | ownership | allocation, claiming, cleanup, and deletion belong to the caller or Podium Desktop, never Conductor |
+| Rule | Required behavior |
+|---|---|
+| `WS-PREP-001` | when a preferred workspace is supplied, Root Reconcile uses that exact valid workspace or creates a worktree there |
+| `WS-PREP-002` | failure at a supplied path is visible and must not silently fall back to another path |
+| `WS-PREP-003` | without a supplied workspace, adopt the current directory and branch without switching, cleaning, or resetting |
+| `WS-PREP-004` | keep the external run directory outside the workspace for private diagnostics |
+| `WS-PREP-005` | Conductor validates and persists the returned binding but runs no worktree or branch command |
+| `WS-PREP-006` | restart reuses the Root State binding and does not prepare a replacement |
 
-Root State records the workspace, run directory, and branch. On a later process
-start, Conductor requires the supplied paths to match those exact values. It
-never creates or adopts replacements. If either path is missing, invalid, or
-mismatched, the Root becomes `NeedsHuman` and no Agent starts.
-
-## Podium Desktop allocation
-
-Podium Desktop persists a `ProjectBinding` for each configured Linear Project.
-The binding includes its visible routing label, repository path, base branch,
-local concurrency, and independent Reconcile/Execute/Audit role launch values.
-For each assigned Root it also persists a stable allocation containing only
-`root_id`, `workspace_path`, and `run_directory`. Those paths are passed to one
-Conductor invocation and must not be silently replaced on restart.
-
-Assignment records, process IDs, and the pending queue are Desktop memory
-state. They are deliberately not written into Root State, the run directory,
-or a cross-machine lease. A higher-priority assignment may preempt a lower
-priority local assignment; equal priorities do not preempt. Podium confirms the
-entire stopped Conductor process tree before starting the replacement. There is
-no SQLite store, daemon IPC, or Web surface in this target.
-
-| Rule | Boundary | Required behavior |
-|---|---|---|
-| `WS-PODIUM-001` | Project Binding | persist Linear Project identity, visible routing label, repository/base branch, concurrency, and three role launch configurations |
-| `WS-PODIUM-002` | Root allocation | persist `root_id`, `workspace_path`, and `run_directory`; pass all three unchanged to one Conductor |
-| `WS-PODIUM-003` | runtime state | keep assignment, PID, and queue in memory only; rebuild local scheduling state after restart |
-| `WS-PODIUM-004` | preemption | stop the full process tree and confirm termination before launching a replacement; never preempt equal priority |
-| `WS-PODIUM-005` | host boundary | keep scheduling local to one Desktop instance; do not use a cross-machine lease or daemon IPC |
+Podium Desktop may persist a preferred `workspace_path` and create the external
+`run_directory`, but it only reserves the workspace path. Root Reconcile owns
+the actual worktree and branch creation. Every Cycle then reuses the prepared
+workspace. There are no per-Cycle worktrees, snapshots, or patch stores.
+Assignment records, process IDs, and the pending queue are Desktop memory only;
+the stable allocation is the persisted Root ID, preferred path, and run directory.
 
 ## Role access
 
-| Rule | Role | Access | Constraint |
-|---|---|---|---|
-| `WS-ACCESS-001` | Root Reconcile | none | reason only from Root-owned prompt inputs; no workspace mount or tools |
-| `WS-ACCESS-002` | Execute | workspace-write | mutate only the Root workspace and run required commands |
-| `WS-ACCESS-003` | Audit | read-only | inspect current files, status, diff, and run non-mutating checks |
-| `WS-ACCESS-004` | all Agent roles | no secrets by default | deny environment files, credentials, key stores, and delivery credentials |
-
-One active Cycle prevents concurrent harness writes. Git and PR credentials are
-available only to the terminal delivery command, never to Agent sessions.
-
-## Execute and Audit handoff
-
-```mermaid
-%% source-rules: WS-HANDOFF-001 WS-HANDOFF-002 WS-HANDOFF-003 WF-TR-004 WF-TR-005
-sequenceDiagram
-  participant E as Execute session
-  participant W as Root workspace
-  participant C as Cycle Runner
-  participant A as Fresh Audit session
-  E->>W: mutate files and run commands
-  E-->>C: mechanical process facts; model output discarded
-  C->>A: frozen Cycle contract, process facts, workspace path
-  A->>W: inspect current state and run read-only checks
-A-->>C: exact Audit result Markdown
-```
-
-| Rule | Boundary | Required behavior |
+| Role and phase | Access | Constraint |
 |---|---|---|
-| `WS-HANDOFF-001` | after Execute | leave the workspace exactly as Execute produced it |
-| `WS-HANDOFF-002` | before Audit | start a new session with no Execute transcript |
-| `WS-HANDOFF-003` | Audit evidence | inspect current workspace state, not a claimed or reconstructed snapshot |
-| `WS-HANDOFF-004` | Execute failed | Audit still inspects partial changes and residual effects |
-| `WS-HANDOFF-005` | Cycle terminal | leave repair, cleanup, or progress to the next Root Reconcile |
-| `WS-HANDOFF-006` | every Audit | inspect the complete workspace diff for out-of-bound changes, not only files named by Execute |
+| Root Reconcile Prepare | workspace-write | prepare or adopt the binding only; do not implement the task |
+| Root Reconcile Cycle decision | workspace-write process, audited-state authority | do not replace Audit judgment with self-inspection |
+| Execute | workspace-write | implement only the frozen Cycle |
+| Audit | read-only | inspect the full current workspace independently |
+| Root Reconcile Delivery | workspace-write | create the best available structured Delivery |
 
-Execute Markdown is deliberately absent from the handoff. It is an untrusted
-self-report and cannot reduce Audit's obligation to inspect the frozen contract
-and complete real diff. Only mechanical process facts cross the boundary so
-Audit knows whether execution was interrupted without treating that fact as a
-semantic conclusion. Each role's exact final Markdown remains in its local
-`cycle-NNN-*-result.md` file; Conductor appends it once to that role's Linear
-description with one mechanical local RFC3339 `Updated at:
-<YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. After parsing
-Audit Markdown, Conductor writes and re-reads the typed
-`cycle-NNN-audit-result.json` and uploads only that JSON file to the Cycle. No
-second summarization call is made.
+Execute failed attempts still proceed to Audit; partial changes and residual effects
+are independently inspected. Executor Markdown remains display-only and
+never pre-judges the fresh read-only Audit.
 
-## Terminal delivery
+Role-specific Agent credentials and provider configuration remain backend
+launch configuration. Secrets are never placed in public contracts, prompts,
+Root State, Linear descriptions, or diagnostic summaries.
 
-Root Reconcile does not set Root `Done`. A `complete` recommendation enters the
-following fixed sequence:
+## Delivery
+
+Root Reconcile owns delivery after trusted Audit state supports completion and
+the final Inbox check is empty. It should prefer installed Git and `gh`, but it
+may return local files when remote delivery is unavailable or unnecessary.
 
 ```text
-fetch Root comments once more
-  -> new pending input? return to Root Reconcile
-  -> active Cycle? fail closed
-  -> no workspace changes? NeedsHuman, stop
-  -> set Root State phase to publishing
-  -> git add --all
-  -> git commit
-  -> git push --set-upstream
-  -> attempt pull request with installed `gh`
-  -> publish PR URL, or record the pushed branch when PR creation is unavailable
-  -> set Root Done
+Delivery =
+  | { kind: pull_request, url, branch }
+  | { kind: branch, branch, remote? }
+  | { kind: files, workspace_path, files[] }
 ```
 
-| Rule | Step | Success condition | Failure behavior |
-|---|---|---|---|
-| `WS-PR-001` | final Inbox check | no new eligible Root comments | do not publish; reconcile again |
-| `WS-PR-002` | validate diff | at least one workspace change | leave Root open as `NeedsHuman` |
-| `WS-PR-003` | publish guard | Root State phase is `publishing` before external commands | interrupted publication becomes `NeedsHuman`; never attempt again automatically |
-| `WS-PR-004` | commit | one ordinary commit is created on the Root branch | stop and retain workspace |
-| `WS-PR-005` | push | Root branch is pushed to its configured remote | stop and retain workspace |
-| `WS-PR-006` | create PR | installed `gh` returns one PR URL | after a successful push, record the pushed branch instead of failing delivery |
-| `WS-PR-007` | complete Root | PR URL or pushed delivery branch is recorded in Root State | only then set Root `Done` |
+| Rule | Required behavior |
+|---|---|
+| `WS-DELIVERY-001` | Root Reconcile executes any commit, push, or `gh` command; Conductor executes none |
+| `WS-DELIVERY-002` | return exactly one closed, valid, locatable Delivery value |
+| `WS-DELIVERY-003` | a files Delivery identifies the absolute workspace and at least one delivered relative file |
+| `WS-DELIVERY-004` | Conductor persists Delivery and the visible `## Delivery` description section before Root `Done` |
+| `WS-DELIVERY-005` | any valid Delivery kind permits `Done` when Root Reconcile judges the result deliverable |
+| `WS-DELIVERY-006` | new Root input before projection cancels completion and returns to Reconcile |
 
-The implementation uses installed Git and prefers installed `gh`; it does not
-fall back to a token-specific HTTP API. It records the
-commands, bounded output, branch, and PR URL under the supplied run directory, but
-does not model commit identity or use a hash as workflow authority. The local
-evidence directory is outside the Root workspace, so `git add --all` cannot
-include prompts, trajectories, or command logs.
+The Root description renders Delivery mechanically from Root State. It is not
+inferred from Markdown. Conductor does not override the selected delivery kind
+or require a PR/remote branch when Root Reconcile returns files.
 
-## Explicit non-goals
+## Non-goals
 
-- no delivery subsystem, finalizer, convergence protocol, receipt, or delivery Issue;
-- no retry scheduler, idempotency database, unknown-outcome recovery, or
-  adoption of an existing branch or PR;
-- no automatic merge, rebase, conflict repair, rollback, reset, cleanup, or
-  workspace deletion;
-- no Agent-session resume or reconstruction; restart only reuses the workspace
-  located by Root State and abandons unfinished child Issues;
-- no repository snapshot, revision equality, commit-identity authority, or digest protocol.
+- no Delivery Issue, finalizer, retry scheduler, receipt, or convergence protocol;
+- no automatic merge, rebase, rollback, reset, cleanup, or workspace deletion;
+- no Conductor Git/worktree/commit/push/PR execution;
+- no second Audit dedicated only to delivery;
+- no hidden compatibility fields for retired PR/pushed-branch state.

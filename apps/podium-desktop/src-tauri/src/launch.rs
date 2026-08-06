@@ -33,6 +33,7 @@ const ROLE_ENVIRONMENT_KEYS: [(&str, &str); 6] = [
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchRequest {
     pub root: String,
+    pub repository: PathBuf,
     pub workspace: PathBuf,
     pub run_directory: PathBuf,
     pub max_cycles: u32,
@@ -47,6 +48,7 @@ impl LaunchRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         root: impl Into<String>,
+        repository: impl Into<PathBuf>,
         workspace: impl Into<PathBuf>,
         run_directory: impl Into<PathBuf>,
         max_cycles: u32,
@@ -56,6 +58,7 @@ impl LaunchRequest {
     ) -> Self {
         Self {
             root: root.into(),
+            repository: repository.into(),
             workspace: workspace.into(),
             run_directory: run_directory.into(),
             max_cycles,
@@ -247,7 +250,7 @@ impl ConductorLauncher {
         let mut command = Command::new(&self.executable);
         command
             .args(args)
-            .current_dir(&request.workspace)
+            .current_dir(&request.repository)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             // Stderr is a private diagnostic channel owned by the Conductor;
@@ -313,6 +316,7 @@ fn append_role_args(args: &mut Vec<OsString>, role: &str, config: &RoleLaunchCon
 fn validate_request(request: &LaunchRequest) -> Result<(), LaunchError> {
     if request.root.is_empty()
         || request.root.contains('\0')
+        || request.repository.as_os_str().is_empty()
         || request.workspace.as_os_str().is_empty()
         || request.run_directory.as_os_str().is_empty()
         || request.max_cycles == 0
@@ -421,6 +425,7 @@ mod tests {
     fn request() -> LaunchRequest {
         LaunchRequest::new(
             "ENG-123",
+            "/tmp",
             "/tmp/symphony-workspace",
             "/tmp/symphony-run",
             4,

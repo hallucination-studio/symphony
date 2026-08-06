@@ -79,6 +79,19 @@ test("Root description parser accepts an uninitialized Root and rejects malforme
   );
 });
 
+test("Root description renders structured Delivery as a visible human section", () => {
+  const delivered = parseRootState({
+    ...state,
+    current_phase: "completed",
+    delivery: { kind: "files", workspace_path: "/workspaces/ENG-1", files: ["dist/result.txt", "README.md"] },
+  });
+  const description = renderRootDescription("Deliver the result.", delivered, undefined, updatedAt);
+  assert.match(description, /## Delivery\n\n### Type\nFiles/u);
+  assert.match(description, /### Location\n\/workspaces\/ENG-1/u);
+  assert.match(description, /### Contents\n- dist\/result\.txt\n- README\.md/u);
+  assert.deepEqual(parseRootDescription(description).state?.delivery, delivered.delivery);
+});
+
 test("Gateway updates only the Root description while preserving its issue identity", async () => {
   const gateway = new InMemoryLinearGateway({
     issues: [parseLinearIssue({

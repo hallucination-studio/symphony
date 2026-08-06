@@ -157,26 +157,8 @@ impl RootResourceAllocator {
         fs::create_dir_all(run_directory.parent().ok_or(ResourceError::AppDataRootInvalid)?)
             .map_err(|_| ResourceError::Io)?;
 
-        // Creation is intentionally delegated to Git.  In particular, this is
-        // `worktree add -b`, not a copied checkout or a branch reset.
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&repository)
-            .arg("worktree")
-            .arg("add")
-            .arg("-b")
-            .arg(&branch)
-            .arg(&workspace)
-            .arg(&binding.base_branch)
-            .output()
-            .map_err(|_| ResourceError::Git)?;
-        if !output.status.success() {
-            return Err(ResourceError::Git);
-        }
-
-        // Keep the run directory outside the worktree and create it only after
-        // Git has confirmed the branch/worktree.  If this fails, leave the
-        // worktree intact for operator inspection; no cleanup is attempted.
+        // Podium reserves the stable path only. Root Reconcile's Prepare phase
+        // owns worktree and branch creation at that exact location.
         if let Err(error) = fs::create_dir(&run_directory) {
             return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
                 ResourceError::ResourceExists
@@ -190,7 +172,6 @@ impl RootResourceAllocator {
             workspace_path: path_string(&workspace)?,
             run_directory: path_string(&run_directory)?,
         };
-        validate_existing_workspace(&workspace, &repository, &branch)?;
         validate_existing_run_directory(&run_directory)?;
         Ok(allocation)
     }
@@ -489,8 +470,21 @@ mod tests {
         repository
     }
 
+    fn simulate_root_prepare(repository: &Path, allocation: &RootAllocation) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["worktree", "add", "-b"])
+            .arg(root_branch_name(&allocation.root_id).unwrap())
+            .arg(&allocation.workspace_path)
+            .arg("main")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
-    fn first_allocation_uses_real_worktree_and_external_run_directory() {
+    fn first_allocation_reserves_workspace_for_root_prepare_and_creates_run_directory() {
         let temp = TempDir::new("first");
         let repository = fixture_repo(&temp);
         let app_data = temp.path().join("app");
@@ -500,22 +494,10 @@ mod tests {
         let allocation = allocator.allocate(&binding, "issue-123", None).unwrap();
 
         assert_eq!(allocation.root_id, "issue-123");
-        assert!(Path::new(&allocation.workspace_path).is_dir());
+        assert!(!Path::new(&allocation.workspace_path).exists());
         assert!(Path::new(&allocation.run_directory).is_dir());
         assert!(Path::new(&allocation.workspace_path).starts_with(&app_data));
         assert!(Path::new(&allocation.run_directory).starts_with(&app_data));
-        assert_eq!(
-            git_output(Path::new(&allocation.workspace_path), &["symbolic-ref", "--short", "HEAD"])
-                .unwrap()
-                .trim(),
-            root_branch_name("issue-123").unwrap()
-        );
-        assert_eq!(
-            git_output(Path::new(&allocation.workspace_path), &["rev-parse", "--show-toplevel"])
-                .unwrap()
-                .trim(),
-            fs::canonicalize(&allocation.workspace_path).unwrap().to_string_lossy()
-        );
     }
 
     #[test]
@@ -526,6 +508,7 @@ mod tests {
         let binding = binding(&repository);
         let first =
             RootResourceAllocator::new(&app_data).allocate(&binding, "issue-123", None).unwrap();
+        simulate_root_prepare(&repository, &first);
         let second = RootResourceAllocator::new(&app_data)
             .allocate(&binding, "issue-123", Some(&first))
             .unwrap();
@@ -540,6 +523,7 @@ mod tests {
         let binding = binding(&repository);
         let allocator = RootResourceAllocator::new(&app_data);
         let first = allocator.allocate(&binding, "issue-123", None).unwrap();
+        simulate_root_prepare(&repository, &first);
 
         let wrong_id = RootAllocation { root_id: "other".into(), ..first.clone() };
         assert_eq!(

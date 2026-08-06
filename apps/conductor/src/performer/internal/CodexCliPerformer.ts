@@ -111,6 +111,7 @@ function launchArguments(request: PerformerLaunchRequest, baseUrl: string | unde
   }
   if (baseUrl !== undefined) args.push("-c", `openai_base_url=${tomlString(baseUrl)}`);
   args.push("--cd", request.working_directory);
+  for (const directory of request.additional_writable_directories ?? []) args.push("--add-dir", directory);
   if (request.sandbox === "no_workspace") args.push("--skip-git-repo-check");
   if (request.final_response_path !== undefined) {
     args.push("--output-last-message", request.final_response_path);

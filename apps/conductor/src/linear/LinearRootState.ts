@@ -15,6 +15,7 @@ export const ROOT_MANAGED_ROOT_END = "# Symphony Harness: End Managed Root";
 export const ROOT_METADATA_SECTION_HEADING = "## Metadata";
 export const ROOT_STATE_SECTION_HEADING = "### Root State";
 export const ROOT_RESULT_SECTION_HEADING = "## Result";
+export const ROOT_DELIVERY_SECTION_HEADING = "## Delivery";
 const LEGACY_ROOT_STATE_SECTION_HEADING = "## Root State";
 const LEGACY_ROOT_RECONCILE_SECTION_HEADING = "## Reconcile";
 const UPDATED_AT_PREFIX = "Updated at: ";
@@ -43,6 +44,14 @@ function reconcileKind(report: string): RootReconcileDecision["kind"] {
   if (report.startsWith("### Overview\n")) return "complete";
   if (report.startsWith("### Reason\n")) return "needs_human";
   return malformed();
+}
+
+function renderDelivery(state: RootState): string | undefined {
+  const delivery = state.delivery;
+  if (delivery === undefined) return undefined;
+  if (delivery.kind === "pull_request") return ["### Type", "Pull Request", "", "### Location", delivery.url, "", "### Contents", `Branch: ${delivery.branch}`].join("\n");
+  if (delivery.kind === "branch") return ["### Type", "Branch", "", "### Location", delivery.remote === undefined ? delivery.branch : `${delivery.remote}/${delivery.branch}`, "", "### Contents", `Branch: ${delivery.branch}`].join("\n");
+  return ["### Type", "Files", "", "### Location", delivery.workspace_path, "", "### Contents", ...delivery.files.map((file) => `- ${file}`)].join("\n");
 }
 
 function parseManagedBody(lines: readonly string[]): {
@@ -76,7 +85,13 @@ function parseManagedBody(lines: readonly string[]): {
   }
   if (JSON.stringify(state, null, 2) !== json) malformed();
 
-  const remainder = stateBody.slice(closingFence + "\n```".length);
+  let remainder = stateBody.slice(closingFence + "\n```".length);
+  const delivery = renderDelivery(state);
+  if (delivery !== undefined) {
+    const deliveryBlock = `\n\n${ROOT_DELIVERY_SECTION_HEADING}\n\n${delivery}`;
+    if (!remainder.startsWith(deliveryBlock)) malformed();
+    remainder = remainder.slice(deliveryBlock.length);
+  }
   if (remainder.length === 0) return { state, updated_at };
   const reportHeading = structured ? ROOT_RESULT_SECTION_HEADING : LEGACY_ROOT_RECONCILE_SECTION_HEADING;
   const reportPrefix = `\n\n${reportHeading}\n\n`;
@@ -161,6 +176,7 @@ export function renderRootDescription(
     "```json",
     JSON.stringify(parsedState, null, 2),
     "```",
+    ...(renderDelivery(parsedState) === undefined ? [] : ["", ROOT_DELIVERY_SECTION_HEADING, "", renderDelivery(parsedState) as string]),
     ...(report === undefined ? [] : ["", ROOT_RESULT_SECTION_HEADING, "", report]),
     "",
     ROOT_MANAGED_ROOT_END,

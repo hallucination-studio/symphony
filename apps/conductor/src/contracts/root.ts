@@ -19,6 +19,7 @@ import {
   parseAbsolutePath,
   parseArray,
   parseBoundedString,
+  parseEnum,
   parseMarkdownText,
   parseNonNegativeInteger,
   parseOptional,
@@ -26,6 +27,7 @@ import {
   type UnknownRecord,
 } from "./validation.js";
 import { parseCommentId } from "./identity.js";
+import { parseDelivery, type Delivery, type RootWorkspace } from "./workspace.js";
 
 export interface RootState {
   readonly workspace_path: string;
@@ -37,17 +39,26 @@ export interface RootState {
   readonly latest_audit?: AuditRunResult | undefined;
   readonly harness_feedback?: MarkdownText | undefined;
   readonly comment_cursor?: string | undefined;
-  readonly pull_request_url?: string | undefined;
-  readonly delivery_branch?: string | undefined;
+  readonly delivery?: Delivery | undefined;
   readonly token_usage?: PerformerTokenUsage | undefined;
 }
 
 export interface RootReconcileRequest {
+  readonly phase: "reconcile" | "delivery";
   readonly root: LinearIssue;
   readonly root_state: RootState;
   readonly new_root_comments: readonly LinearComment[];
   readonly worktree_summary: RootWorktreeSummary;
 }
+
+export interface RootPrepareRequest {
+  readonly phase: "prepare";
+  readonly root: LinearIssue;
+  readonly preferred_workspace?: string | undefined;
+  readonly run_directory: string;
+}
+
+export type RootAgentRequest = RootPrepareRequest | RootReconcileRequest;
 
 export interface RootCycleDraft {
   readonly objective: MarkdownText;
@@ -77,7 +88,7 @@ export type RootWorktreeSummary =
 
 export type RootReconcileDecision =
   | { readonly kind: "create_cycle"; readonly cycle: RootCycleDraft; readonly report: MarkdownText }
-  | { readonly kind: "complete"; readonly summary: MarkdownText; readonly report: MarkdownText }
+  | { readonly kind: "complete"; readonly summary: MarkdownText; readonly report: MarkdownText; readonly delivery: Delivery }
   | {
       readonly kind: "needs_human";
       readonly reason: MarkdownText;
@@ -89,6 +100,11 @@ export interface RootReconcileOutcome {
   readonly decision: RootReconcileDecision;
   readonly process?: PerformerProcessResult | undefined;
 }
+
+export type RootAgentOutcome = RootReconcileOutcome | {
+  readonly decision: { readonly kind: "prepared"; readonly workspace: RootWorkspace; readonly report: MarkdownText };
+  readonly process?: PerformerProcessResult | undefined;
+};
 
 const ROOT_STATE_REQUIRED_KEYS = [
   "workspace_path",
@@ -102,8 +118,7 @@ const ROOT_STATE_OPTIONAL_KEYS = [
   "latest_audit",
   "harness_feedback",
   "comment_cursor",
-  "pull_request_url",
-  "delivery_branch",
+  "delivery",
   "token_usage",
 ] as const;
 
@@ -123,13 +138,6 @@ function optionalMarkdown(value: unknown, code: string): MarkdownText | undefine
   return parseMarkdownText(value, code);
 }
 
-function optionalUrl(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  const url = parseBoundedString(value, "invalid_pull_request_url", 2_048);
-  if (!URL.canParse(url)) throw new Error("invalid_pull_request_url");
-  return url;
-}
-
 export function parseRootState(value: unknown): RootState {
   const record = asRecord(value, "invalid_root_state");
   assertKeysWithOptional(record, ROOT_STATE_REQUIRED_KEYS, ROOT_STATE_OPTIONAL_KEYS);
@@ -137,11 +145,7 @@ export function parseRootState(value: unknown): RootState {
   const latestAudit = parseOptional(record.latest_audit, parseAuditRunResult);
   const harnessFeedback = optionalMarkdown(record.harness_feedback, "invalid_harness_feedback");
   const commentCursor = parseOptional(record.comment_cursor, parseCommentId);
-  const pullRequestUrl = optionalUrl(record.pull_request_url);
-  const deliveryBranch = parseOptional(
-    record.delivery_branch,
-    (entry) => parseBoundedString(entry, "invalid_delivery_branch", 256),
-  );
+  const delivery = parseOptional(record.delivery, parseDelivery);
   const tokenUsage = parseOptional(record.token_usage, parsePerformerTokenUsage);
   const parsed = {
     workspace_path: parseAbsolutePath(record.workspace_path, "invalid_workspace_path"),
@@ -153,8 +157,7 @@ export function parseRootState(value: unknown): RootState {
     ...(latestAudit === undefined ? {} : { latest_audit: latestAudit }),
     ...(harnessFeedback === undefined ? {} : { harness_feedback: harnessFeedback }),
     ...(commentCursor === undefined ? {} : { comment_cursor: commentCursor }),
-    ...(pullRequestUrl === undefined ? {} : { pull_request_url: pullRequestUrl }),
-    ...(deliveryBranch === undefined ? {} : { delivery_branch: deliveryBranch }),
+    ...(delivery === undefined ? {} : { delivery }),
     ...(tokenUsage === undefined ? {} : { token_usage: tokenUsage }),
   };
   return freezeObject(parsed);
@@ -206,17 +209,27 @@ export function parseRootWorktreeSummary(value: unknown): RootWorktreeSummary {
 
 export function parseRootReconcileRequest(value: unknown): RootReconcileRequest {
   const record = asRecord(value, "invalid_root_reconcile_request");
-  if (Object.keys(record).sort().join("\0") !== ["new_root_comments", "root", "root_state", "worktree_summary"].sort().join("\0")) {
+  if (Object.keys(record).sort().join("\0") !== ["new_root_comments", "phase", "root", "root_state", "worktree_summary"].sort().join("\0")) {
     throw new Error("invalid_contract_keys");
   }
   const comments = record.new_root_comments;
   if (!Array.isArray(comments)) throw new Error("invalid_contract_array");
   return freezeObject({
+    phase: parseEnum(record.phase, ["reconcile", "delivery"] as const),
     root: parseLinearIssue(record.root),
     root_state: parseRootState(record.root_state),
     new_root_comments: parseArray(comments, parseLinearComment),
     worktree_summary: parseRootWorktreeSummary(record.worktree_summary),
   });
+}
+
+export function parseRootPrepareRequest(value: unknown): RootPrepareRequest {
+  const record = asRecord(value, "invalid_root_prepare_request");
+  if (Object.keys(record).some((key) => !["phase", "preferred_workspace", "root", "run_directory"].includes(key))
+    || !Object.hasOwn(record, "phase") || !Object.hasOwn(record, "root") || !Object.hasOwn(record, "run_directory")) throw new Error("invalid_contract_keys");
+  if (record.phase !== "prepare") throw new Error("invalid_contract_variant");
+  const preferred = parseOptional(record.preferred_workspace, (entry) => parseAbsolutePath(entry, "invalid_preferred_workspace"));
+  return freezeObject({ phase: record.phase, root: parseLinearIssue(record.root), run_directory: parseAbsolutePath(record.run_directory, "invalid_run_directory"), ...(preferred === undefined ? {} : { preferred_workspace: preferred }) });
 }
 
 function parseRootCycleDraft(value: unknown): RootCycleDraft {
@@ -314,13 +327,14 @@ export function parseRootReconcileDecision(value: unknown): RootReconcileDecisio
     });
   }
   if (kind === "complete") {
-    if (Object.keys(record).sort().join("\0") !== ["kind", "report", "summary"].sort().join("\0")) {
+    if (Object.keys(record).sort().join("\0") !== ["delivery", "kind", "report", "summary"].sort().join("\0")) {
       throw new Error("invalid_contract_keys");
     }
     return freezeObject({
       kind,
       summary: parseMarkdownText(record.summary, "invalid_completion_summary"),
       report: parseRootReconcileReportMarkdown(record.report, kind),
+      delivery: parseDelivery(record.delivery),
     });
   }
   if (kind === "needs_human") {

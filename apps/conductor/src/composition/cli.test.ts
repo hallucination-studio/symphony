@@ -48,6 +48,15 @@ test("defaults each role agent to Codex and leaves overrides optional", () => {
   });
 });
 
+test("omits a preferred workspace so Prepare adopts the current checkout", () => {
+  assert.deepEqual(parseCliArguments([
+    "run", "--linear-root", "ENG-123", "--dir", "/tmp/root-run", "--max-cycles", "4",
+  ]), {
+    linear_root: "ENG-123", run_directory: "/tmp/root-run",
+    reconcile_agent: "codex", execute_agent: "codex", audit_agent: "codex", max_cycles: 4,
+  });
+});
+
 test("keeps each role override independently optional", () => {
   assert.deepEqual(parseCliArguments([
     "run", "--linear-root", "ENG-123", "--workspace", "/tmp/root-workspace",

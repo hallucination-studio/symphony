@@ -15,6 +15,7 @@ async function fixture() {
   const runDirectory = path.join(directory, "run-secret-path");
   await Promise.all([mkdir(workspace), mkdir(runDirectory)]);
   const request = parseRootReconcileRequest({
+    phase: "reconcile",
     root: {
       id: "root-id", identifier: "ENG-1", title: "Implement the parser",
       description: "The parser must reject ambiguous input.", url: "https://linear.app/acme/issue/ENG-1",
@@ -83,6 +84,25 @@ const humanReport = [
   "### Next Step", "Wait for an explicit Root comment.",
 ].join("\n");
 
+test("Prepare delegates the exact preferred worktree binding to Root Reconcile", async () => {
+  const world = await fixture();
+  const preferred = path.join(path.dirname(world.workspace), "preferred-root");
+  const launches: PerformerLaunchRequest[] = [];
+  const reconciler = createReconciler(performerWith([
+    "decision: prepared", "", "## Workspace",
+    JSON.stringify({ workspace_path: preferred, run_directory: world.runDirectory, root_branch: "root/ENG-1" }),
+    "", "## Report", "### Summary", "Created the preferred Root worktree.", "", "### Evidence", "The branch is attached.",
+  ].join("\n"), launches), world.runDirectory);
+
+  const workspace = await reconciler.prepare(world.request.root, preferred);
+  assert.deepEqual(workspace, { workspace_path: preferred, run_directory: world.runDirectory, root_branch: "root/ENG-1" });
+  assert.equal(launches[0]?.sandbox, "workspace_write");
+  assert.equal(launches[0]?.working_directory, process.cwd());
+  assert.deepEqual(launches[0]?.additional_writable_directories, [path.dirname(preferred)]);
+  assert.match(launches[0]?.prompt ?? "", /Prepare phase/u);
+  assert.equal(launches[0]?.prompt.includes(preferred), true);
+});
+
 test("returns one Cycle draft from Root-owned inputs without exposing workspace paths", async () => {
   const world = await fixture();
   const launches: PerformerLaunchRequest[] = [];
@@ -102,12 +122,11 @@ test("returns one Cycle draft from Root-owned inputs without exposing workspace 
     report: cycleReport,
   });
   assert.equal(launches.length, 1);
-  assert.equal(launches[0]?.sandbox, "no_workspace");
-  assert.notEqual(launches[0]?.working_directory, world.runDirectory);
-  assert.equal(launches[0]?.working_directory.startsWith(os.tmpdir()), true);
+  assert.equal(launches[0]?.sandbox, "workspace_write");
+  assert.equal(launches[0]?.working_directory, world.workspace);
   assert.equal(launches[0]?.diagnostic_jsonl_path?.startsWith(world.runDirectory), true);
   assert.equal(launches[0]?.diagnostic_stderr_path?.startsWith(world.runDirectory), true);
-  assert.equal(launches[0]?.prompt.includes(world.workspace), false);
+  assert.equal(launches[0]?.prompt.includes(world.workspace), true);
   assert.equal(launches[0]?.prompt.includes(world.runDirectory), false);
   assert.equal(launches[0]?.prompt.includes("Preserve error locations."), true);
   assert.equal(launches[0]?.prompt.includes("Do not add recovery."), true);
@@ -134,6 +153,7 @@ test("includes the complete latest Audit in the prompt without child DAG content
   for (const latest_audit of audits) {
     const world = await fixture();
     const request = parseRootReconcileRequest({
+      phase: "reconcile",
       root: world.request.root,
       root_state: { ...world.request.root_state, latest_audit },
       new_root_comments: world.request.new_root_comments,
@@ -141,7 +161,7 @@ test("includes the complete latest Audit in the prompt without child DAG content
     });
     const launches: PerformerLaunchRequest[] = [];
     const reconciler = createReconciler(performerWith(
-      `decision: complete\n\n## Summary\nTrusted state is complete.\n\n## Report\n${completeReport}\n`,
+      `decision: complete\n\n## Summary\nTrusted state is complete.\n\n## Delivery\n{"kind":"files","workspace_path":"${world.workspace}","files":["result.txt"]}\n\n## Report\n${completeReport}\n`,
       launches,
     ), world.runDirectory);
 
@@ -159,11 +179,12 @@ test("parses completion and human decisions without a repair turn", async () => 
   const world = await fixture();
   const completeLaunches: PerformerLaunchRequest[] = [];
   const complete = createReconciler(performerWith(
-    `decision: complete\n\n## Summary\nAll trusted acceptance checks are satisfied.\n\n## Report\n${completeReport}\n`,
+    `decision: complete\n\n## Summary\nAll trusted acceptance checks are satisfied.\n\n## Delivery\n{"kind":"files","workspace_path":"${world.workspace}","files":["result.txt"]}\n\n## Report\n${completeReport}\n`,
     completeLaunches,
   ), world.runDirectory);
   assert.deepEqual((await complete.reconcile(world.request)).decision, {
     kind: "complete", summary: "All trusted acceptance checks are satisfied.", report: completeReport,
+    delivery: { kind: "files", workspace_path: world.workspace, files: ["result.txt"] },
   });
   assert.equal(completeLaunches.length, 1);
 
@@ -183,7 +204,7 @@ test("omits model and reasoning so Root Reconcile can use local Codex defaults",
   const launches: PerformerLaunchRequest[] = [];
   const reconciler = new RootReconciler({
     performer: performerWith(
-      `decision: complete\n\n## Summary\nTrusted state is complete.\n\n## Report\n${completeReport}\n`,
+      `decision: complete\n\n## Summary\nTrusted state is complete.\n\n## Delivery\n{"kind":"files","workspace_path":"${world.workspace}","files":["result.txt"]}\n\n## Report\n${completeReport}\n`,
       launches,
     ),
     runDirectory: world.runDirectory,

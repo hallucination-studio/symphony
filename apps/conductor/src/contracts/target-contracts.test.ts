@@ -36,10 +36,7 @@ import {
   parsePerformerLaunchRequest,
   parsePerformerProcessResult,
 } from "./performer.js";
-import {
-  parsePullRequestResult,
-  parseRootWorkspace,
-} from "./workspace.js";
+import { parseDelivery, parseRootWorkspace } from "./workspace.js";
 
 const issue = {
   id: "issue-root-1",
@@ -71,7 +68,6 @@ const rootState = {
   pending_finding: "The failure case is not covered.",
   harness_feedback: "",
   comment_cursor: comment.id,
-  pull_request_url: undefined,
 } as const;
 
 test("identity values are provider strings with closed status vocabularies", () => {
@@ -181,7 +177,7 @@ test("Linear values and RootState normalize provider data without provider paylo
   assert.deepEqual(parsedComment, comment);
   assert.equal(workflow.team_id, issue.team_id);
   assert.equal(parsedState.comment_cursor, comment.id);
-  assert.equal(parseRootState({ ...rootState, delivery_branch: "root/ENG-123" }).delivery_branch, "root/ENG-123");
+  assert.equal(parseRootState({ ...rootState, delivery: { kind: "branch", branch: "root/ENG-123" } }).delivery?.kind, "branch");
   assert.ok(Object.isFrozen(parsedIssue));
   assert.ok(Object.isFrozen(parsedComment));
   assert.ok(Object.isFrozen(workflow));
@@ -190,7 +186,7 @@ test("Linear values and RootState normalize provider data without provider paylo
   assert.throws(() => parseLinearIssue({ ...issue, metadata: {} }), /invalid_contract_keys/u);
   assert.throws(() => parseLinearComment({ ...comment, authorization: "secret" }), /invalid_contract_keys/u);
   assert.throws(() => parseRootState({ ...rootState, raw_trajectory: "secret" }), /invalid_contract_keys/u);
-  assert.throws(() => parseRootState({ ...rootState, delivery_branch: "" }), /invalid_delivery_branch/u);
+  assert.throws(() => parseRootState({ ...rootState, delivery: { kind: "branch", branch: "" } }), /invalid_delivery_branch/u);
 });
 
 test("RootState optionally persists a structured latest Audit result", () => {
@@ -234,6 +230,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
   assert.ok(Object.isFrozen(spec.consumed_comment_ids));
 
   const request = parseRootReconcileRequest({
+    phase: "reconcile",
     root: issue,
     root_state: rootState,
     new_root_comments: [comment],
@@ -277,20 +274,24 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     "### Verification", "- npm test passed", "",
     "### Token Usage", "Total tokens: 1.2k",
   ].join("\n");
-  assert.deepEqual(parseRootReconcileDecision({ kind: "complete", summary: "Complete.", report: completeReport }), {
+  const delivery = { kind: "files", workspace_path: "/workspaces/ENG-123", files: ["src/parser.ts"] } as const;
+  assert.deepEqual(parseRootReconcileDecision({ kind: "complete", summary: "Complete.", delivery, report: completeReport }), {
     kind: "complete",
     summary: "Complete.",
     report: completeReport,
+    delivery,
   });
   const reportAwaitingMechanicalTokenUsage = completeReport.replace("Total tokens: 1.2k", "").trimEnd();
   assert.deepEqual(parseRootReconcileDecision({
     kind: "complete",
     summary: "Complete with token usage pending mechanical projection.",
+    delivery,
     report: reportAwaitingMechanicalTokenUsage,
   }), {
     kind: "complete",
     summary: "Complete with token usage pending mechanical projection.",
     report: reportAwaitingMechanicalTokenUsage,
+    delivery,
   });
   const reportWithTrustedMechanicalJson = completeReport
     .replace("#### Created\n- src/parser.ts: +8 lines\n#### Updated\n- None\n#### Deleted\n- None", JSON.stringify({
@@ -301,7 +302,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     }, null, 2))
     .replace("+8 / -0 lines", JSON.stringify({ insertions: 8, deletions: 0 }, null, 2));
   assert.equal(parseRootReconcileDecision({
-    kind: "complete", summary: "Complete.", report: reportWithTrustedMechanicalJson,
+    kind: "complete", summary: "Complete.", delivery, report: reportWithTrustedMechanicalJson,
   }).report, reportWithTrustedMechanicalJson);
   assert.deepEqual(parseRootReconcileDecision({
     kind: "needs_human",
@@ -458,55 +459,22 @@ test("Cycle terminal result maps closed Audit verdicts mechanically", () => {
   }
 });
 
-test("Root workspace and PR results are closed values", () => {
+test("Root workspace and Delivery are closed values", () => {
   const workspace = parseRootWorkspace({
     workspace_path: "/workspaces/ENG-123",
     run_directory: "/runs/ENG-123",
     root_branch: "symphony/ENG-123",
   });
   assert.ok(Object.isFrozen(workspace));
-  assert.deepEqual(parsePullRequestResult({
-    status: "created",
-    pull_request_url: "https://github.example/pull/1",
-    root_branch: workspace.root_branch,
-  }), {
-    status: "created",
-    pull_request_url: "https://github.example/pull/1",
-    root_branch: workspace.root_branch,
+  assert.deepEqual(parseDelivery({ kind: "pull_request", url: "https://github.example/pull/1", branch: workspace.root_branch }), {
+    kind: "pull_request", url: "https://github.example/pull/1", branch: workspace.root_branch,
   });
-  assert.deepEqual(parsePullRequestResult({
-    status: "failed",
-    step: "push",
-    reason: "push_failed",
-  }), {
-    status: "failed",
-    step: "push",
-    reason: "push_failed",
+  assert.deepEqual(parseDelivery({ kind: "branch", branch: workspace.root_branch, remote: "origin" }), {
+    kind: "branch", branch: workspace.root_branch, remote: "origin",
   });
-  assert.deepEqual(parsePullRequestResult({
-    status: "branch_delivered",
-    root_branch: workspace.root_branch,
-    reason: "github_pr_exit_nonzero",
-  }), {
-    status: "branch_delivered",
-    root_branch: workspace.root_branch,
-    reason: "github_pr_exit_nonzero",
+  assert.deepEqual(parseDelivery({ kind: "files", workspace_path: workspace.workspace_path, files: ["dist/result.txt"] }), {
+    kind: "files", workspace_path: workspace.workspace_path, files: ["dist/result.txt"],
   });
-  assert.throws(() => parsePullRequestResult({
-    status: "failed",
-    step: "create_pr",
-    reason: "create_pr_failed",
-  }), /invalid_contract_variant/u);
-  assert.throws(() => parsePullRequestResult({
-    status: "created",
-    pull_request_url: "https://github.example/pull/1",
-    root_branch: workspace.root_branch,
-    commit_hash: "deadbeef",
-  }), /invalid_contract_keys/u);
-  assert.throws(() => parsePullRequestResult({
-    status: "branch_delivered",
-    root_branch: workspace.root_branch,
-    reason: "github_pr_exit_nonzero",
-    pull_request_url: "https://github.example/pull/1",
-  }), /invalid_contract_keys/u);
+  assert.throws(() => parseDelivery({ kind: "files", workspace_path: workspace.workspace_path, files: [] }), /invalid_delivery_files/u);
+  assert.throws(() => parseDelivery({ kind: "branch", branch: workspace.root_branch, commit_hash: "deadbeef" }), /invalid_contract_keys/u);
 });

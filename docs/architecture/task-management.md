@@ -167,7 +167,7 @@ saved workspace is missing, stop rather than creating a conflicting workspace.
 | comment belongs to descendant | display-only, never fetched for Reconcile |
 | Cycle history/result comment | append-only lifecycle and mechanical upload record; never model input |
 | selected new comment | cursor remains unchanged until complete Cycle family is recorded |
-| completion recommendation | perform one final after-cursor read before PR function |
+| completion decision | perform one final after-cursor read before persisting Root Reconcile Delivery |
 
 ## Failure policy
 
