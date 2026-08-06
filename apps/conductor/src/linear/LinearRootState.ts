@@ -16,6 +16,7 @@ export const ROOT_METADATA_SECTION_HEADING = "## Metadata";
 export const ROOT_STATE_SECTION_HEADING = "### Root State";
 export const ROOT_RESULT_SECTION_HEADING = "## Result";
 export const ROOT_DELIVERY_SECTION_HEADING = "## Delivery";
+export const ROOT_ARCHITECTURE_DECISIONS_HEADING = "# Architecture Decisions";
 const UPDATED_AT_PREFIX = "Updated at: ";
 
 export interface RootDescriptionProjection {
@@ -49,6 +50,35 @@ function renderDelivery(state: RootState): string | undefined {
   if (delivery.kind === "pull_request") return ["### Type", "Pull Request", "", "### Location", delivery.url, "", "### Contents", `Branch: ${delivery.branch}`].join("\n");
   if (delivery.kind === "branch") return ["### Type", "Branch", "", "### Location", delivery.remote === undefined ? delivery.branch : `${delivery.remote}/${delivery.branch}`, "", "### Contents", `Branch: ${delivery.branch}`].join("\n");
   return ["### Type", "Files", "", "### Location", delivery.workspace_path, "", "### Contents", ...delivery.files.map((file) => `- ${file}`)].join("\n");
+}
+
+function renderArchitectureDecisions(state: RootState): string | undefined {
+  if (state.architecture_decisions.length === 0) return undefined;
+  return [
+    ROOT_ARCHITECTURE_DECISIONS_HEADING,
+    ...state.architecture_decisions.flatMap((decision) => [
+      "",
+      `## ${decision.id}`,
+      `- **Title:** ${decision.title}`,
+      `- **Decision:** ${decision.decision}`,
+      `- **Rationale:** ${decision.rationale}`,
+      "- **Consequences:**",
+      ...decision.consequences.map((consequence) => `  - ${consequence}`),
+      `- **Source action:** ${decision.source_action_comment_id}`,
+      `- **Source replies:** ${decision.source_reply_ids.join(", ")}`,
+      `- **Decided at:** ${decision.decided_at}`,
+    ]),
+  ].join("\n");
+}
+
+function canonicalVisibleMarkdown(value: string): string {
+  const lines = value.replace(/\r\n?/gu, "\n").split("\n");
+  const canonical: string[] = [];
+  for (const line of lines) {
+    if (line.length === 0 && canonical.at(-1)?.startsWith("#")) continue;
+    canonical.push(line.replace(/^(\s*)\* /u, "$1- ").replace(/[ \t]+$/u, ""));
+  }
+  return canonical.join("\n").trim();
 }
 
 function parseMetadata(body: string): {
@@ -137,16 +167,26 @@ export function parseRootDescription(value: unknown): RootDescriptionProjection 
   const start = starts[0] as number;
   const end = ends[0] as number;
   if (end !== lines.length - 1) malformed();
-  const requirementRaw = lines.slice(0, start).join("\n").replace(/\n+$/u, "");
-  let requirement: MarkdownText;
-  try {
-    requirement = parseMarkdownText(requirementRaw, "linear_root_description_malformed");
-  } catch {
-    malformed();
-  }
   let managed: ReturnType<typeof parseManagedBody>;
   try {
     managed = parseManagedBody(lines.slice(start + 1, end));
+  } catch {
+    malformed();
+  }
+  const prefix = lines.slice(0, start).join("\n").replace(/\n+$/u, "");
+  const decisions = renderArchitectureDecisions(managed.state);
+  let requirementRaw = prefix;
+  if (decisions !== undefined) {
+    const marker = `\n\n${ROOT_ARCHITECTURE_DECISIONS_HEADING}\n`;
+    const decisionStart = prefix.lastIndexOf(marker);
+    if (decisionStart < 0) malformed();
+    const visibleDecisions = prefix.slice(decisionStart + 2);
+    if (canonicalVisibleMarkdown(visibleDecisions) !== canonicalVisibleMarkdown(decisions)) malformed();
+    requirementRaw = prefix.slice(0, decisionStart);
+  }
+  let requirement: MarkdownText;
+  try {
+    requirement = parseMarkdownText(requirementRaw, "linear_root_description_malformed");
   } catch {
     malformed();
   }
@@ -179,6 +219,9 @@ export function renderRootDescription(
   }
   const value = [
     parsedRequirement,
+    ...(renderArchitectureDecisions(parsedState) === undefined
+      ? []
+      : ["", renderArchitectureDecisions(parsedState) as string]),
     "",
     ROOT_MANAGED_ROOT_START,
     ...(report === undefined ? [] : ["", ROOT_RESULT_SECTION_HEADING, "", report]),

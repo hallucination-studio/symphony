@@ -1,8 +1,8 @@
 import type { RefObject } from "react";
 
 import { formatObservedAt } from "./format";
-import { BindingRow, EmptyState, PageHeading, RootRow, RootStatusBadge, StatusBadge } from "./components";
-import type { CommandHandler, DesktopOverviewView, RootStatus } from "./types";
+import { BindingRow, EmptyState, Notice, PageHeading, RootRow, RootStatusBadge, StatusBadge } from "./components";
+import type { CommandHandler, DesktopOverviewView, LinearConnectionView, RootStatus } from "./types";
 
 const groups: ReadonlyArray<{ status: RootStatus; title: string }> = [
   { status: "running", title: "Running" },
@@ -11,10 +11,39 @@ const groups: ReadonlyArray<{ status: RootStatus; title: string }> = [
   { status: "completed", title: "Recently completed" },
 ];
 
-export function OverviewPage({ view, headingRef, onOpenConductors, onCommand }: {
+/** Disconnected guidance stays visible on every surface until Linear is back. */
+export function LinearGuidance({
+  linear,
+  onOpenSettings,
+}: {
+  linear: LinearConnectionView;
+  onOpenSettings?: (() => void) | undefined;
+}) {
+  if (linear.status === "connected") return null;
+  const reconnect = linear.status === "reconnect_required";
+  return (
+    <Notice
+      tone={reconnect ? "negative" : "neutral"}
+      action={
+        onOpenSettings && (
+          <button className="button compact" type="button" onClick={onOpenSettings}>
+            Open Settings
+          </button>
+        )
+      }
+    >
+      {reconnect
+        ? "Linear needs to be reconnected. Polling and Conductor launches are paused."
+        : "Linear is not connected. Connect it to poll Roots and start Conductors."}
+    </Notice>
+  );
+}
+
+export function OverviewPage({ view, headingRef, onOpenConductors, onOpenSettings, onCommand }: {
   view: DesktopOverviewView;
   headingRef: RefObject<HTMLHeadingElement>;
   onOpenConductors?: () => void;
+  onOpenSettings?: () => void;
   onCommand: CommandHandler;
 }) {
   const running = view.roots.filter(({ status }) => status === "running").length;
@@ -23,6 +52,7 @@ export function OverviewPage({ view, headingRef, onOpenConductors, onCommand }: 
     <>
       <PageHeading title="Overview" description="Bindings and Root activity at a glance." headingRef={headingRef} />
       <div className="page-stack">
+        <LinearGuidance linear={view.linear} onOpenSettings={onOpenSettings} />
         <section className="panel" aria-labelledby="overview-summary-heading">
           <div className="section-heading">
             <h2 id="overview-summary-heading">Desktop summary</h2>
