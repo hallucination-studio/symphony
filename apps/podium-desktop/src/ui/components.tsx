@@ -149,21 +149,38 @@ export function StaleNote({ observedAt }: { observedAt: string }) {
 }
 
 /** Inline command feedback; color is always paired with an icon and text. */
-export function Notice({ tone, children }: { tone: "negative" | "positive"; children: ReactNode }) {
+export function Notice({
+  tone,
+  children,
+  action,
+}: {
+  tone: "negative" | "positive" | "neutral";
+  children: ReactNode;
+  action?: ReactNode | undefined;
+}) {
+  const role = tone === "negative" ? "alert" : tone === "positive" ? "status" : undefined;
   return (
-    <p className="notice" data-tone={tone} role={tone === "negative" ? "alert" : "status"}>
-      {tone === "negative" ? (
+    <p className="notice" data-tone={tone} {...(role ? { role } : {})}>
+      {tone === "negative" && (
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
           <circle cx="8" cy="8" r="6.25" />
           <path d="M8 4.75v3.5M8 10.75h.01" />
         </svg>
-      ) : (
+      )}
+      {tone === "positive" && (
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" className="notice-check">
           <circle cx="8" cy="8" r="6.25" />
           <path d="M5.25 8.25l1.75 1.75 3.75-3.75" />
         </svg>
       )}
-      {children}
+      {tone === "neutral" && (
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
+          <circle cx="8" cy="8" r="6.25" />
+          <path d="M8 7.25v3.5M8 4.75h.01" />
+        </svg>
+      )}
+      <span className="notice-body">{children}</span>
+      {action}
     </p>
   );
 }

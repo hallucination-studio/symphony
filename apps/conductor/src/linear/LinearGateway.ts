@@ -1,7 +1,7 @@
 import type { IssueStatus } from "../contracts/identity.js";
-import type { LinearComment, LinearIssue } from "../contracts/task-management.js";
+import type { LinearComment, LinearIssue, LinearReaction, LinearReactionEmoji } from "../contracts/task-management.js";
 
-export type { LinearComment, LinearIssue } from "../contracts/task-management.js";
+export type { LinearComment, LinearIssue, LinearReaction, LinearReactionEmoji } from "../contracts/task-management.js";
 
 export interface LinearWorkflowState {
   readonly id: string;
@@ -41,11 +41,14 @@ export interface LinearGateway {
   list_team_states(team_id: string): Promise<readonly LinearWorkflowState[]>;
   create_workflow_state(request: LinearCreateWorkflowStateRequest): Promise<LinearWorkflowState>;
   list_root_comments_after(root_id: string, cursor?: string): Promise<readonly LinearComment[]>;
+  list_comment_replies_after(comment_id: string, cursor?: string): Promise<readonly LinearComment[]>;
   list_unfinished_descendants(root_id: string): Promise<readonly LinearUnfinishedDescendant[]>;
   create_issue(request: LinearCreateIssueRequest): Promise<LinearIssue>;
   update_issue_status(issue_id: string, status_id: string): Promise<void>;
   update_issue_description(issue_id: string, description: string): Promise<void>;
   create_comment(issue_id: string, body: string): Promise<LinearComment>;
+  create_comment_reply(issue_id: string, comment_id: string, body: string): Promise<LinearComment>;
+  create_comment_reaction(reply_id: string, emoji: LinearReactionEmoji): Promise<LinearReaction>;
   upload_file(
     filename: string,
     content_type: LinearUploadContentType,

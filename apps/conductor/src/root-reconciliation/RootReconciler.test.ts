@@ -36,11 +36,13 @@ async function fixture() {
         artifact_url: "https://linear.invalid/upload/critique.json",
       },
       comment_cursor: "comment-0",
+      architecture_decisions: [],
     },
     new_root_comments: [
-      { id: "comment-1", issue_id: "root-id", body: "Preserve error locations.", creator_id: "user-id", created_at: "2026-08-05T01:00:00Z" },
-      { id: "comment-2", issue_id: "root-id", body: "Do not add recovery.", creator_id: "user-id", created_at: "2026-08-05T01:01:00Z" },
+      { id: "comment-1", issue_id: "root-id", parent_id: null, body: "Preserve error locations.", creator_id: "user-id", created_at: "2026-08-05T01:00:00Z" },
+      { id: "comment-2", issue_id: "root-id", parent_id: null, body: "Do not add recovery.", creator_id: "user-id", created_at: "2026-08-05T01:01:00Z" },
     ],
+    human_action_replies: [],
     worktree_summary: {
       status: "available", created: [], updated: [], deleted: [], insertions: 0, deletions: 0,
     },
@@ -91,9 +93,19 @@ const completeReport = [
 
 const humanReport = [
   "### Reason", "The requested API boundary is ambiguous.", "",
-  "### Question", "Which caller owns it?", "",
+  "### Question", "Choose one caller boundary.", "",
   "### Next Step", "Wait for an explicit Root comment.",
 ].join("\n");
+
+const humanQuestions = JSON.stringify([
+  {
+    question: "Which caller owns the boundary?",
+    options: [
+      { key: "root", label: "Root owns it", consequence: "Keep the decision in Root Reconcile." },
+      { key: "cycle", label: "Cycle owns it", consequence: "Create a bounded Cycle for the decision." },
+    ],
+  },
+]);
 
 test("Prepare adopts the exact preferred Git root without launching an Agent", async () => {
   const world = await fixture();
@@ -149,9 +161,9 @@ test("returns one Cycle draft from Root-owned inputs without exposing workspace 
   assert.equal(launches[0]?.prompt.includes("Preserve error locations."), true);
   assert.equal(launches[0]?.prompt.includes("Do not add recovery."), true);
   assert.equal(launches[0]?.prompt.includes("## Latest Critic Result"), false);
-  assert.equal(launches[0]?.prompt.includes("decision: cycle\n\n## Objective"), true);
-  assert.equal(launches[0]?.prompt.includes("decision: complete\n\n## Summary"), true);
-  assert.equal(launches[0]?.prompt.includes("decision: needs_human\n\n## Reason"), true);
+  assert.equal(launches[0]?.prompt.includes("decision: cycle\n\n## Reply Disposition\n"), true);
+  assert.equal(launches[0]?.prompt.includes("decision: complete\n\n## Reply Disposition\n"), true);
+  assert.equal(launches[0]?.prompt.includes("decision: needs_human\n\n## Reply Disposition\n"), true);
 });
 
 test("includes only the compact latest Critic checkpoint without child DAG content", async () => {
@@ -176,6 +188,7 @@ test("includes only the compact latest Critic checkpoint without child DAG conte
       root: world.request.root,
       root_state: { ...world.request.root_state, latest_critique },
       new_root_comments: world.request.new_root_comments,
+      human_action_replies: world.request.human_action_replies,
       worktree_summary: world.request.worktree_summary,
     });
     const launches: PerformerLaunchRequest[] = [];
@@ -214,21 +227,64 @@ test("parses completion and human decisions without a repair turn", async () => 
 
   const humanLaunches: PerformerLaunchRequest[] = [];
   const human = createReconciler(performerWith(
-    `decision: needs_human\n\n## Reason\nThe requested API boundary is ambiguous.\n\n## Question\nWhich caller owns it?\n\n## Report\n${humanReport}\n`,
+    `decision: needs_human\n\n## Reason\nThe requested API boundary is ambiguous.\n\n## Questions\n\`\`\`json\n${humanQuestions}\n\`\`\`\n\n## Report\n${humanReport}\n`,
     humanLaunches,
   ), world.runDirectory);
   assert.deepEqual((await human.reconcile(world.request)).decision, {
-    kind: "needs_human", reason: "The requested API boundary is ambiguous.", question: "Which caller owns it?", report: humanReport,
+    kind: "needs_human", reason: "The requested API boundary is ambiguous.",
+    questions: [{
+      question: "Which caller owns the boundary?",
+      options: [
+        { key: "root", label: "Root owns it", consequence: "Keep the decision in Root Reconcile." },
+        { key: "cycle", label: "Cycle owns it", consequence: "Create a bounded Cycle for the decision." },
+      ],
+    }],
+    report: humanReport,
   });
   assert.equal(humanLaunches.length, 1);
 
   const unknownSection = createReconciler(performerWith(
-    `decision: needs_human\n\n## Reason\nThe boundary is ambiguous.\n\n## Bogus\nIgnored content.\n\n## Report\n${humanReport}\n`,
+    `decision: needs_human\n\n## Reason\nThe boundary is ambiguous.\n\n## Questions\n\`\`\`json\n${humanQuestions}\n\`\`\`\n\n## Bogus\nIgnored content.\n\n## Report\n${humanReport}\n`,
     [],
   ), world.runDirectory);
-  const rejected = (await unknownSection.reconcile(world.request)).decision;
-  assert.equal(rejected.kind, "needs_human");
-  assert.equal(rejected.kind === "needs_human" && rejected.reason, "invalid_root_reconcile_response");
+  await assert.rejects(unknownSection.reconcile(world.request), /invalid_root_reconcile_response/u);
+});
+
+test("requires and classifies the whole reply batch", async () => {
+  const world = await fixture();
+  const resumedRequest = parseRootReconcileRequest({
+    ...world.request,
+    root_state: {
+      ...world.request.root_state,
+      current_phase: "NeedsHuman",
+      human_action: { comment_id: "human-action-1" },
+    },
+    human_action_replies: [{
+      id: "human-reply-1", issue_id: "root-id", parent_id: "human-action-1",
+      body: "Choose strict parsing.", creator_id: "user-id", created_at: "2026-08-05T02:00:00Z",
+    }],
+  });
+  const acceptedLaunches: PerformerLaunchRequest[] = [];
+  const accepted = createReconciler(performerWith(
+    `decision: complete\n\n## Reply Disposition\naccepted\n\n## Architecture Decisions\n\`\`\`json\n[{"title":"Preserve strict parsing","decision":"Reject ambiguous tokens.","rationale":"The human selected strict parsing.","consequences":["Recovery remains out of scope."]}]\n\`\`\`\n\n## Summary\nTrusted state is complete.\n\n## Delivery\n{"kind":"files","workspace_path":"${world.workspace}","files":["result.txt"]}\n\n## Report\n${completeReport}\n`,
+    acceptedLaunches,
+  ), world.runDirectory);
+  assert.equal((await accepted.reconcile(resumedRequest)).decision.kind, "complete");
+
+  const rejectedLaunches: PerformerLaunchRequest[] = [];
+  const rejected = createReconciler(performerWith(
+    `decision: needs_human\n\n## Reply Disposition\nrejected\n\n## Reason\nThe reply batch conflicts.\n\n## Questions\n\`\`\`json\n${humanQuestions}\n\`\`\`\n\n## Report\n${humanReport}\n`,
+    rejectedLaunches,
+  ), world.runDirectory);
+  const rejectedDecision = (await rejected.reconcile(resumedRequest)).decision;
+  assert.equal(rejectedDecision.kind, "needs_human");
+  assert.equal(rejectedDecision.kind === "needs_human" && rejectedDecision.reply_disposition, "rejected");
+
+  const missingDisposition = createReconciler(performerWith(
+    `decision: complete\n\n## Summary\nTrusted state is complete.\n\n## Delivery\n{"kind":"files","workspace_path":"${world.workspace}","files":["result.txt"]}\n\n## Report\n${completeReport}\n`,
+    [],
+  ), world.runDirectory);
+  await assert.rejects(missingDisposition.reconcile(resumedRequest), /invalid_reply_disposition/u);
 });
 
 test("omits model and reasoning so Root Reconcile can use local Codex defaults", async () => {
@@ -249,7 +305,7 @@ test("omits model and reasoning so Root Reconcile can use local Codex defaults",
   assert.equal(launches[0]?.reasoning_effort, undefined);
 });
 
-test("publishes the current process message without a phase prefix or cause traversal", async () => {
+test("throws the current process message without inventing a human question", async () => {
   const world = await fixture();
   const directMessage = "root process detail that is intentionally longer than fifty characters";
   const failed = createReconciler({
@@ -259,10 +315,7 @@ test("publishes the current process message without a phase prefix or cause trav
       sanitized_reason: directMessage,
     }),
   }, world.runDirectory);
-  const failedOutcome = await failed.reconcile(world.request);
-  assert.equal(failedOutcome.decision.kind, "needs_human");
-  assert.equal(failedOutcome.decision.kind === "needs_human" && failedOutcome.decision.reason, directMessage.slice(0, 50));
-  assert.equal(failedOutcome.process?.launch_status, "start_failed");
+  await assert.rejects(failed.reconcile(world.request), new RegExp(directMessage.slice(0, 50), "u"));
 
   const credentialShaped = createReconciler({
     launch: async () => ({
@@ -270,9 +323,7 @@ test("publishes the current process message without a phase prefix or cause trav
       sanitized_reason: "api_key=secret-value-that-must-not-escape",
     }),
   }, world.runDirectory);
-  const credentialDecision = (await credentialShaped.reconcile(world.request)).decision;
-  assert.equal(credentialDecision.kind, "needs_human");
-  assert.equal(credentialDecision.kind === "needs_human" && credentialDecision.reason, "Process failed");
+  await assert.rejects(credentialShaped.reconcile(world.request), /Process failed/u);
 
   const thrownMessage = "native reconciliation failure that is longer than fifty characters";
   const thrown = createReconciler({
@@ -280,15 +331,10 @@ test("publishes the current process message without a phase prefix or cause trav
       throw new Error(thrownMessage, { cause: new Error("provider cause must remain private") });
     },
   }, world.runDirectory);
-  const thrownDecision = (await thrown.reconcile(world.request)).decision;
-  assert.equal(thrownDecision.kind, "needs_human");
-  assert.equal(thrownDecision.kind === "needs_human" && thrownDecision.reason, thrownMessage.slice(0, 50));
-  assert.equal(thrownDecision.kind === "needs_human" && thrownDecision.reason.includes("provider cause"), false);
+  await assert.rejects(thrown.reconcile(world.request), new RegExp(thrownMessage.slice(0, 50), "u"));
 
   const malformed = createReconciler(performerWith("I think we should continue.", []), world.runDirectory);
-  const malformedDecision = (await malformed.reconcile(world.request)).decision;
-  assert.equal(malformedDecision.kind, "needs_human");
-  assert.equal(malformedDecision.kind === "needs_human" && malformedDecision.reason, "invalid_root_reconcile_response");
+  await assert.rejects(malformed.reconcile(world.request), /invalid_root_reconcile_response/u);
 
   const invalidUtf8 = createReconciler({
     async launch(request) {
@@ -301,12 +347,7 @@ test("publishes the current process message without a phase prefix or cause trav
       };
     },
   }, world.runDirectory);
-  const invalidUtf8Decision = (await invalidUtf8.reconcile(world.request)).decision;
-  assert.equal(invalidUtf8Decision.kind, "needs_human");
-  assert.equal(
-    invalidUtf8Decision.kind === "needs_human" && invalidUtf8Decision.reason,
-    "invalid_root_reconcile_response",
-  );
+  await assert.rejects(invalidUtf8.reconcile(world.request), /invalid_root_reconcile_response/u);
 
   const missingDiagnostics = createReconciler({
     launch: async (request) => {
@@ -314,7 +355,5 @@ test("publishes the current process message without a phase prefix or cause trav
       return { launch_status: "exited", exit_code: 0, duration_ms: 1, final_response_ref: request.final_response_path };
     },
   }, world.runDirectory);
-  const missingDecision = (await missingDiagnostics.reconcile(world.request)).decision;
-  assert.equal(missingDecision.kind, "needs_human");
-  assert.equal(missingDecision.kind === "needs_human" && missingDecision.reason, "Diagnostic capture failed");
+  await assert.rejects(missingDiagnostics.reconcile(world.request), /Diagnostic capture failed/u);
 });

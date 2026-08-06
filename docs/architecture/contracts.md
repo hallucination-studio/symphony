@@ -34,6 +34,8 @@ CycleIssueId = provider string
 ArtistIssueId = provider string
 CriticIssueId = provider string
 CommentId = provider string
+AdrNumber = ADR-NNNN, mechanically assigned per Root
+LocalTimestamp = YYYY-MM-DD HH:mm:ss GMT+/-HH:MM
 AgentKind = codex
 
 LinearStateType = unstarted | started | completed | canceled
@@ -156,7 +158,35 @@ LinearWorkflowState {
 }
 
 LinearComment {
-  id, issue_id, body, creator_id, created_at
+  id, issue_id, parent_id, body, creator_id, created_at
+}
+
+HumanActionQuestion {
+  question,
+  options[{ key, label, consequence }]
+}
+
+HumanActionState {
+  comment_id: CommentId,
+  reply_cursor?: CommentId
+}
+
+ArchitectureDecision {
+  id: AdrNumber,
+  title,
+  decision,
+  rationale,
+  consequences[],
+  source_action_comment_id: CommentId,
+  source_reply_ids[],
+  decided_at: LocalTimestamp
+}
+
+ArchitectureDecisionDraft {
+  title,
+  decision,
+  rationale,
+  consequences[]
 }
 
 LinearUploadedFile {
@@ -181,6 +211,8 @@ RootState {
   latest_critique?: CritiqueCheckpoint,
   harness_feedback?,
   comment_cursor?,
+  human_action?: HumanActionState,
+  architecture_decisions[]: ArchitectureDecision,
   delivery?: Delivery,
   token_usage?: PerformerTokenUsage
 }
@@ -211,6 +243,32 @@ Root Reconcile. Complete report detail remains in the local/uploaded artifact.
 The Cycle DAG and child comments are never reconstructed to fill or replace it.
 `harness_feedback`
 is one current bounded operational warning, not history or verified progress.
+`human_action` is present only while the Root has one unresolved Human Action
+request. Its `comment_id` identifies the exact Harness question and
+`reply_cursor` locates the last classified direct reply. A
+normal top-level Root comment is ordinary Inbox input and cannot answer this
+thread, set `reply_disposition`, or clear `human_action`. A missing
+`architecture_decisions[]` field is invalid; an empty array is the explicit
+no-decision state. Accepted decisions append to this array and are never
+edited, renumbered, or removed.
+
+`ArchitectureDecision` is a compact semantic record, not an ADR document. The
+Conductor assigns the next `ADR-NNN` mechanically from Root State, records the
+runtime-local `YYYY-MM-DD HH:mm:ss GMT+/-HH:MM` value, and copies the action and
+reply IDs. Root Reconcile provides only title, decision, rationale, and
+consequences. No repository ADR file, compatibility alias, or second decision
+store exists.
+
+This is a hard switch: there is no legacy flat Root-reply interpretation and no
+compatibility form for a missing `human_action` or `architecture_decisions[]`
+boundary. Providers or callers that cannot expose the exact direct-reply thread
+fail closed before a Human Action can be accepted.
+
+When a direct reply batch is accepted, the next Reconcile result includes one
+or more `ArchitectureDecisionDraft` values with its next semantic decision.
+Conductor completes their mechanical fields and persists them only through
+`RootState.architecture_decisions[]`. If the next decision creates a Cycle,
+Cycle Runner receives the exact append-only array as an immutable snapshot.
 External responses are validated at the Gateway. Root Reconcile receives the
 Root, Root State, comments after `comment_cursor`, and a typed mechanical
 whole-worktree summary containing only paths and line deltas; it never receives
@@ -230,7 +288,8 @@ CycleSpec {
   objective,
   acceptance,
   boundaries,
-  consumed_comment_ids[]
+  consumed_comment_ids[],
+  architecture_decisions[]: ArchitectureDecision
 }
 ```
 
@@ -240,6 +299,7 @@ CycleSpec {
 | acceptance | one fresh read-only Critic can check it against the real workspace |
 | boundaries | explicit in-scope and out-of-scope limits |
 | consumed comments | IDs only; bodies are already copied into the rendered Cycle contract where relevant |
+| architecture decisions | immutable snapshot of every accepted Root decision known before Cycle creation; records retain mechanical ADR number, local time, and source IDs |
 | frozen family | harness never updates Cycle title/description; it appends one terminal report to each Artist/Critic description |
 
 Cycle titles use `[Cycle NNN] <objective>` and are capped at 80 characters in
@@ -247,8 +307,12 @@ total. Artist and Critic titles are exactly `[Artist] Cycle NNN` and
 `[Critic] Cycle NNN`; role titles do not repeat or reinterpret the objective.
 
 Task state is not duplicated into `CycleSpec`; Cycle Runner supplies the frozen
-Root State snapshot to Artist and Critic. The contract has no artist route,
-Critic-reference selection, graph, revision chain, or relation subsystem.
+Root State snapshot to Artist and Critic. `architecture_decisions[]` is the
+intentional exception: it is copied at Cycle creation so the accepted human
+choices that shaped this Cycle remain auditable even after Root State advances.
+The snapshot is immutable and cannot be amended by a later reply or role. The
+contract has no artist route, Critic-reference selection, graph, revision chain,
+or relation subsystem.
 
 ## Root Reconcile contract
 
@@ -257,18 +321,26 @@ RootReconcileRequest {
   root,
   root_state,
   new_root_comments[],
+  human_action_replies[],
   worktree_summary:
     | { status: available, created[], updated[], deleted[], insertions, deletions }
     | { status: unavailable, reason }
 }
 
 RootReconcileDecision =
-  | { kind: create_cycle, cycle: CycleSpec, report }
-  | { kind: complete, summary, delivery: Delivery, report }
-  | { kind: needs_human, reason, question?, report }
+  | { kind: create_cycle, cycle: CycleSpec, architecture_decisions[]?, report }
+  | { kind: complete, summary, delivery: Delivery, architecture_decisions[]?, report }
+  | { kind: needs_human, reason, questions[1..n], reply_disposition?, architecture_decisions[]?, report }
 
 RootReconcileOutcome { decision, process? }
 ```
+
+`architecture_decisions` is present and non-empty only when the exact direct
+reply batch was freshly read and accepted as a whole. These are semantic drafts;
+Conductor adds IDs, source comment IDs, and local timestamps. A rejected batch
+has no decision drafts. Ordinary top-level Root comments remain
+`new_root_comments[]` Inbox input and never satisfy a pending Human Action or
+set `reply_disposition`.
 
 Reconcile has workspace-write access for Prepare and Delivery, but no Linear
 capability. Conductor removes the exact managed Root snapshot block before

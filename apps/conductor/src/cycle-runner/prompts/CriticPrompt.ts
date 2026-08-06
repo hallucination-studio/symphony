@@ -13,6 +13,7 @@ export function renderCriticPrompt(
     objective: spec.objective,
     acceptance: spec.acceptance,
     boundaries: spec.boundaries,
+    architecture_decisions: spec.architecture_decisions,
   }, null, 2));
   const trustedState = renderRuntimeContext("PRIOR_TRUSTED_STATE", state.task_state_markdown);
   const processFacts = renderRuntimeContext("ARTIST_PROCESS_FACTS", JSON.stringify({
