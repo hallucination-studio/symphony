@@ -10,8 +10,14 @@ import {
   cleanupGoldenRemote,
   createLinearRoot,
   fetchGoldenCriticResult,
+  graphql,
   MAX_GOLDEN_ISSUE_TREE_DEPTH,
   MAX_DIAGNOSTIC_STREAM_BYTES,
+  validateGoldenNeedsHumanRejectedBatch,
+  validateGoldenNeedsHumanQuestion,
+  validateGoldenNeedsHumanReply,
+  validateGoldenNeedsHumanSupplement,
+  validateGoldenNeedsHumanUnanswered,
   validateGoldenResultComments,
   validateGoldenVisibleTree,
 } from "./golden-fixture.mjs";
@@ -25,6 +31,18 @@ import {
   runGoldenScenario,
 } from "./golden-runner.mjs";
 import { formatLocalTimestamp } from "./linear-driver.mjs";
+
+test("golden Linear requests preserve the complete HTTP error without retrying", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    graphql("fixture-token", "query Golden { viewer { id } }", {}, async () => {
+      attempts += 1;
+      return { ok: false, status: 400, statusText: "Bad Request: invalid reactions selection" };
+    }),
+    /^Error: Bad Request: invalid reactions selection$/u,
+  );
+  assert.equal(attempts, 1);
+});
 
 test("golden completion requires a pull request and rejects temporary file delivery", () => {
   assert.equal(requireGoldenPullRequest({
@@ -128,11 +146,13 @@ test("golden launch omits generic --agent and forwards role options independentl
       SYMPHONY_GOLDEN_MAX_CYCLES: "3",
     },
     root: "ENG-1",
+    workspace: "/tmp/root-workspace",
     runDirectory: "/tmp/root-run",
   });
   assert.deepEqual(args, [
     "run",
     "--linear-root", "ENG-1",
+    "--workspace", "/tmp/root-workspace",
     "--dir", "/tmp/root-run",
     "--max-cycles", "3",
     "--reconcile-agent", "codex",
@@ -146,14 +166,228 @@ test("golden launch omits generic --agent and forwards role options independentl
   assert.equal(args.includes("--agent"), false);
 });
 
-test("golden launch leaves workspace preparation to Root Reconcile", () => {
+test("golden passes an unprepared preferred workspace to Root Reconcile", () => {
   const args = resolveGoldenLaunchArguments({
-    environment: {}, root: "ENG-1", workspace: "/tmp/must-be-ignored", runDirectory: "/tmp/root-run",
+    environment: {}, root: "ENG-1", workspace: "/tmp/root-workspace", runDirectory: "/tmp/root-run",
   });
   assert.deepEqual(args, [
-    "run", "--linear-root", "ENG-1", "--dir", "/tmp/root-run", "--max-cycles", "4",
+    "run", "--linear-root", "ENG-1", "--workspace", "/tmp/root-workspace",
+    "--dir", "/tmp/root-run", "--max-cycles", "4",
   ]);
-  assert.equal(args.includes("--workspace"), false);
+});
+
+test("golden validates one concrete Needs Human question and its accepted reply", () => {
+  const questionBody = [
+    "# Symphony Harness: Human Action",
+    "",
+    "## Reason",
+    "",
+    "The output filename needs a human choice.",
+    "",
+    "## Questions",
+    "",
+    "### 1. Which output filename should this run create?",
+    "",
+    "- **default_file. Use the default filename**: Create the requested golden file.",
+    "- **alternate_file. Use the alternate filename**: Create the alternate golden file.",
+  ].join("\n");
+  const question = { id: "question", body: questionBody };
+  const reply = {
+    id: "reply",
+    body: "I choose option default_file.",
+    parent: { id: "question" },
+    reactions: [{ emoji: "white_check_mark" }],
+  };
+  assert.deepEqual(
+    validateGoldenNeedsHumanQuestion([question], ["default_file", "alternate_file"]).questions[0].options.map(({ key }) => key),
+    ["default_file", "alternate_file"],
+  );
+  assert.equal(validateGoldenNeedsHumanReply([question, reply], "reply", reply.body), reply);
+  assert.throws(
+    () => validateGoldenNeedsHumanQuestion([question, { id: "second", body: questionBody }]),
+    /golden_needs_human_question_count_invalid/u,
+  );
+  assert.throws(
+    () => validateGoldenNeedsHumanReply([question, {
+      ...reply,
+      reactions: [{ emoji: "x" }],
+    }], "reply"),
+    /golden_needs_human_reply_not_accepted/u,
+  );
+});
+
+test("golden runner accepts Needs Human once, posts the reply, then requires done", async () => {
+  const launches = [];
+  const fixtureEvents = [];
+  const terminalOutputs = [
+    { event: "conductor_stopped", status: "needs_human", reason: "Choose the output filename" },
+    {
+      event: "conductor_stopped",
+      status: "done",
+      delivery: {
+        kind: "pull_request",
+        url: "https://github.com/acme/repo/pull/8",
+        branch: "root/ENG-8",
+      },
+    },
+  ];
+  const fixture = {
+    root: { identifier: "ENG-8" },
+    runDirectory: "/tmp/golden-needs-human-run",
+    async verifyNeedsHumanBoundary() { fixtureEvents.push("inspect"); },
+    async replyToNeedsHuman() { fixtureEvents.push("reply"); },
+    async verifyVisibleCompletion() { fixtureEvents.push("complete"); },
+    async cleanup(pullRequestUrl, options) {
+      fixtureEvents.push({ cleanup: pullRequestUrl, options });
+    },
+  };
+  const result = await runGoldenScenario({
+    scenario: "single-cycle-human-action",
+    environment: {
+      SYMPHONY_RUN_GOLDEN: "1",
+      LINEAR_API_KEY: "product-linear-token",
+      SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-linear-token",
+      SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
+    },
+    fixtureFactory: async () => fixture,
+    executeCommand: async (_command, args) => {
+      launches.push(args);
+      return { stdout: Buffer.from(`${JSON.stringify(terminalOutputs.shift())}\n`), stderr: Buffer.alloc(0) };
+    },
+  });
+  assert.deepEqual(result, {
+    status: "passed",
+    layer: "golden",
+    result: { status: "done", root: "ENG-8", scenario: "single-cycle-human-action" },
+  });
+  assert.equal(launches.length, 2);
+  assert.deepEqual(fixtureEvents, ["inspect", "reply", "complete"]);
+});
+
+test("golden rejects a reply batch in one thread, then accepts a supplement", async () => {
+  const launches = [];
+  const fixtureEvents = [];
+  const terminalOutputs = [
+    { event: "conductor_stopped", status: "needs_human", reason: "Choose the output filename" },
+    { event: "conductor_stopped", status: "needs_human", reason: "Choose one option" },
+    {
+      event: "conductor_stopped",
+      status: "done",
+      delivery: {
+        kind: "pull_request",
+        url: "https://github.com/acme/repo/pull/9",
+        branch: "root/ENG-9",
+      },
+    },
+  ];
+  const fixture = {
+    root: { identifier: "ENG-9" },
+    runDirectory: "/tmp/golden-rejected-run",
+    async verifyNeedsHumanBoundary() { fixtureEvents.push("inspect"); },
+    async rejectNeedsHumanReplies() { fixtureEvents.push("reject"); },
+    async verifyRejectedNeedsHumanBoundary() { fixtureEvents.push("verify-rejection"); },
+    async replyToNeedsHuman() { fixtureEvents.push("supplement"); },
+    async verifyVisibleCompletion() { fixtureEvents.push("complete"); },
+    async cleanup(pullRequestUrl, options) { fixtureEvents.push({ cleanup: pullRequestUrl, options }); },
+  };
+  const result = await runGoldenScenario({
+    scenario: "human-action-rejected-supplement",
+    environment: {
+      SYMPHONY_RUN_GOLDEN: "1",
+      LINEAR_API_KEY: "product-linear-token",
+      SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-linear-token",
+      SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
+    },
+    fixtureFactory: async () => fixture,
+    executeCommand: async (_command, args) => {
+      launches.push(args);
+      return { stdout: Buffer.from(`${JSON.stringify(terminalOutputs.shift())}\n`), stderr: Buffer.alloc(0) };
+    },
+  });
+  assert.deepEqual(result, {
+    status: "passed",
+    layer: "golden",
+    result: { status: "done", root: "ENG-9", scenario: "human-action-rejected-supplement" },
+  });
+  assert.equal(launches.length, 3);
+  assert.deepEqual(fixtureEvents, ["inspect", "reject", "verify-rejection", "supplement", "complete"]);
+});
+
+test("golden unanswered Human Action ends passed at Needs Human without a second launch", async () => {
+  const launches = [];
+  const fixtureEvents = [];
+  const fixture = {
+    root: { identifier: "ENG-10" },
+    runDirectory: "/tmp/golden-unanswered-run",
+    async verifyNeedsHumanBoundary() { fixtureEvents.push("inspect"); },
+    async verifyUnansweredNeedsHuman() { fixtureEvents.push("verify-unanswered"); },
+    async cleanup(pullRequestUrl, options) { fixtureEvents.push({ cleanup: pullRequestUrl, options }); },
+  };
+  const result = await runGoldenScenario({
+    scenario: "human-action-unanswered",
+    environment: {
+      SYMPHONY_RUN_GOLDEN: "1",
+      LINEAR_API_KEY: "product-linear-token",
+      SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-linear-token",
+      SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
+    },
+    fixtureFactory: async () => fixture,
+    executeCommand: async (_command, args) => {
+      launches.push(args);
+      return { stdout: Buffer.from(`${JSON.stringify({
+        event: "conductor_stopped",
+        status: "needs_human",
+        reason: "Choose the output filename",
+      })}\n`), stderr: Buffer.alloc(0) };
+    },
+  });
+  assert.deepEqual(result, {
+    status: "passed",
+    layer: "golden",
+    result: { status: "needs_human", root: "ENG-10", scenario: "human-action-unanswered" },
+  });
+  assert.equal(launches.length, 1);
+  assert.deepEqual(fixtureEvents, ["inspect", "verify-unanswered"]);
+});
+
+test("golden thread validators require x for rejected replies and one accepted supplement", () => {
+  const reaction = (emoji) => [{ emoji }];
+  const question = { id: "action", body: "# Symphony Harness: Human Action\n\n## Questions\n\n### 1. Pick one\n\n- **A. First**: First consequence.\n- **B. Second**: Second consequence." };
+  const first = { id: "reply-1", body: "I reject both options.", parent: { id: "action" }, reactions: reaction("x") };
+  const second = { id: "reply-2", body: "Explain the trade-off.", parent: { id: "action" }, reactions: reaction("x") };
+  const followUp = {
+    id: "follow-up",
+    body: "# Symphony Harness: Human Action Follow-up\n\n## Questions\n\n### 1. Pick one\n\n- **A. First**: First consequence.\n- **B. Second**: Second consequence.",
+    parent: { id: "action" },
+    reactions: [],
+  };
+  const supplement = {
+    id: "reply-3",
+    body: "I choose A.",
+    parent: { id: "action" },
+    reactions: reaction("white_check_mark"),
+  };
+  const rejected = validateGoldenNeedsHumanRejectedBatch([question, first, second, followUp], [first.id, second.id]);
+  assert.equal(rejected.followUp.id, followUp.id);
+  assert.equal(validateGoldenNeedsHumanSupplement([question, first, second, followUp, supplement], supplement.id).id, supplement.id);
+  assert.throws(
+    () => validateGoldenNeedsHumanRejectedBatch([question, { ...first, reactions: reaction("white_check_mark") }, second, followUp]),
+    /golden_needs_human_rejection_not_marked/u,
+  );
+});
+
+test("golden unanswered validator rejects any reply, reaction, or child Cycle", () => {
+  const question = { id: "action", body: "# Symphony Harness: Human Action\n\n## Questions\n\n### 1. Pick one\n\n- **A. First**: First consequence.\n- **B. Second**: Second consequence.", parent: null, reactions: [] };
+  const issue = { state: { name: "Needs Human", type: "started" }, children: { nodes: [], pageInfo: { hasNextPage: false } } };
+  assert.equal(validateGoldenNeedsHumanUnanswered(issue, [question]).id, question.id);
+  assert.throws(
+    () => validateGoldenNeedsHumanUnanswered(issue, [question, { id: "reply", body: "I choose A.", parent: { id: "action" }, reactions: [] }]),
+    /golden_needs_human_unanswered_reply_invalid/u,
+  );
+  assert.throws(
+    () => validateGoldenNeedsHumanUnanswered({ ...issue, children: { nodes: [{ id: "cycle" }], pageInfo: { hasNextPage: false } } }, [question]),
+    /golden_needs_human_unanswered_state_invalid/u,
+  );
 });
 
 test("golden forwards only role credentials without fixture or generic secrets", () => {
@@ -207,6 +441,41 @@ test("golden runner reports blocked when product credentials are present but fix
     boundary: "golden",
     reason: "golden_fixture_credential_missing",
   });
+});
+
+test("golden aborts the active Conductor launch without cleaning the retained fixture", async () => {
+  const controller = new AbortController();
+  let launchSignal;
+  let cleanupCalls = 0;
+  const fixture = {
+    root: { identifier: "ENG-ABORT" },
+    workspace: "/tmp/golden-abort-workspace",
+    runDirectory: "/tmp/golden-abort-run",
+    async archiveFailure() { return undefined; },
+    async cleanup() { cleanupCalls += 1; },
+  };
+  const result = await runGoldenScenario({
+    environment: {
+      SYMPHONY_RUN_GOLDEN: "1",
+      LINEAR_API_KEY: "product-linear-token",
+      SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-linear-token",
+      SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
+    },
+    fixture,
+    signal: controller.signal,
+    executeCommand: async (_command, _args, options) => {
+      launchSignal = options.signal;
+      return new Promise((_, reject) => {
+        options.signal.addEventListener("abort", () => reject(new Error("launch_aborted")), { once: true });
+        setImmediate(() => controller.abort());
+      });
+    },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.ok(launchSignal instanceof AbortSignal);
+  assert.equal(launchSignal.aborted, true);
+  assert.equal(cleanupCalls, 0);
 });
 
 test("golden runner needs no preconfigured Root, workspace, or run directory", async () => {
@@ -280,6 +549,9 @@ test("golden creates the Root issue in the team's canonical Todo state", async (
     assert.equal(createRequest.variables.input.title, "[E2E] Symphony golden Root run-id");
     assert.equal(createRequest.variables.input.stateId, "todo-state-id");
     assert.equal(createRequest.variables.input.teamId, "team-id");
+    assert.match(createRequest.variables.input.description, /first Root Reconcile decision MUST be `needs_human`/u);
+    assert.match(createRequest.variables.input.description, /default_file/u);
+    assert.match(createRequest.variables.input.description, /alternate_file/u);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -702,7 +974,7 @@ test("golden rejects a non-standard upload host port before sending the token", 
   assert.equal(calls, 0);
 });
 
-test("golden archives raw failure context before fixture cleanup and returns only its private path", async (context) => {
+test("golden archives raw failure context without cleaning the retained fixture", async (context) => {
   const base = await mkdtemp(path.join(os.tmpdir(), "symphony-golden-diagnostic-test-"));
   const archiveBase = await mkdtemp(path.join(os.tmpdir(), "symphony-golden-diagnostic-archive-"));
   context.after(() => Promise.all([
@@ -717,8 +989,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
   const stdoutSecret = "child-stdout-secret-never-output";
   const stderrSecret = "child-stderr-secret-never-output";
   await writeFile(path.join(runDirectory, "agent.jsonl"), `${agentSecret}\n`, { encoding: "utf8", mode: 0o600 });
-  let cleaned = false;
-  let cleanupOptions;
+  let cleanupCalls = 0;
   const fixture = {
     workspace,
     runDirectory,
@@ -726,12 +997,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
       assert.equal(await readFile(path.join(runDirectory, "agent.jsonl"), "utf8"), `${agentSecret}\n`);
       return archiveGoldenFailure({ archiveRoot, ...context_, workspace, runDirectory });
     },
-    async cleanup(_pullRequestUrl, options) {
-      assert.equal(await readFile(path.join(runDirectory, "agent.jsonl"), "utf8"), `${agentSecret}\n`);
-      cleanupOptions = options;
-      cleaned = true;
-      await rm(base, { recursive: true, force: true });
-    },
+    async cleanup() { cleanupCalls += 1; },
   };
   const result = await runGoldenScenario({
     environment: {
@@ -748,8 +1014,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
       throw error;
     },
   });
-  assert.equal(cleaned, true);
-  assert.deepEqual(cleanupOptions, { archiveIssueTree: false, deliveryBranch: undefined });
+  assert.equal(cleanupCalls, 0);
   assert.equal(result.status, "failed");
   assert.equal(result.layer, "golden");
   assert.equal(result.reason, "conductor failure");
@@ -780,7 +1045,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
   assert.deepEqual(await readdir(archiveRoot), [path.basename(diagnosticRef)]);
 });
 
-test("golden archives the Linear fixture only after complete visible success", async () => {
+test("golden retains the Linear fixture after complete visible success", async () => {
   const cleanupCalls = [];
   const fixture = {
     workspace: "/tmp/golden-success-workspace",
@@ -801,10 +1066,7 @@ test("golden archives the Linear fixture only after complete visible success", a
   });
 
   assert.equal(result.status, "passed");
-  assert.deepEqual(cleanupCalls, [{
-    pullRequestUrl: undefined,
-    options: { archiveIssueTree: true, deliveryBranch: undefined },
-  }]);
+  assert.deepEqual(cleanupCalls, []);
 });
 
 test("golden diagnostic archives cap child streams and reject roots inside fixture-owned paths", async (context) => {
@@ -890,17 +1152,15 @@ test("golden issue cleanup stops at its depth bound before issuing archive mutat
   assert.equal(requests.length, MAX_GOLDEN_ISSUE_TREE_DEPTH + 1);
 });
 
-test("golden surfaces archive failure without leaking the archive error and still cleans up", async () => {
-  let cleaned = false;
+test("golden surfaces archive failure without leaking it or cleaning the fixture", async () => {
+  let cleanupCalls = 0;
   const fixture = {
     workspace: "/tmp/golden-diagnostic-workspace",
     runDirectory: "/tmp/golden-diagnostic-run",
     async archiveFailure() {
       throw new Error("archive secret must stay private");
     },
-    async cleanup() {
-      cleaned = true;
-    },
+    async cleanup() { cleanupCalls += 1; },
   };
   const result = await runGoldenScenario({
     environment: {
@@ -912,7 +1172,7 @@ test("golden surfaces archive failure without leaking the archive error and stil
     fixture,
     operation: async () => { throw new Error("child secret must stay private"); },
   });
-  assert.equal(cleaned, true);
+  assert.equal(cleanupCalls, 0);
   assert.deepEqual(result, {
     status: "failed",
     layer: "golden",

@@ -28,6 +28,16 @@ import {
 } from "./validation.js";
 import { parseCommentId } from "./identity.js";
 import { parseDelivery, type Delivery, type RootWorkspace } from "./workspace.js";
+import {
+  parseArchitectureDecision,
+  parseArchitectureDecisionDraft,
+  parseHumanActionState,
+  type ArchitectureDecision,
+  type ArchitectureDecisionDraft,
+  type HumanActionState,
+} from "./architecture.js";
+
+export type { ArchitectureDecision, ArchitectureDecisionDraft, HumanActionState } from "./architecture.js";
 
 export interface RootState {
   readonly workspace_path: string;
@@ -38,6 +48,8 @@ export interface RootState {
   readonly latest_critique?: CritiqueCheckpoint | undefined;
   readonly harness_feedback?: MarkdownText | undefined;
   readonly comment_cursor?: string | undefined;
+  readonly human_action?: HumanActionState | undefined;
+  readonly architecture_decisions: readonly ArchitectureDecision[];
   readonly delivery?: Delivery | undefined;
   readonly token_usage?: PerformerTokenUsage | undefined;
 }
@@ -47,6 +59,7 @@ export interface RootReconcileRequest {
   readonly root: LinearIssue;
   readonly root_state: RootState;
   readonly new_root_comments: readonly LinearComment[];
+  readonly human_action_replies: readonly LinearComment[];
   readonly worktree_summary: RootWorktreeSummary;
 }
 
@@ -63,6 +76,25 @@ export interface RootCycleDraft {
   readonly objective: MarkdownText;
   readonly acceptance: MarkdownText;
   readonly boundaries: MarkdownText;
+}
+
+export interface RootHumanQuestionOption {
+  readonly key: string;
+  readonly label: MarkdownText;
+  readonly consequence: MarkdownText;
+}
+
+export interface RootHumanQuestion {
+  readonly question: MarkdownText;
+  readonly options: readonly RootHumanQuestionOption[];
+}
+
+export type RootReplyDisposition = "accepted" | "rejected";
+
+
+export interface RootReconcileDecisionContext {
+  readonly current_phase: string;
+  readonly has_human_action_replies: boolean;
 }
 
 export interface RootWorktreeFileChange {
@@ -86,12 +118,27 @@ export type RootWorktreeSummary =
     };
 
 export type RootReconcileDecision =
-  | { readonly kind: "create_cycle"; readonly cycle: RootCycleDraft; readonly report: MarkdownText }
-  | { readonly kind: "complete"; readonly summary: MarkdownText; readonly report: MarkdownText; readonly delivery: Delivery }
+  | {
+      readonly kind: "create_cycle";
+      readonly cycle: RootCycleDraft;
+      readonly report: MarkdownText;
+      readonly reply_disposition?: RootReplyDisposition | undefined;
+      readonly architecture_decisions?: readonly ArchitectureDecisionDraft[] | undefined;
+    }
+  | {
+      readonly kind: "complete";
+      readonly summary: MarkdownText;
+      readonly report: MarkdownText;
+      readonly delivery: Delivery;
+      readonly reply_disposition?: RootReplyDisposition | undefined;
+      readonly architecture_decisions?: readonly ArchitectureDecisionDraft[] | undefined;
+    }
   | {
       readonly kind: "needs_human";
       readonly reason: MarkdownText;
-      readonly question?: MarkdownText;
+      readonly questions: readonly RootHumanQuestion[];
+      readonly reply_disposition?: RootReplyDisposition | undefined;
+      readonly architecture_decisions?: readonly ArchitectureDecisionDraft[] | undefined;
       readonly report: MarkdownText;
     };
 
@@ -111,11 +158,13 @@ const ROOT_STATE_REQUIRED_KEYS = [
   "root_branch",
   "current_phase",
   "task_state_markdown",
+  "architecture_decisions",
 ] as const;
 const ROOT_STATE_OPTIONAL_KEYS = [
   "latest_critique",
   "harness_feedback",
   "comment_cursor",
+  "human_action",
   "delivery",
   "token_usage",
 ] as const;
@@ -136,12 +185,15 @@ function optionalMarkdown(value: unknown, code: string): MarkdownText | undefine
   return parseMarkdownText(value, code);
 }
 
+
 export function parseRootState(value: unknown): RootState {
   const record = asRecord(value, "invalid_root_state");
   assertKeysWithOptional(record, ROOT_STATE_REQUIRED_KEYS, ROOT_STATE_OPTIONAL_KEYS);
   const latestCritic = parseOptional(record.latest_critique, parseCritiqueCheckpoint);
   const harnessFeedback = optionalMarkdown(record.harness_feedback, "invalid_harness_feedback");
   const commentCursor = parseOptional(record.comment_cursor, parseCommentId);
+  const humanAction = parseOptional(record.human_action, parseHumanActionState);
+  const architectureDecisions = parseArray(record.architecture_decisions, parseArchitectureDecision);
   const delivery = parseOptional(record.delivery, parseDelivery);
   const tokenUsage = parseOptional(record.token_usage, parsePerformerTokenUsage);
   const parsed = {
@@ -150,9 +202,11 @@ export function parseRootState(value: unknown): RootState {
     root_branch: parseBoundedString(record.root_branch, "invalid_root_branch", 256),
     current_phase: parseBoundedString(record.current_phase, "invalid_root_phase", 64),
     task_state_markdown: parseMarkdownText(record.task_state_markdown, "invalid_task_state_markdown"),
+    architecture_decisions: architectureDecisions,
     ...(latestCritic === undefined ? {} : { latest_critique: latestCritic }),
     ...(harnessFeedback === undefined ? {} : { harness_feedback: harnessFeedback }),
     ...(commentCursor === undefined ? {} : { comment_cursor: commentCursor }),
+    ...(humanAction === undefined ? {} : { human_action: humanAction }),
     ...(delivery === undefined ? {} : { delivery }),
     ...(tokenUsage === undefined ? {} : { token_usage: tokenUsage }),
   };
@@ -205,16 +259,31 @@ export function parseRootWorktreeSummary(value: unknown): RootWorktreeSummary {
 
 export function parseRootReconcileRequest(value: unknown): RootReconcileRequest {
   const record = asRecord(value, "invalid_root_reconcile_request");
-  if (Object.keys(record).sort().join("\0") !== ["new_root_comments", "phase", "root", "root_state", "worktree_summary"].sort().join("\0")) {
+  if (Object.keys(record).sort().join("\0") !== ["human_action_replies", "new_root_comments", "phase", "root", "root_state", "worktree_summary"].sort().join("\0")) {
     throw new Error("invalid_contract_keys");
   }
   const comments = record.new_root_comments;
-  if (!Array.isArray(comments)) throw new Error("invalid_contract_array");
+  const replies = record.human_action_replies;
+  if (!Array.isArray(comments) || !Array.isArray(replies)) throw new Error("invalid_contract_array");
+  const root = parseLinearIssue(record.root);
+  const rootState = parseRootState(record.root_state);
+  const rootComments = parseArray(comments, parseLinearComment);
+  const humanReplies = parseArray(replies, parseLinearComment);
+  if (rootComments.some((comment) => comment.issue_id !== root.id || comment.parent_id !== null)) {
+    throw new Error("invalid_root_comment_scope");
+  }
+  if (humanReplies.length > 0 && rootState.human_action === undefined) {
+    throw new Error("invalid_human_action_reply_scope");
+  }
+  if (humanReplies.some((reply) => (
+    reply.issue_id !== root.id || reply.parent_id !== rootState.human_action?.comment_id
+  ))) throw new Error("invalid_human_action_reply_scope");
   return freezeObject({
     phase: parseEnum(record.phase, ["reconcile", "delivery"] as const),
-    root: parseLinearIssue(record.root),
-    root_state: parseRootState(record.root_state),
-    new_root_comments: parseArray(comments, parseLinearComment),
+    root,
+    root_state: rootState,
+    new_root_comments: rootComments,
+    human_action_replies: humanReplies,
     worktree_summary: parseRootWorktreeSummary(record.worktree_summary),
   });
 }
@@ -238,6 +307,70 @@ function parseRootCycleDraft(value: unknown): RootCycleDraft {
     acceptance: parseMarkdownText(record.acceptance, "invalid_cycle_acceptance"),
     boundaries: parseMarkdownText(record.boundaries, "invalid_cycle_boundaries"),
   });
+}
+
+function parseRootHumanQuestionOption(value: unknown): RootHumanQuestionOption {
+  const record = asRecord(value, "invalid_human_option");
+  if (Object.keys(record).sort().join("\0") !== ["consequence", "key", "label"].sort().join("\0")) {
+    throw new Error("invalid_contract_keys");
+  }
+  const key = parseBoundedString(record.key, "invalid_human_option_key", 64);
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(key)) throw new Error("invalid_human_option_key");
+  return freezeObject({
+    key,
+    label: parseMarkdownText(record.label, "invalid_human_option_label"),
+    consequence: parseMarkdownText(record.consequence, "invalid_human_option_consequence"),
+  });
+}
+
+function parseRootHumanQuestion(value: unknown): RootHumanQuestion {
+  const record = asRecord(value, "invalid_human_question");
+  if (Object.keys(record).sort().join("\0") !== ["options", "question"].sort().join("\0")) {
+    throw new Error("invalid_contract_keys");
+  }
+  if (!Array.isArray(record.options) || record.options.length < 2 || record.options.length > 4) {
+    throw new Error("invalid_human_options");
+  }
+  const options = parseArray(record.options, parseRootHumanQuestionOption, 4);
+  if (new Set(options.map((option) => option.key)).size !== options.length) {
+    throw new Error("duplicate_human_option_key");
+  }
+  return freezeObject({
+    question: parseMarkdownText(record.question, "invalid_human_question"),
+    options,
+  });
+}
+
+function parseRootHumanQuestions(value: unknown): readonly RootHumanQuestion[] {
+  if (!Array.isArray(value) || value.length < 1) throw new Error("invalid_human_questions");
+  return parseArray(value, parseRootHumanQuestion);
+}
+
+function parseReplyDisposition(value: unknown): RootReplyDisposition {
+  return parseEnum(value, ["accepted", "rejected"] as const);
+}
+
+function validateReplyDisposition(
+  kind: RootReconcileDecision["kind"],
+  disposition: RootReplyDisposition | undefined,
+  decisions: readonly ArchitectureDecisionDraft[] | undefined,
+  context: RootReconcileDecisionContext | undefined,
+): void {
+  if (disposition === "rejected" && kind !== "needs_human") throw new Error("invalid_reply_disposition");
+  if (context !== undefined) {
+    const replyBatch = context.current_phase === "NeedsHuman" && context.has_human_action_replies;
+    if (replyBatch !== (disposition !== undefined)) throw new Error("invalid_reply_disposition");
+  }
+  if (disposition === "accepted" && (decisions === undefined || decisions.length === 0)) {
+    throw new Error("invalid_architecture_decisions");
+  }
+  if (disposition !== "accepted" && decisions !== undefined) throw new Error("invalid_architecture_decisions");
+}
+
+function parseDecisionDrafts(value: unknown): readonly ArchitectureDecisionDraft[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1) throw new Error("invalid_architecture_decisions");
+  return parseArray(value, parseArchitectureDecisionDraft);
 }
 
 const ROOT_RECONCILE_REPORT_SECTIONS = {
@@ -309,42 +442,61 @@ export function parseRootReconcileReportMarkdown(
   }
 }
 
-export function parseRootReconcileDecision(value: unknown): RootReconcileDecision {
+export function parseRootReconcileDecision(
+  value: unknown,
+  context?: RootReconcileDecisionContext,
+): RootReconcileDecision {
   const record = asRecord(value, "invalid_root_reconcile_decision");
   const kind = record.kind;
   if (kind === "create_cycle") {
-    if (Object.keys(record).sort().join("\0") !== ["cycle", "kind", "report"].sort().join("\0")) {
+    if (Object.keys(record).some((key) => !["architecture_decisions", "cycle", "kind", "report", "reply_disposition"].includes(key))) {
       throw new Error("invalid_contract_keys");
     }
+    const replyDisposition = parseOptional(record.reply_disposition, parseReplyDisposition);
+    const decisions = parseDecisionDrafts(record.architecture_decisions);
+    validateReplyDisposition(kind, replyDisposition, decisions, context);
     return freezeObject({
       kind,
       cycle: parseRootCycleDraft(record.cycle),
       report: parseRootReconcileReportMarkdown(record.report, kind),
+      ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+      ...(decisions === undefined ? {} : { architecture_decisions: decisions }),
     });
   }
   if (kind === "complete") {
-    if (Object.keys(record).sort().join("\0") !== ["delivery", "kind", "report", "summary"].sort().join("\0")) {
+    if (Object.keys(record).some((key) => !["architecture_decisions", "delivery", "kind", "report", "summary", "reply_disposition"].includes(key))) {
       throw new Error("invalid_contract_keys");
     }
+    const replyDisposition = parseOptional(record.reply_disposition, parseReplyDisposition);
+    const decisions = parseDecisionDrafts(record.architecture_decisions);
+    validateReplyDisposition(kind, replyDisposition, decisions, context);
     return freezeObject({
       kind,
       summary: parseMarkdownText(record.summary, "invalid_completion_summary"),
       report: parseRootReconcileReportMarkdown(record.report, kind),
       delivery: parseDelivery(record.delivery),
+      ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+      ...(decisions === undefined ? {} : { architecture_decisions: decisions }),
     });
   }
   if (kind === "needs_human") {
     if (
-      Object.keys(record).some((key) => !["kind", "reason", "question", "report"].includes(key))
+      Object.keys(record).some((key) => !["architecture_decisions", "kind", "reason", "questions", "report", "reply_disposition"].includes(key))
       || !Object.hasOwn(record, "reason")
+      || !Object.hasOwn(record, "questions")
       || !Object.hasOwn(record, "report")
     ) throw new Error("invalid_contract_keys");
-    const question = parseOptional(record.question, (entry) => parseMarkdownText(entry, "invalid_human_question"));
+    const questions = parseRootHumanQuestions(record.questions);
+    const replyDisposition = parseOptional(record.reply_disposition, parseReplyDisposition);
+    const decisions = parseDecisionDrafts(record.architecture_decisions);
+    validateReplyDisposition(kind, replyDisposition, decisions, context);
     return freezeObject({
       kind,
       reason: parseMarkdownText(record.reason, "invalid_human_reason"),
+      questions,
       report: parseRootReconcileReportMarkdown(record.report, kind),
-      ...(question === undefined ? {} : { question }),
+      ...(replyDisposition === undefined ? {} : { reply_disposition: replyDisposition }),
+      ...(decisions === undefined ? {} : { architecture_decisions: decisions }),
     });
   }
   throw new Error("invalid_contract_variant");

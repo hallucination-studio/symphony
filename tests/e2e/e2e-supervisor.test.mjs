@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { MAX_E2E_DURATION_MS, partitionEnvironment, runSupervisor } from "./e2e-supervisor.mjs";
+import {
+  MAX_E2E_DURATION_MS,
+  MAX_E2E_SCENARIO_DURATION_MS,
+  parseScenarioArgs,
+  partitionEnvironment,
+  runSupervisor,
+} from "./e2e-supervisor.mjs";
 
 const secret = "supervisor-secret-not-output";
 
@@ -215,7 +221,7 @@ test("Golden blocked or failed results retain all probes and diagnostic referenc
   }
 });
 
-test("supervisor applies one deadline across local, real-boundary, and golden phases", async () => {
+test("supervisor applies one overall deadline across all phases", async () => {
   const phases = [];
   const startedAt = Date.now();
   const result = await runSupervisor({
@@ -223,6 +229,7 @@ test("supervisor applies one deadline across local, real-boundary, and golden ph
     testFiles: [path.join(process.cwd(), "tests/e2e/black-box-runner.test.mjs")],
     inherited: {},
     maxDurationMs: 40,
+    cleanupGraceMs: 20,
     runTests: async (_files, _environment, timeoutMs) => {
       phases.push(["local", timeoutMs]);
       return { code: 0, signal: null };
@@ -244,6 +251,32 @@ test("supervisor applies one deadline across local, real-boundary, and golden ph
   assert.ok(Date.now() - startedAt < 1_000);
 });
 
+test("supervisor aborts an active golden operation and returns after bounded cleanup grace", async () => {
+  const startedAt = Date.now();
+  let goldenSignal;
+  let aborts = 0;
+  const result = await runSupervisor({
+    envPath: path.join(os.tmpdir(), "symphony-e2e-abort-env-does-not-exist"),
+    inherited: {},
+    maxDurationMs: 20,
+    cleanupGraceMs: 20,
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => [],
+    runGolden: async ({ signal }) => {
+      goldenSignal = signal;
+      signal.addEventListener("abort", () => { aborts += 1; }, { once: true });
+      return new Promise(() => {});
+    },
+  });
+
+  assert.equal(result.code, 124);
+  assert.equal(result.reason, "e2e_timeout");
+  assert.ok(goldenSignal instanceof AbortSignal);
+  assert.equal(goldenSignal.aborted, true);
+  assert.equal(aborts, 1);
+  assert.ok(Date.now() - startedAt < 1_000);
+});
+
 test("the default E2E runner command includes every local layer", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
   const command = packageJson.scripts["test:e2e:runner"];
@@ -259,9 +292,126 @@ test("the default E2E runner command includes every local layer", async () => {
 });
 
 test("supervisor enforces the bounded E2E duration", async () => {
-  assert.ok(MAX_E2E_DURATION_MS < 5 * 60_000);
+  assert.equal(MAX_E2E_DURATION_MS, 6 * 60_000);
+  assert.equal(MAX_E2E_SCENARIO_DURATION_MS, 5 * 60_000);
   await assert.rejects(
     runSupervisor({ maxDurationMs: MAX_E2E_DURATION_MS + 1, runTests: async () => ({ code: 0, signal: null }) }),
     /invalid_e2e_configuration/u,
   );
+});
+
+test("scenario selection defaults to all six and validates explicit focus", () => {
+  assert.equal(parseScenarioArgs([]), undefined);
+  assert.equal(parseScenarioArgs(["--scenario", "cycle-human-action-cycle"]), "cycle-human-action-cycle");
+  assert.equal(parseScenarioArgs(["--scenario=human-action-unanswered"]), "human-action-unanswered");
+  assert.throws(() => parseScenarioArgs(["--scenario", "unknown"]), /e2e_scenario_invalid/u);
+  assert.throws(() => parseScenarioArgs(["--scenario", "single-cycle", "--scenario", "multi-cycle"]), /invalid_e2e_scenario/u);
+});
+
+test("default supervisor evaluates every deterministic and golden scenario", async () => {
+  const seenLocalEnvironments = [];
+  const seenGolden = [];
+  const result = await runSupervisor({
+    envPath: path.join(os.tmpdir(), "symphony-e2e-scenario-selection-env-does-not-exist"),
+    inherited: {},
+    runAllScenarios: true,
+    runTests: async (_files, environment) => {
+      seenLocalEnvironments.push(environment);
+      return { code: 0, signal: null };
+    },
+    runGolden: async ({ scenario }) => {
+      seenGolden.push(scenario);
+      return { status: "blocked", boundary: "golden", reason: "scenario_not_enabled" };
+    },
+  });
+  assert.equal(seenLocalEnvironments.length, 1);
+  assert.equal(seenLocalEnvironments[0].SYMPHONY_E2E_SCENARIO, undefined);
+  assert.deepEqual(seenGolden, [
+    "single-cycle",
+    "multi-cycle",
+    "single-cycle-human-action",
+    "cycle-human-action-cycle",
+    "human-action-rejected-supplement",
+    "human-action-unanswered",
+  ]);
+  assert.equal(result.boundary_results.at(-1).scenario_results.length, seenGolden.length);
+});
+
+test("default supervisor starts all six golden scenarios directly in parallel", async () => {
+  const started = [];
+  const reported = [];
+  let active = 0;
+  let peak = 0;
+  let release;
+  const allStarted = new Promise((resolve) => { release = resolve; });
+  const result = await runSupervisor({
+    envPath: path.join(os.tmpdir(), "symphony-e2e-parallel-env-does-not-exist"),
+    inherited: {},
+    maxDurationMs: 200,
+    cleanupGraceMs: 20,
+    runAllScenarios: true,
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => [],
+    onScenarioResult: (result_) => { reported.push(result_.scenario); },
+    runGolden: async ({ scenario }) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      started.push(scenario);
+      if (started.length === 6) release();
+      await allStarted;
+      active -= 1;
+      return { status: "passed", layer: "golden", result: { scenario } };
+    },
+  });
+
+  assert.equal(result.code, 0);
+  assert.equal(started.length, 6);
+  assert.deepEqual(new Set(reported), new Set(started));
+  assert.equal(peak, 6);
+});
+
+test("each parallel golden scenario has an independent deadline", async () => {
+  const reported = [];
+  const startedAt = Date.now();
+  const abortedAt = [];
+  const result = await runSupervisor({
+    envPath: path.join(os.tmpdir(), "symphony-e2e-scenario-timeout-env-does-not-exist"),
+    inherited: {},
+    maxDurationMs: 200,
+    scenarioDurationMs: 40,
+    cleanupGraceMs: 20,
+    runAllScenarios: true,
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => [],
+    runGolden: async ({ signal }) => new Promise(() => {
+      signal.addEventListener("abort", () => { abortedAt.push(Date.now()); }, { once: true });
+    }),
+    onScenarioResult: (scenarioResult) => { reported.push(scenarioResult); },
+  });
+  assert.equal(result.code, 1);
+  assert.equal(reported.length, 6);
+  assert.equal(reported.every(({ reason }) => reason === "e2e_timeout"), true);
+  assert.equal(abortedAt.length, 6);
+  assert.ok(Math.min(...abortedAt) - startedAt >= 35);
+  assert.ok(Date.now() - startedAt >= 35);
+});
+
+test("explicit supervisor scenario forwards one focus to local tests and golden", async () => {
+  let localScenario;
+  const goldenScenarios = [];
+  await runSupervisor({
+    scenario: "human-action-rejected-supplement",
+    envPath: path.join(os.tmpdir(), "symphony-e2e-explicit-scenario-env-does-not-exist"),
+    inherited: {},
+    runTests: async (_files, environment) => {
+      localScenario = environment.SYMPHONY_E2E_SCENARIO;
+      return { code: 0, signal: null };
+    },
+    runGolden: async ({ scenario }) => {
+      goldenScenarios.push(scenario);
+      return { status: "blocked", boundary: "golden", reason: "scenario_not_supported" };
+    },
+  });
+  assert.equal(localScenario, "human-action-rejected-supplement");
+  assert.deepEqual(goldenScenarios, ["human-action-rejected-supplement"]);
 });
