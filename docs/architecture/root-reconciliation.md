@@ -79,6 +79,9 @@ and return the pushed remote branch; only if both remote attempts fail, return
 local files that exist in the named workspace. Change size or perceived need
 never permits skipping a higher-priority delivery. Conductor validates the
 returned value but does not run Git commands or reinterpret the attempt results.
+Delivery preserves the Prepare-selected local history: any new delivery branch
+starts at the workspace's current local `HEAD`, never by switching to, resetting
+to, or recreating the branch from a remote base.
 
 ## Root State
 

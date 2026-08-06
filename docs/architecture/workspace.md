@@ -76,6 +76,7 @@ Delivery =
 | `WS-DELIVERY-005` | any valid Delivery kind permits `Done` when Root Reconcile judges the result deliverable |
 | `WS-DELIVERY-006` | new Root input before projection cancels completion and returns to Reconcile |
 | `WS-DELIVERY-007` | attempt Delivery in strict `pull_request -> branch -> files` order; change size or perceived necessity never skips an available higher-priority kind |
+| `WS-DELIVERY-008` | preserve prepared local history; any new delivery branch starts at the workspace's current local `HEAD`, never a reset, switch, or recreation from a remote base |
 
 The Root description renders Delivery mechanically from Root State. It is not
 inferred from Markdown. Root Reconcile owns the required attempts and may return
