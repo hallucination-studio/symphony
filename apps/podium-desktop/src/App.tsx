@@ -46,6 +46,7 @@ export function App({
           view={initialState.overview}
           headingRef={headingRef}
           onOpenConductors={() => navigate("conductors")}
+          onOpenSettings={() => navigate("settings")}
           onCommand={command}
         />
       )}
@@ -53,8 +54,10 @@ export function App({
         <ConductorsPage
           bindings={initialState.overview.bindings}
           roots={initialState.overview.roots}
+          linear={initialState.overview.linear}
           headingRef={headingRef}
           onCommand={command}
+          onOpenSettings={() => navigate("settings")}
         />
       )}
       {page === "settings" && (

@@ -60,9 +60,32 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
           id: "comment-1",
           body: "First input",
           createdAt: "2026-08-05T00:00:00.000Z",
+          issue: { id: "root-id" },
+          parentId: null,
+          user: { id: "user-id" },
+        },
+        {
+          id: "reply-hidden-from-root-inbox",
+          body: "A native Human Action reply",
+          createdAt: "2026-08-05T00:00:30.000Z",
+          issue: { id: "root-id" },
+          parentId: "comment-1",
           user: { id: "user-id" },
         },
       ], pageInfo: { hasNextPage: false, endCursor: null } } } },
+    };
+    if (operation === "ListCommentReplies") return {
+      data: { comment: {
+        issue: { id: "execute-id" },
+        children: { nodes: [{
+          id: "reply-1",
+          body: "Use the existing parser boundary.",
+          createdAt: "2026-08-05T00:01:00.000Z",
+          issue: { id: "execute-id" },
+          parentId: "execute-result-id",
+          user: { id: "user-id" },
+        }], pageInfo: { hasNextPage: false, endCursor: null } },
+      } },
     };
     if (operation === "CreateWorkflowState") return {
       data: { workflowStateCreate: { success: true, workflowState: {
@@ -98,7 +121,16 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
       body: "Process completed",
       createdAt: "2026-08-05T00:02:00.000Z",
       issue: { id: "execute-id" },
+      parentId: null,
       user: { id: "harness-id" },
+    } } } };
+    if (operation === "CreateCommentReply") return { data: { commentCreate: { success: true, comment: {
+      id: "reply-1",
+      body: "Use the existing parser boundary.",
+      createdAt: "2026-08-05T00:03:00.000Z",
+      issue: { id: "execute-id" },
+      parentId: "execute-result-id",
+      user: { id: "user-id" },
     } } } };
     throw new Error(`unexpected operation ${operation}`);
   };
@@ -122,6 +154,15 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
   await gateway.update_issue_status("execute-id", "state-done");
   await gateway.update_issue_description("execute-id", "Frozen execute updated");
   assert.equal((await gateway.create_comment("execute-id", "Process completed")).id, "execute-result-id");
+  assert.deepEqual(await gateway.list_comment_replies_after("execute-result-id"), [{
+    id: "reply-1",
+    issue_id: "execute-id",
+    parent_id: "execute-result-id",
+    body: "Use the existing parser boundary.",
+    creator_id: "user-id",
+    created_at: "2026-08-05T00:01:00.000Z",
+  }]);
+  assert.equal((await gateway.create_comment_reply("execute-id", "execute-result-id", "Use the existing parser boundary.")).id, "reply-1");
 
   assert.deepEqual(operations, [
     "ListTeamStates",
@@ -134,7 +175,71 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
     "UpdateIssueStatus",
     "UpdateIssueDescription",
     "CreateComment",
+    "ListCommentReplies",
+    "CreateCommentReply",
   ]);
+});
+
+test("GraphQL gateway creates a normalized comment reaction with the formal input", async () => {
+  const calls: Array<{
+    operation: string;
+    document: string;
+    variables: Readonly<Record<string, unknown>>;
+  }> = [];
+  const gateway = new LinearGraphqlGateway(async (operation, document, variables) => {
+    calls.push({ operation, document, variables });
+    assert.equal(operation, "ReactionCreate");
+    return {
+      data: {
+        reactionCreate: {
+          success: true,
+          reaction: {
+            id: "reaction-1",
+            emoji: "white_check_mark",
+            user: { id: "private-actor-id" },
+          },
+        },
+      },
+    };
+  });
+
+  assert.deepEqual(await gateway.create_comment_reaction("reply-1", "white_check_mark"), {
+    id: "reaction-1",
+    reply_id: "reply-1",
+    emoji: "white_check_mark",
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]?.document ?? "", /reactionCreate\(input: \$input\)/u);
+  assert.deepEqual(calls[0]?.variables, {
+    input: { commentId: "reply-1", emoji: "white_check_mark" },
+  });
+});
+
+test("GraphQL gateway validates the closed reaction emoji contract and response", async () => {
+  let calls = 0;
+  const gateway = new LinearGraphqlGateway(async () => {
+    calls += 1;
+    return {
+      data: {
+        reactionCreate: {
+          success: true,
+          reaction: { id: "reaction-1", emoji: "x" },
+        },
+      },
+    };
+  });
+
+  await assert.rejects(
+    gateway.create_comment_reaction("comment-1", "thumbsup" as never),
+    /^Error: linear_comment_reaction_emoji_invalid$/u,
+  );
+  assert.equal(calls, 0);
+
+  await assert.rejects(
+    gateway.create_comment_reaction("comment-1", "white_check_mark"),
+    /^Error: linear_create_comment_reaction_invalid_response:comment-1$/u,
+  );
+  assert.equal(calls, 1);
 });
 
 test("GraphQL gateway rejects malformed responses without exposing provider payloads", async () => {
