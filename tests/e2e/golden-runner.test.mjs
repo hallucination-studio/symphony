@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   archiveGoldenFailure,
   archiveIssueTree,
+  cleanupGoldenRemote,
   createLinearRoot,
   fetchGoldenCriticResult,
   MAX_GOLDEN_ISSUE_TREE_DEPTH,
@@ -41,6 +42,25 @@ test("golden completion requires a pull request and rejects temporary file deliv
     status: "done",
     delivery: { kind: "branch", branch: "root/ENG-7", remote: "origin" },
   }), /golden_delivery_not_pull_request/u);
+});
+
+test("golden cleanup closes the PR before deleting its checked-out remote branch", async () => {
+  const calls = [];
+  const failures = await cleanupGoldenRemote({
+    pullRequestUrl: "https://github.com/acme/repo/pull/7",
+    branch: "root/ENG-7",
+    environment: {},
+    inheritedEnvironment: { PATH: "/usr/bin" },
+    async executeCommand(command, args) {
+      calls.push([command, args]);
+      return { stdout: "", stderr: "" };
+    },
+  });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(calls, [
+    ["gh", ["pr", "close", "https://github.com/acme/repo/pull/7"]],
+    ["git", ["push", "origin", "--delete", "root/ENG-7"]],
+  ]);
 });
 
 test("golden keeps only a structured Conductor failure reason", () => {

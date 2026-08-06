@@ -740,6 +740,28 @@ function githubEnvironment(environment, inherited) {
     : [[key, environment[key] ?? inherited[key]]]));
 }
 
+export async function cleanupGoldenRemote({
+  pullRequestUrl,
+  branch,
+  environment,
+  inheritedEnvironment,
+  executeCommand = execute,
+} = {}) {
+  const failures = [];
+  const env = githubEnvironment(environment, inheritedEnvironment);
+  if (pullRequestUrl !== undefined) {
+    await executeCommand("gh", ["pr", "close", pullRequestUrl], {
+      env, encoding: "utf8", timeout: 30_000,
+    }).catch(() => failures.push("golden_pr_cleanup_failed"));
+  }
+  await executeCommand("git", ["push", "origin", "--delete", branch], {
+    env, encoding: "utf8", timeout: 30_000,
+  }).catch(() => {
+    if (pullRequestUrl !== undefined) failures.push("golden_branch_cleanup_failed");
+  });
+  return failures;
+}
+
 export async function createGoldenFixture({
   environment,
   inheritedEnvironment,
@@ -781,17 +803,9 @@ export async function createGoldenFixture({
       await verifyGoldenResultComments(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
     },
     async cleanup(pullRequestUrl, { archiveIssueTree: shouldArchiveIssueTree = false } = {}) {
-      const failures = [];
-      if (pullRequestUrl !== undefined) {
-        await execute("gh", ["pr", "close", pullRequestUrl, "--delete-branch"], {
-          env: githubEnvironment(environment, inheritedEnvironment),
-          encoding: "utf8", timeout: 30_000,
-        }).catch(() => failures.push("golden_pr_cleanup_failed"));
-      } else {
-        await execute("git", ["push", "origin", "--delete", branch], {
-          encoding: "utf8", timeout: 30_000,
-        }).catch(() => undefined);
-      }
+      const failures = await cleanupGoldenRemote({
+        pullRequestUrl, branch, environment, inheritedEnvironment,
+      });
       if (shouldArchiveIssueTree) {
         await archiveIssueTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id)
           .catch(() => failures.push("golden_issue_cleanup_failed"));
