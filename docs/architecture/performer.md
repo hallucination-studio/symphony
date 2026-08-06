@@ -59,9 +59,10 @@ Reconciler supplies a final-response path for its own decision parser. Cycle
 Runner supplies `cycle-NNN-artist-result.md` and
 `cycle-NNN-critic-result.md` paths and asks both roles to finish with Markdown.
 The Artist Markdown is captured only for exact terminal description projection and is
-untrusted; it is not parsed or supplied to Critic. The Critic Markdown is parsed
-once by Cycle Runner as the sole semantic result, then serialized and re-read
-as the private `cycle-NNN-critique-result.json` progression file. A missing,
+untrusted; it is not parsed or supplied to Critic. The Critic machine envelope
+is parsed once by Cycle Runner as the sole semantic result, then the full report
+is serialized once as the private `cycle-NNN-critique-result.json` progression
+file and the same bytes are uploaded. A missing,
 unreadable, or invalid response is a process error; Performer never starts a
 second summarization or format-repair process. A zero exit code is only a
 process fact; it is never a Cycle success decision. Raw Agent streams are a
@@ -107,19 +108,19 @@ prefix and does not traverse `cause`.
 ```mermaid
 %% source-rules: PF-SESSION-001 PF-SESSION-002 PF-SESSION-003 PF-PERM-001 PF-PERM-002 PF-PERM-003
 flowchart LR
-  RR[Root Reconciler] -->|Git-capable full-access request| P1[Fresh process]
+  RR[Root Reconciler Reconcile/Delivery] -->|Git-capable full-access request| P1[Fresh process]
   CR[Cycle Runner] -->|workspace-write Artist request| P2[Fresh process]
   CR -->|read-only Critic request| P3[Fresh process]
 ```
 
 | Rule | Caller role | Session | Workspace sandbox | Excluded context |
 |---|---|---|---|---|
-| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the independent Reconcile role configuration | danger-full-access for Prepare and final Git/`gh` delivery | Artist transcript and Cycle child DAG |
+| `PF-SESSION-001` | Root Reconcile/Delivery | fresh process per semantic decision with independent role configuration | danger-full-access for final Git/`gh`; Prepare skips Performer | Artist transcript and Cycle DAG |
 | `PF-SESSION-002` | Artist | one fresh process per Cycle | workspace-write | Reconcile transcript, prior Cycle transcripts, and Critic history |
 | `PF-SESSION-003` | Critic | a distinct fresh process after Artist terminates | read-only | Artist transcript, hidden state, and prior Critic history |
 | `PF-PERM-001` | every process | only the configured workspace and role sandbox | supplied by the caller, not inferred by Performer | Linear capability |
 | `PF-PERM-002` | every process | no secrets by default | explicit allowlist only when the frozen task boundary requires it | `.env*`, keychains, tokens, credential stores |
-| `PF-PERM-003` | Root Reconcile only | Prepare and Delivery | danger-full-access permits worktrees, Git metadata, push, and `gh` within the role prompt | never granted to Artist or Critic |
+| `PF-PERM-003` | Root Reconcile/Delivery only | Delivery | danger-full-access permits Git, push, and `gh` | Prepare uses bounded direct Git/filesystem operations; Artist/Critic never receive it |
 
 Performer does not enforce workflow order. Conductor and Cycle Runner ensure that
 Critic starts only after Artist is terminal and that a failed Artist still gets
@@ -137,10 +138,9 @@ an Critic attempt.
 | Linear Issue, exact role-description/Root-description/Cycle-comment projections, and typed Critique JSON file projection | private rendering helpers behind Linear Gateway calls |
 | raw process start, stop, bounded final response, exit code, duration, and provider token facts | Performer |
 
-Each role selects one thin CLI adapter through its own `*_agent` value and
-defaults to `codex`. V1's closed `AgentKind` contains only `codex`; a future
-value may add another thin adapter without changing Root Reconciler or Cycle
-Runner. Reconcile, Artist, and Critic retain independent startup credentials,
+Each role uses the fixed thin Codex CLI adapter; omitted `*_agent` values default
+to `codex` and no catalog or discovery layer exists. Reconcile, Artist, and
+Critic retain independent startup credentials,
 base URLs, model values, and reasoning-effort values. There is no dynamic
 per-Cycle routing, plugin discovery, registry, compatibility alias, or
 cross-role transcript.
@@ -155,8 +155,8 @@ streams may be retained only as the private local diagnostic evidence described
 above; no caller may treat them as a required role result, and they are never
 uploaded to Linear or used for routing, trust, restart, or publication.
 
-The Artist's human-readable report uses `## Summary`, `## File Changes` with
-`### Created`, `### Updated`, and `### Deleted`, and `## Verification`. Git
+The Artist's human-readable report describes actual created, updated, and
+deleted files plus verification without a machine-parsed heading schema. Git
 porcelain markers such as `??`, `M`, or `D` are intermediate facts only and
-must be translated to those semantic sections; they must never appear
-verbatim in the report. The report remains untrusted display output.
+must be translated to human language rather than copied verbatim. The report
+remains untrusted display output.

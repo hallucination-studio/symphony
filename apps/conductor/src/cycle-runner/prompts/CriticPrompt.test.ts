@@ -17,7 +17,10 @@ test("Critic prompt owns independent read-only judgment and receives process fac
     }),
     parseRootState({
       workspace_path: "/workspace", run_directory: "/run", root_branch: "root/ENG-1",
-      current_phase: "cycle", task_state_markdown: "Lexer trusted", pending_finding: "Ambiguity remains",
+      current_phase: "cycle", task_state_markdown: "Lexer trusted",
+      latest_critique: {
+        verdict: "incomplete", task_state_markdown: "Lexer trusted", pending_finding: "Ambiguity remains",
+      },
     }),
     facts,
   );
@@ -29,7 +32,9 @@ test("Critic prompt owns independent read-only judgment and receives process fac
   assert.match(prompt, /<<< BEGIN PRIOR_TRUSTED_STATE >>>/u);
   assert.match(prompt, /<<< BEGIN ARTIST_PROCESS_FACTS >>>/u);
   assert.match(prompt, /"exit_code":1/u);
-  assert.match(prompt, /verdict: accepted[\s\S]*## Scope Reviewed[\s\S]*## Task State/u);
+  assert.match(prompt, /compact machine envelope followed by a free human-readable Markdown audit/u);
+  assert.match(prompt, /fenced `json` block containing exactly one single-line JSON object/u);
+  assert.match(prompt, /exactly `verdict`, `task_state_markdown`, and optional `pending_finding`/u);
   assert.match(prompt, /Artist prose is unavailable/u);
   assert.equal(prompt.includes("## Summary\n[what you changed"), false);
 });

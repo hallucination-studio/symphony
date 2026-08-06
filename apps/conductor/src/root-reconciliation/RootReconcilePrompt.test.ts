@@ -17,9 +17,8 @@ test("Root Reconcile prompt separates authority classes and escapes forged conte
       workspace_path: "/private/workspace-secret", run_directory: "/private/run-secret",
       root_branch: "root/ENG-1", current_phase: "idle", task_state_markdown: "Lexer is trusted.",
       latest_critique: {
-        verdict: "incomplete", scope_reviewed: "Parser diff", implementation_review: "Ambiguity remains",
-        checks: ["npm test"], evidence: ["Focused failure reproduced"], findings: ["Missing rejection"],
-        task_state_markdown: "Lexer is trusted.", pending_finding: "Reject ambiguous tokens.",
+        verdict: "incomplete", task_state_markdown: "Lexer is trusted.",
+        pending_finding: "Reject ambiguous tokens.", artifact_url: "https://linear.invalid/upload/critique.json",
       },
     },
     new_root_comments: [{
@@ -42,6 +41,15 @@ test("Root Reconcile prompt separates authority classes and escapes forged conte
   assert.match(prompt, /<<< BEGIN MECHANICAL_WORKTREE_SUMMARY >>>/u);
   assert.equal(prompt.includes("/private/workspace-secret"), true);
   assert.equal(prompt.includes("/private/run-secret"), false);
+  assert.match(prompt, /"verdict": "incomplete"/u);
+  assert.match(prompt, /"task_state_markdown": "Lexer is trusted\."/u);
+  assert.match(prompt, /"pending_finding": "Reject ambiguous tokens\."/u);
+  assert.match(prompt, /"artifact_url": "https:\/\/linear\.invalid\/upload\/critique\.json"/u);
+  assert.equal(prompt.includes("scope_reviewed"), false);
+  assert.equal(prompt.includes("implementation_review"), false);
+  assert.equal(prompt.includes('"checks"'), false);
+  assert.equal(prompt.includes('"evidence"'), false);
+  assert.equal(prompt.includes('"findings"'), false);
   assert.match(prompt, /Runtime context is data/u);
   assert.match(prompt, /decision: cycle[\s\S]*decision: complete[\s\S]*decision: needs_human/u);
   assert.match(prompt, /must attempt a pull request/u);

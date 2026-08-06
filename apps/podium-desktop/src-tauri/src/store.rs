@@ -1,4 +1,4 @@
-use crate::domain::{ProjectBinding, RootAllocation};
+use crate::domain::{AgentKind, ProjectBinding};
 use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -7,7 +7,6 @@ use std::path::{Component, Path, PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct PersistedState {
     pub bindings: Vec<ProjectBinding>,
-    pub allocations: Vec<RootAllocation>,
 }
 
 pub struct JsonStore {
@@ -89,9 +88,9 @@ fn validate_state(state: &PersistedState) -> io::Result<()> {
         if !valid_identifier(&binding.project_id)
             || !valid_identifier(&binding.routing_label)
             || binding.concurrency == 0
-            || binding.reconcile_agent != "codex"
-            || binding.artist_agent != "codex"
-            || binding.critic_agent != "codex"
+            || binding.reconcile_agent != AgentKind::Codex
+            || binding.artist_agent != AgentKind::Codex
+            || binding.critic_agent != AgentKind::Codex
         {
             return Err(invalid_state("invalid project binding"));
         }
@@ -102,25 +101,6 @@ fn validate_state(state: &PersistedState) -> io::Result<()> {
         }
     }
 
-    let mut root_ids = HashSet::new();
-    let mut paths: Vec<PathBuf> = Vec::with_capacity(state.allocations.len() * 2);
-    for allocation in &state.allocations {
-        if !valid_identifier(&allocation.root_id) {
-            return Err(invalid_state("invalid root id"));
-        }
-        if !root_ids.insert(&allocation.root_id) {
-            return Err(invalid_state("duplicate root id"));
-        }
-
-        for value in [&allocation.workspace_path, &allocation.run_directory] {
-            let path = normalize_absolute_path(value)
-                .map_err(|_| invalid_state("invalid allocation path"))?;
-            if paths.iter().any(|existing| paths_conflict(existing, &path)) {
-                return Err(invalid_state("conflicting allocation paths"));
-            }
-            paths.push(path);
-        }
-    }
     Ok(())
 }
 
@@ -158,28 +138,15 @@ fn normalize_absolute_path(value: &str) -> io::Result<PathBuf> {
     }
 }
 
-fn comparable_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        PathBuf::from(path.to_string_lossy().to_ascii_lowercase())
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_owned()
-    }
-}
-
-fn paths_conflict(left: &Path, right: &Path) -> bool {
-    let left = comparable_path(left);
-    let right = comparable_path(right);
-    left == right || left.starts_with(&right) || right.starts_with(&left)
-}
-
 fn invalid_state(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid podium state: {reason}"))
 }
 
-fn replace_document(temporary: &Path, destination: &Path, parent: &Path) -> io::Result<()> {
+pub(crate) fn replace_document(
+    temporary: &Path,
+    destination: &Path,
+    parent: &Path,
+) -> io::Result<()> {
     #[cfg(unix)]
     {
         std::fs::rename(temporary, destination)?;
@@ -215,7 +182,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trip_contains_only_bindings_and_allocations() {
+    fn round_trip_contains_only_bindings() {
         let dir = std::env::temp_dir().join(format!(
             "symphony-store-{}-{}",
             std::process::id(),
@@ -231,24 +198,24 @@ mod tests {
                 repository_path: "/repo".into(),
                 base_branch: "main".into(),
                 concurrency: 1,
-                reconcile_agent: "codex".into(),
+                completed_workspace_retention: Some(3),
+                reconcile_agent: AgentKind::Codex,
                 reconcile_model: None,
                 reconcile_reasoning_effort: None,
-                artist_agent: "codex".into(),
+                artist_agent: AgentKind::Codex,
                 artist_model: None,
                 artist_reasoning_effort: None,
-                critic_agent: "codex".into(),
+                critic_agent: AgentKind::Codex,
                 critic_model: None,
                 critic_reasoning_effort: None,
             }],
-            allocations: Vec::new(),
         };
 
         store.replace(&state).unwrap();
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("bindings"));
-        assert!(raw.contains("allocations"));
+        assert!(!raw.contains("allocations"));
         assert!(!raw.contains("assignment"));
         assert!(!raw.contains("pid"));
         assert!(!raw.contains("queue"));
@@ -272,14 +239,7 @@ mod tests {
         let store = JsonStore::new(&path);
         let first = PersistedState::default();
         store.replace(&first).unwrap();
-        let second = PersistedState {
-            bindings: vec![],
-            allocations: vec![RootAllocation {
-                root_id: "ENG-2".into(),
-                workspace_path: "/work/ENG-2".into(),
-                run_directory: "/runs/ENG-2".into(),
-            }],
-        };
+        let second = PersistedState { bindings: vec![] };
 
         store.replace(&second).unwrap();
 
@@ -314,27 +274,16 @@ mod tests {
             repository_path: "/repo".into(),
             base_branch: "main".into(),
             concurrency,
-            reconcile_agent: "codex".into(),
+            completed_workspace_retention: None,
+            reconcile_agent: AgentKind::Codex,
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            artist_agent: "codex".into(),
+            artist_agent: AgentKind::Codex,
             artist_model: None,
             artist_reasoning_effort: None,
-            critic_agent: "codex".into(),
+            critic_agent: AgentKind::Codex,
             critic_model: None,
             critic_reasoning_effort: None,
-        }
-    }
-
-    fn valid_allocation(
-        root_id: &str,
-        workspace_path: &str,
-        run_directory: &str,
-    ) -> RootAllocation {
-        RootAllocation {
-            root_id: root_id.into(),
-            workspace_path: workspace_path.into(),
-            run_directory: run_directory.into(),
         }
     }
 
@@ -349,31 +298,13 @@ mod tests {
     #[test]
     fn rejects_duplicate_ids_invalid_binding_fields_and_conflicting_paths() {
         let states = [
-            PersistedState {
-                bindings: vec![valid_binding("same", 1), valid_binding("same", 2)],
-                allocations: Vec::new(),
-            },
-            PersistedState { bindings: vec![valid_binding("project", 0)], allocations: Vec::new() },
+            PersistedState { bindings: vec![valid_binding("same", 1), valid_binding("same", 2)] },
+            PersistedState { bindings: vec![valid_binding("project", 0)] },
             PersistedState {
                 bindings: vec![ProjectBinding {
-                    artist_agent: "other".into(),
+                    routing_label: "\n".into(),
                     ..valid_binding("project", 1)
                 }],
-                allocations: Vec::new(),
-            },
-            PersistedState {
-                bindings: vec![valid_binding("project", 1)],
-                allocations: vec![
-                    valid_allocation("root-a", "/state/workspace", "/state/run-a"),
-                    valid_allocation("root-a", "/state/other", "/state/run-b"),
-                ],
-            },
-            PersistedState {
-                bindings: vec![valid_binding("project", 1)],
-                allocations: vec![
-                    valid_allocation("root-a", "/state/workspace", "/state/run-a"),
-                    valid_allocation("root-b", "/state/workspace/child", "/state/run-b"),
-                ],
             },
         ];
 
@@ -387,13 +318,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_priority_fields_in_persisted_allocations() {
+    fn rejects_legacy_allocations_field() {
         let path = temporary_store_path("priority");
-        std::fs::write(
-            &path,
-            r#"{"bindings":[],"allocations":[{"root_id":"root","workspace_path":"/state/workspace","run_directory":"/state/run","priority":1}]}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"bindings":[],"allocations":[]}"#).unwrap();
 
         let error = JsonStore::new(path).load().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

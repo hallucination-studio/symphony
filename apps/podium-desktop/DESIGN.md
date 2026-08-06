@@ -91,6 +91,17 @@ rounded:
   pill: 999px
 metrics:
   control-height: 28px
+  control-compact: 22px
+  control-quiet: 24px
+  row-min: 32px
+  icon-nav: 16px
+  brand-mark: 20px
+  checkbox: 14px
+  spinner: 11px
+  status-dot: 8px
+  titlebar: 52px
+  focus-halo: 3.5px
+  dialog-max: 480px
   sidebar-width: 232px
   content-column: 840px
 shadows:
@@ -115,6 +126,7 @@ motion:
   easing-emphasized: cubic-bezier(0.34, 1.3, 0.64, 1)
   easing-continuous: linear
 spacing:
+  hairline: 2px
   1: 4px
   2: 8px
   3: 12px

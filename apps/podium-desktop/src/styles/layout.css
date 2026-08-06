@@ -8,13 +8,13 @@ input:focus-visible,
 select:focus-visible,
 summary:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3.5px var(--color-focus-halo);
+  box-shadow: 0 0 0 var(--size-focus-halo) var(--color-focus-halo);
 }
 
 a:focus-visible {
   border-radius: var(--radius-control);
   outline: none;
-  box-shadow: 0 0 0 3.5px var(--color-focus-halo);
+  box-shadow: 0 0 0 var(--size-focus-halo) var(--color-focus-halo);
 }
 
 /* Focus halo blooms in instead of snapping on. */
@@ -23,6 +23,10 @@ select,
 summary,
 a {
   transition: box-shadow var(--duration-fast) var(--easing-standard);
+}
+
+::placeholder {
+  color: var(--color-label-tertiary);
 }
 
 /* Motion keyframes */
@@ -63,27 +67,6 @@ a {
   }
 }
 
-@keyframes skeleton-sweep {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes brand-mark-draw {
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes brand-mark-dot {
-  to {
-    opacity: 1;
-  }
-}
-
 @keyframes refresh-value {
   from {
     opacity: 0.3;
@@ -119,19 +102,6 @@ a {
   }
   80% {
     transform: translateX(2px);
-  }
-}
-
-@keyframes backdrop-exit {
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes dialog-exit {
-  to {
-    opacity: 0;
-    transform: scale(0.96);
   }
 }
 
@@ -186,15 +156,15 @@ h1:focus {
 }
 
 .brand-mark {
-  width: 20px;
-  height: 20px;
+  width: var(--size-brand-mark);
+  height: var(--size-brand-mark);
   border-radius: var(--radius-control);
 }
 
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-hairline);
 }
 
 .nav-link {
@@ -202,7 +172,8 @@ h1:focus {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  padding: 5px var(--space-2);
+  min-height: var(--size-control-height);
+  padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
@@ -216,8 +187,8 @@ h1:focus {
 }
 
 .nav-link svg {
-  width: 16px;
-  height: 16px;
+  width: var(--size-icon-nav);
+  height: var(--size-icon-nav);
   flex-shrink: 0;
   color: var(--color-label-secondary);
 }
@@ -226,14 +197,14 @@ h1:focus {
   background: var(--color-selection);
 }
 
+/* macOS source-list selection: quiet fill with an accent-tinted icon. */
 .nav-link[data-active="true"] {
-  background: var(--color-accent);
-  color: var(--color-accent-contrast);
+  background: var(--color-selection);
   font-weight: var(--font-weight-medium);
 }
 
 .nav-link[data-active="true"] svg {
-  color: var(--color-accent-contrast);
+  color: var(--color-accent);
 }
 
 .main {
@@ -288,17 +259,11 @@ h1:focus {
 }
 
 /* Inset grouped cards (System Settings style) */
-.panel,
-.empty-state,
-.selection-list {
+.panel {
+  padding: var(--space-4);
   border: 1px solid var(--color-separator);
   border-radius: var(--radius-card);
   background: var(--color-card-bg);
-}
-
-.panel,
-.empty-state {
-  padding: var(--space-4);
 }
 
 .panel h2,
@@ -312,14 +277,42 @@ h1:focus {
   margin-bottom: 0;
 }
 
-.eyebrow {
-  margin: 0 0 var(--space-2);
-  color: var(--color-label-tertiary);
-  font-size: var(--font-size-caption);
-  font-weight: var(--font-weight-label);
-  line-height: var(--line-height-caption);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
+/* Empty states sit inline inside panels; the full-screen unavailable view
+   keeps the card treatment. */
+.empty-state {
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+}
+
+.empty-state p {
+  margin: var(--space-1) 0 0;
+  color: var(--color-label-secondary);
+}
+
+.empty-state .button {
+  margin-top: var(--space-3);
+}
+
+.setup-layout {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: var(--color-content-bg);
+}
+
+.setup-layout .empty-state {
+  width: min(var(--size-dialog-max), 100%);
+  padding: var(--space-6);
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-dialog);
+  background: var(--color-card-bg);
+  box-shadow: var(--shadow-dialog);
+  text-align: left;
+}
+
+.setup-layout .page-header {
+  margin-bottom: 0;
 }
 
 /* macOS push buttons */
@@ -329,7 +322,7 @@ h1:focus {
   justify-content: center;
   gap: var(--space-1);
   min-height: var(--size-control-height);
-  padding: 3px var(--space-3);
+  padding: 0 var(--space-3);
   border: 1px solid var(--color-separator-strong);
   border-radius: var(--radius-control);
   background: var(--color-card-bg);
@@ -365,8 +358,8 @@ h1:focus {
 }
 
 .button.quiet-button {
-  min-height: 24px;
-  padding: 2px var(--space-2);
+  min-height: var(--size-control-quiet);
+  padding: 0 var(--space-2);
   border-color: transparent;
   background: transparent;
   box-shadow: none;
@@ -379,60 +372,31 @@ h1:focus {
 }
 
 .button.compact {
-  min-height: 22px;
-  padding: 2px var(--space-2);
+  min-height: var(--size-control-compact);
+  padding: 0 var(--space-2);
   font-size: var(--font-size-caption);
   font-weight: var(--font-weight-regular);
 }
 
-.full-width {
-  width: 100%;
+/* Destructive actions read as red text, never red fill, per macOS alerts. */
+.button.destructive {
+  color: var(--status-negative);
+}
+
+/* Push the destructive action to the leading edge of a trailing button row. */
+.destructive-push {
+  margin-right: auto;
 }
 
 /* Busy indicator for buttons awaiting Conductor confirmation. Inherits
    the button text color via currentColor. */
 .button-spinner {
-  width: 11px;
-  height: 11px;
+  width: var(--size-spinner);
+  height: var(--size-spinner);
   border: 2px solid currentColor;
   border-top-color: transparent;
   border-radius: var(--radius-pill);
   animation: spin var(--duration-spin) var(--easing-continuous) infinite;
-}
-
-/* macOS text inputs and selects are styled globally so a form outside a
-   dialog or the setup flow does not silently render unstyled controls. */
-input:not([type="checkbox"]):not([type="radio"]),
-select {
-  min-height: var(--size-control-height);
-  padding: 3px var(--space-2);
-  border: 1px solid var(--color-separator-strong);
-  border-radius: var(--radius-control);
-  background: var(--color-card-bg);
-  color: var(--color-label);
-  font-size: var(--font-size-body);
-}
-
-input[type="checkbox"],
-input[type="radio"] {
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  accent-color: var(--color-accent);
-}
-
-.stale-note {
-  color: var(--color-label-secondary);
-  font-size: var(--font-size-caption);
-  line-height: var(--line-height-caption);
-}
-
-.section-heading,
-.action-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
 }
 
 /* Button clusters hug the trailing edge (macOS convention) and wrap
@@ -445,7 +409,109 @@ input[type="radio"] {
   gap: var(--space-2);
 }
 
+.root-row-trailing {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 100%;
+}
+
+.root-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.root-action-error {
+  max-width: 240px;
+  color: var(--status-negative);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+  text-align: right;
+}
+
+/* macOS text inputs and selects are styled globally so a form outside a
+   dialog does not silently render unstyled controls. */
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: var(--size-control-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-separator-strong);
+  border-radius: var(--radius-control);
+  background: var(--color-card-bg);
+  color: var(--color-label);
+  font-size: var(--font-size-body);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: var(--size-checkbox);
+  height: var(--size-checkbox);
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+/* Form fields: label above input, optional caption-sized error below. */
+.field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.field label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--color-label-secondary);
+}
+
+.field input {
+  width: 100%;
+}
+
+.field-error {
+  color: var(--status-negative);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.field input[aria-invalid="true"] {
+  border-color: var(--status-negative);
+}
+
+.field input[aria-invalid="true"]:focus-visible {
+  box-shadow: 0 0 0 var(--size-focus-halo) var(--status-negative-soft);
+}
+
+/* Input with a trailing accessory button (e.g. the directory picker). */
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-row .button {
+  flex-shrink: 0;
+}
+
+.stale-note {
+  margin: var(--space-1) 0 0;
+  color: var(--color-label-tertiary);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
 .section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   margin-bottom: var(--space-2);
 }
 
@@ -463,7 +529,7 @@ input[type="radio"] {
   justify-content: space-between;
   align-items: center;
   gap: var(--space-4);
-  min-height: 32px;
+  min-height: var(--size-row-min);
   padding: var(--space-2) 0;
   border-bottom: 1px solid var(--color-separator);
 }
@@ -478,7 +544,8 @@ input[type="radio"] {
 
 .readiness-list dd {
   margin: 0;
-  color: var(--color-label-secondary);
+  color: var(--color-label);
+  font-weight: var(--font-weight-medium);
 }
 
 .status-badge {
@@ -487,6 +554,7 @@ input[type="radio"] {
   gap: var(--space-2);
   color: var(--color-label-secondary);
   font-size: var(--font-size-body);
+  white-space: nowrap;
 }
 
 .status-dot {
@@ -517,8 +585,7 @@ input[type="radio"] {
   background: var(--status-warning);
 }
 
-.plain-list,
-.selection-list {
+.plain-list {
   margin: var(--space-3) 0 0;
   padding: 0;
   list-style: none;
@@ -539,11 +606,6 @@ input[type="radio"] {
   border-bottom: 0;
 }
 
-.plain-list strong,
-.plain-list span {
-  display: block;
-}
-
 /* Rows mounted by a poll refresh (new keys) fade in at the top. */
 .plain-list li {
   animation: row-enter var(--duration-standard) var(--easing-standard)
@@ -551,214 +613,63 @@ input[type="radio"] {
 }
 
 .plain-list strong {
-  font-weight: var(--font-weight-medium);
-}
-
-.plain-list span {
-  color: var(--color-label-secondary);
-}
-
-.selection-list {
-  overflow: hidden;
-}
-
-.selection-list button {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border: 0;
-  border-bottom: 1px solid var(--color-separator);
-  background: transparent;
-  color: var(--color-label);
-  font-size: var(--font-size-body);
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--duration-fast) var(--easing-standard),
-    box-shadow var(--duration-fast) var(--easing-standard);
-}
-
-.selection-list button:hover {
-  background: var(--color-selection);
-}
-
-.selection-list li:last-child button {
-  border-bottom: 0;
-}
-
-.selection-list span strong {
   display: block;
   font-weight: var(--font-weight-medium);
 }
 
-.selection-list span {
-  color: var(--color-label-secondary);
+/* Row body may shrink so long metadata truncates instead of overflowing. */
+.row-body {
+  flex: 1;
+  min-width: 0;
 }
 
-/* Setup flow */
-.setup-layout {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: var(--space-6);
-  background: var(--color-content-bg);
-}
-
-/* Setup progress bar — a fill strip bleeding into the card's top edge,
-   so progress reads as part of the card rather than a floating widget.
-   It sits outside the keyed body to persist and animate across steps. */
-.setup-progress {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 4px;
-  background: var(--color-separator);
-}
-
-.setup-progress-fill {
-  height: 100%;
-  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-  background: var(--color-accent);
-  transition: width var(--duration-standard) var(--easing-standard);
-}
-
-.setup-progress-fill[data-step="1"] {
-  width: 33.33%;
-}
-
-.setup-progress-fill[data-step="2"] {
-  width: 66.67%;
-}
-
-.setup-progress-fill[data-step="3"] {
-  width: 100%;
-}
-
-/* Step 3 renders a page instead of a card; the bar joins the content
-   column there. */
-.setup-detail .setup-progress {
-  position: static;
-  max-width: var(--size-content-column);
-  margin: 0 0 var(--space-3);
-  border-radius: var(--radius-pill);
-}
-
-.setup-card {
-  position: relative;
+.row-meta {
+  display: block;
   overflow: hidden;
-  width: min(440px, 100%);
-  padding: var(--space-6);
-  border: 1px solid var(--color-separator);
-  border-radius: var(--radius-dialog);
-  background: var(--color-card-bg);
-  box-shadow: var(--shadow-dialog);
-  /* Runs once when the shell first mounts; step changes only swap the
-     keyed body. */
-  animation: page-enter var(--duration-slow) var(--easing-standard);
-}
-
-/* The card shell persists across setup steps; only the keyed body
-   cross-fades, which also keeps the progress strip from remounting. */
-.setup-card-body {
-  animation: page-enter var(--duration-slow) var(--easing-standard);
-}
-
-.setup-card h1 {
-  font-size: var(--font-size-h1);
-  line-height: var(--line-height-h1);
-}
-
-.setup-card > p:not(.eyebrow) {
-  margin: var(--space-3) 0 var(--space-5);
   color: var(--color-label-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.setup-card label {
-  display: grid;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-  color: var(--color-label-secondary);
-  font-size: var(--font-size-body);
-}
-
-.setup-card .button + label,
-.setup-card label + .button,
-.setup-card .button + .button {
-  margin-top: var(--space-3);
-}
-
-.setup-detail {
-  min-height: 100vh;
-  padding: var(--size-titlebar) var(--space-6) var(--space-6);
-  background: var(--color-content-bg);
-  animation: page-enter var(--duration-slow) var(--easing-standard);
-}
-
-.selection-summary {
-  margin: var(--space-2) 0 0;
-  color: var(--color-label-secondary);
+.button-row .row-meta {
   font-size: var(--font-size-caption);
 }
 
-.skeleton div {
-  position: relative;
-  overflow: hidden;
-  height: 14px;
-  margin-top: var(--space-3);
+/* Inline command feedback; the icon and text carry the tone, color alone
+   never does. */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-control);
-  background: var(--color-selection);
+  font-size: var(--font-size-body);
 }
 
-.skeleton div:nth-of-type(1) {
-  width: 92%;
+.notice svg {
+  width: var(--size-icon-nav);
+  height: var(--size-icon-nav);
+  flex-shrink: 0;
 }
 
-.skeleton div:nth-of-type(2) {
-  width: 74%;
-}
-
-.skeleton div:nth-of-type(3) {
-  width: 84%;
-}
-
-.skeleton div::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--color-card-bg),
-    transparent
-  );
-  animation: skeleton-sweep var(--duration-sweep) var(--easing-standard)
-    infinite;
-}
-
-/* Stagger the sweep phase so the bars do not shimmer in lockstep. */
-.skeleton div:nth-of-type(2)::after {
-  animation-delay: calc(var(--duration-stagger) * 4);
-}
-
-.skeleton div:nth-of-type(3)::after {
-  animation-delay: calc(var(--duration-stagger) * 8);
-}
-
-/* Inline alerts shake once on mount; the full-card unavailable state is
-   excluded because it already enters with page-enter. */
-[role="alert"]:not(.setup-card) {
+.notice[data-tone="negative"] {
+  background: var(--status-negative-soft);
+  color: var(--status-negative);
   animation: alert-shake var(--duration-slow) var(--easing-standard);
 }
 
-.error-panel {
-  border-color: var(--status-negative);
-  background: var(--status-negative-soft);
+.notice[data-tone="positive"] {
+  color: var(--status-positive);
 }
 
-/* Dialogs */
+.notice-check {
+  animation: check-pop var(--duration-standard) var(--easing-emphasized)
+    backwards;
+}
+
+/* Modal dialogs follow macOS alert conventions: centered card, title,
+   supporting text, trailing button cluster. */
 .dialog-backdrop {
   position: fixed;
   z-index: var(--z-dialog);
@@ -771,7 +682,7 @@ input[type="radio"] {
 }
 
 .dialog {
-  width: min(480px, 100%);
+  width: min(var(--size-dialog-max), 100%);
   max-height: calc(100vh - var(--space-8));
   overflow: auto;
   padding: var(--space-5);
@@ -782,46 +693,29 @@ input[type="radio"] {
   animation: dialog-enter var(--duration-standard) var(--easing-emphasized);
 }
 
-/* Exit runs after requestClose flips data-closing; DialogFrame calls the
-   real onClose on animationend so the exit always completes first. */
-.dialog-backdrop[data-closing="true"] {
-  animation: backdrop-exit var(--duration-fast) var(--easing-standard)
-    forwards;
-}
-
-.dialog[data-closing="true"] {
-  animation: dialog-exit var(--duration-fast) var(--easing-standard)
-    forwards;
-}
-
 .dialog h2 {
   font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+}
+
+.dialog > p {
+  margin: var(--space-2) 0 0;
+}
+
+.dialog > .button-row {
+  margin-top: var(--space-4);
 }
 
 .dialog form {
   display: grid;
-  gap: var(--space-4);
-  margin-top: var(--space-4);
-}
-
-.dialog label {
-  display: grid;
-  gap: var(--space-1);
-  color: var(--color-label-secondary);
-  font-size: var(--font-size-body);
-}
-
-.dialog label:has(> input[type="checkbox"]),
-.dialog fieldset label {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-label);
+  gap: var(--space-3);
+  margin-top: var(--space-3);
 }
 
 .dialog fieldset {
-  display: flex;
-  gap: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
   padding: var(--space-3);
   border: 1px solid var(--color-separator);
   border-radius: var(--radius-control);
@@ -831,77 +725,23 @@ input[type="radio"] {
   padding: 0 var(--space-1);
   color: var(--color-label-secondary);
   font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
 }
 
-.dialog .command-rules {
+.dialog fieldset p {
+  margin: 0;
+}
+
+.dialog fieldset label {
   display: grid;
-  gap: var(--space-3);
-}
-
-.command-rule {
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-separator);
-  border-radius: var(--radius-control);
-}
-
-.command-rule input {
-  font-family: var(--font-mono);
-}
-
-.command-argument {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: var(--space-2);
-}
-
-/* Brand mark draw-in (setup screens, once per mount) */
-.brand-mark-animated {
-  display: block;
-  width: var(--space-8);
-  height: var(--space-8);
-  margin-bottom: var(--space-4);
-  border-radius: var(--radius-card);
-}
-
-.brand-mark-path {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  animation: brand-mark-draw var(--duration-brand) var(--easing-standard)
-    forwards;
-}
-
-.brand-mark-dot {
-  opacity: 0;
-  animation: brand-mark-dot var(--duration-standard) var(--easing-standard)
-    calc(var(--duration-brand) * 0.75) forwards;
+  gap: var(--space-1);
+  color: var(--color-label-secondary);
 }
 
 /* Values swapped by a poll refresh cross-fade via a keyed remount. */
 .refresh-value {
   display: inline-block;
   animation: refresh-value var(--duration-fast) var(--easing-standard);
-}
-
-/* Confirmation checkmark pop */
-.status-message-check {
-  display: block;
-  width: 20px;
-  height: 20px;
-  margin-bottom: var(--space-2);
-  animation: check-pop var(--duration-standard) var(--easing-emphasized)
-    backwards;
-}
-
-.status-message-check circle,
-.status-message-check path {
-  stroke: var(--status-positive);
-}
-
-.command-rule-actions {
-  justify-content: flex-start;
 }
 
 @media (max-width: 760px) {
@@ -920,7 +760,7 @@ input[type="radio"] {
 
   .nav {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .nav-link {
@@ -932,16 +772,9 @@ input[type="radio"] {
     padding: var(--space-5) var(--space-4);
   }
 
-  .action-row,
   .section-heading {
     align-items: stretch;
     flex-direction: column;
-  }
-}
-
-@media (max-width: 380px) {
-  .nav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

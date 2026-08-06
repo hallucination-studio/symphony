@@ -13,7 +13,10 @@ test("Artist prompt owns implementation behavior and an untrusted human report o
     }),
     parseRootState({
       workspace_path: "/workspace", run_directory: "/run", root_branch: "root/ENG-1",
-      current_phase: "cycle", task_state_markdown: "Lexer trusted", pending_finding: "Ambiguity remains",
+      current_phase: "cycle", task_state_markdown: "Lexer trusted",
+      latest_critique: {
+        verdict: "incomplete", task_state_markdown: "Lexer trusted", pending_finding: "Ambiguity remains",
+      },
     }),
   );
 

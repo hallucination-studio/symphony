@@ -1,14 +1,14 @@
 import { execFile } from "node:child_process";
-import { open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { open, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
-const BINDING_FILE = "root-binding.json";
 
 export interface RootWorkspaceInput {
   readonly rootId: string;
-  readonly workspace: string;
+  readonly preferredWorkspace?: string | undefined;
+  readonly invocationCwd: string;
   readonly runDirectory: string;
 }
 
@@ -19,19 +19,16 @@ export interface BoundRootWorkspace {
   readonly rootBranch: string;
 }
 
-interface BindingRecord {
-  readonly root_id: string;
-  readonly workspace_path: string;
-  readonly run_directory: string;
-  readonly root_branch: string;
-}
-
 function contains(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-async function git(workspace: string, args: readonly string[]): Promise<string> {
+async function git(
+  workspace: string,
+  args: readonly string[],
+  reason = "invalid_root_workspace",
+): Promise<string> {
   try {
     const result = await execute("git", ["-C", workspace, ...args], {
       encoding: "utf8",
@@ -40,85 +37,115 @@ async function git(workspace: string, args: readonly string[]): Promise<string> 
     });
     return result.stdout.trim();
   } catch {
-    throw new Error("invalid_root_workspace");
+    throw new Error(reason);
   }
 }
 
-function parseBinding(source: string): BindingRecord {
-  let value: unknown;
-  try { value = JSON.parse(source); } catch { throw new Error("invalid_root_binding"); }
-  if (typeof value !== "object" || value === null) throw new Error("invalid_root_binding");
-  const record = value as Record<string, unknown>;
-  for (const key of ["root_id", "workspace_path", "run_directory", "root_branch"] as const) {
-    if (typeof record[key] !== "string" || record[key].length === 0) throw new Error("invalid_root_binding");
-  }
-  return record as unknown as BindingRecord;
-}
-
-async function persistBinding(file: string, record: BindingRecord): Promise<void> {
-  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const handle = await open(temporary, "wx", 0o600);
+async function existingPath(value: string, reason: string): Promise<string | undefined> {
   try {
-    await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8");
+    return await realpath(value);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(reason);
+  }
+}
+
+async function requirePath(value: string, reason: string): Promise<string> {
+  const resolved = await existingPath(value, reason);
+  if (resolved === undefined) throw new Error(reason);
+  return resolved;
+}
+
+async function resolveGitRoot(workspace: string): Promise<{ readonly path: string; readonly branch: string }> {
+  const topLevel = await git(workspace, ["rev-parse", "--show-toplevel"]);
+  const root = await requirePath(topLevel, "invalid_root_workspace");
+  const branch = await git(workspace, ["symbolic-ref", "--quiet", "--short", "HEAD"], "workspace_branch_unavailable");
+  if (branch.length === 0) throw new Error("workspace_branch_unavailable");
+  return { path: root, branch };
+}
+
+async function gitRoot(workspace: string): Promise<{ readonly path: string; readonly branch: string }> {
+  const resolved = await resolveGitRoot(workspace);
+  if (resolved.path !== workspace) throw new Error("workspace_is_not_git_root");
+  return resolved;
+}
+
+async function ensureWritableDirectory(directory: string): Promise<void> {
+  const probe = path.join(directory, `.write-probe.${process.pid}.${crypto.randomUUID()}`);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(probe, "wx", 0o600);
+  } catch {
+    throw new Error("run_directory_not_writable");
+  }
+  try {
     await handle.sync();
   } finally {
     await handle.close();
-  }
-  try {
-    await rename(temporary, file);
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
+    await unlink(probe).catch(() => undefined);
   }
 }
 
+function validateRootId(rootId: string): string {
+  const value = rootId.trim();
+  if (value.length === 0 || value.includes("\0") || /[\r\n]/u.test(value)) {
+    throw new Error("invalid_root_id");
+  }
+  return value;
+}
+
+async function preparePreferredWorkspace(
+  preferredWorkspace: string,
+  invocationRoot: string,
+  rootId: string,
+): Promise<{ readonly path: string; readonly branch: string }> {
+  const existing = await existingPath(preferredWorkspace, "invalid_root_workspace");
+  if (existing !== undefined) return gitRoot(existing);
+
+  const parent = await existingPath(path.dirname(path.resolve(preferredWorkspace)), "preferred_workspace_unavailable");
+  if (parent === undefined) throw new Error("preferred_workspace_unavailable");
+  const branch = `root/${rootId}`;
+  await git(
+    invocationRoot,
+    ["worktree", "add", "-b", branch, preferredWorkspace, "HEAD"],
+    "preferred_workspace_prepare_failed",
+  );
+  const created = await requirePath(preferredWorkspace, "preferred_workspace_prepare_failed");
+  const bound = await gitRoot(created);
+  if (bound.branch !== branch) throw new Error("preferred_workspace_branch_mismatch");
+  return { path: bound.path, branch: bound.branch };
+}
+
+/**
+ * Deterministically prepares one Root workspace.  The returned value is the
+ * only binding; no filesystem record is written here.
+ */
 export async function bindRootWorkspace(input: RootWorkspaceInput): Promise<BoundRootWorkspace> {
-  if (input.rootId.trim().length === 0) throw new Error("invalid_root_id");
-  let workspacePath: string;
-  let runDirectory: string;
-  try {
-    [workspacePath, runDirectory] = await Promise.all([
-      realpath(input.workspace),
-      realpath(input.runDirectory),
-    ]);
-  } catch {
-    throw new Error("supplied_path_unavailable");
-  }
-  if (contains(workspacePath, runDirectory)) throw new Error("run_directory_inside_workspace");
+  const rootId = validateRootId(input.rootId);
+  const invocationCwd = await requirePath(input.invocationCwd, "invocation_workspace_unavailable");
+  const invocation = await resolveGitRoot(invocationCwd);
+  const runDirectory = await requirePath(input.runDirectory, "run_directory_unavailable");
 
-  const topLevel = await git(workspacePath, ["rev-parse", "--show-toplevel"]);
-  if (await realpath(topLevel) !== workspacePath) throw new Error("workspace_is_not_git_root");
-  const rootBranch = await git(workspacePath, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-    .catch(() => { throw new Error("workspace_branch_unavailable"); });
-  const remotes = await git(workspacePath, ["remote"]);
-  if (remotes.split("\n").filter(Boolean).length === 0) throw new Error("workspace_remote_unavailable");
-
-  const probe = path.join(runDirectory, `.write-probe.${process.pid}.${crypto.randomUUID()}`);
-  const probeHandle = await open(probe, "wx", 0o600).catch(() => { throw new Error("run_directory_not_writable"); });
-  await probeHandle.close();
-  await unlink(probe);
-
-  const record = Object.freeze({
-    root_id: input.rootId,
-    workspace_path: workspacePath,
-    run_directory: runDirectory,
-    root_branch: rootBranch,
-  });
-  const bindingPath = path.join(runDirectory, BINDING_FILE);
-  let existing: BindingRecord | null = null;
-  try { existing = parseBinding(await readFile(bindingPath, "utf8")); } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  if (existing !== null) {
-    if (JSON.stringify(existing) !== JSON.stringify(record)) throw new Error("root_binding_mismatch");
-  } else {
-    await persistBinding(bindingPath, record);
+  if (input.preferredWorkspace !== undefined) {
+    const preferred = path.resolve(input.preferredWorkspace);
+    if (contains(preferred, runDirectory)) throw new Error("run_directory_inside_workspace");
+    const workspace = await preparePreferredWorkspace(input.preferredWorkspace, invocation.path, rootId);
+    if (contains(workspace.path, runDirectory)) throw new Error("run_directory_inside_workspace");
+    await ensureWritableDirectory(runDirectory);
+    return Object.freeze({
+      rootId,
+      workspacePath: workspace.path,
+      runDirectory,
+      rootBranch: workspace.branch,
+    });
   }
 
+  if (contains(invocation.path, runDirectory)) throw new Error("run_directory_inside_workspace");
+  await ensureWritableDirectory(runDirectory);
   return Object.freeze({
-    rootId: record.root_id,
-    workspacePath: record.workspace_path,
-    runDirectory: record.run_directory,
-    rootBranch: record.root_branch,
+    rootId,
+    workspacePath: invocation.path,
+    runDirectory,
+    rootBranch: invocation.branch,
   });
 }

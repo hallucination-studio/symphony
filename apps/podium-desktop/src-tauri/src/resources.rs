@@ -1,57 +1,57 @@
-//! Stable local resources for one Podium Root allocation.
+//! Deterministic local paths for one Podium Root.
 //!
-//! The allocator owns creation and validation of a Root worktree and its
-//! external run directory.  It never removes, resets, adopts, or replaces an
-//! existing resource.  Assignment and process state remain outside this
-//! module.
+//! Podium derives a preferred workspace and external run directory from its
+//! app-data root and the provider Root ID. Root Reconcile owns any worktree
+//! creation at the preferred workspace; this module creates only the run
+//! directory used for private Conductor diagnostics and cycle records.
 
-use crate::domain::{ProjectBinding, RootAllocation};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const WORKSPACE_DIRECTORY: &str = "workspaces";
 const RUN_DIRECTORY: &str = "runs";
 const MAX_ROOT_ID_LENGTH: usize = 256;
-const MAX_BRANCH_LENGTH: usize = 200;
+const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024;
 
-/// A bounded, sanitized resource-allocation error.  Git output is deliberately
-/// discarded: it can contain arbitrary repository hooks or user data.
+/// A bounded, sanitized resource error. Filesystem and Git details never cross
+/// this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceError {
     InvalidInput,
-    RepositoryInvalid,
-    BaseBranchInvalid,
     AppDataRootInvalid,
-    AllocationMismatch,
-    ResourceExists,
-    ResourceMissing,
-    ResourceInvalid,
-    Io,
+    RepositoryInvalid,
+    WorkspaceInvalid,
+    WorkspaceDirty,
     Git,
+    Io,
 }
 
 impl fmt::Display for ResourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidInput => "root_resource_input_invalid",
-            Self::RepositoryInvalid => "root_resource_repository_invalid",
-            Self::BaseBranchInvalid => "root_resource_base_branch_invalid",
             Self::AppDataRootInvalid => "root_resource_app_data_root_invalid",
-            Self::AllocationMismatch => "root_resource_allocation_mismatch",
-            Self::ResourceExists => "root_resource_already_exists",
-            Self::ResourceMissing => "root_resource_missing",
-            Self::ResourceInvalid => "root_resource_invalid",
-            Self::Io => "root_resource_io_failed",
+            Self::RepositoryInvalid => "root_resource_repository_invalid",
+            Self::WorkspaceInvalid => "root_resource_workspace_invalid",
+            Self::WorkspaceDirty => "root_resource_workspace_dirty",
             Self::Git => "root_resource_git_failed",
+            Self::Io => "root_resource_io_failed",
         })
     }
 }
 
 impl std::error::Error for ResourceError {}
 
-/// Allocates under one caller-selected app-data root.
+/// Deterministic paths supplied to one Conductor launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootResources {
+    pub workspace_path: PathBuf,
+    pub run_directory: PathBuf,
+}
+
+/// Derives paths under one caller-selected app-data root.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RootResourceAllocator {
     app_data_root: PathBuf,
@@ -77,170 +77,60 @@ impl RootResourceAllocator {
         &self.app_data_root
     }
 
-    /// Allocate or validate one stable Root allocation.
+    /// Derive stable paths and ensure the external run directory exists.
     ///
-    /// `existing` is the persisted allocation loaded after a Desktop restart.
-    /// When present, its paths are used exactly as supplied and are validated
-    /// against the repository and generated branch.  No replacement paths are
-    /// derived in that branch.
-    pub fn allocate(
-        &self,
-        binding: &ProjectBinding,
-        root_id: &str,
-        existing: Option<&RootAllocation>,
-    ) -> Result<RootAllocation, ResourceError> {
+    /// This operation is idempotent so a Desktop restart derives the same
+    /// paths without reading a durable allocation record. The workspace is
+    /// deliberately left absent when Root Reconcile has not prepared it.
+    pub fn allocate(&self, root_id: &str) -> Result<RootResources, ResourceError> {
         validate_root_id(root_id)?;
-        validate_base_branch(&binding.base_branch)?;
-
-        let repository = canonical_repository(Path::new(&binding.repository_path))?;
         let app_data_root = prepare_app_data_root(&self.app_data_root)?;
-        let app_data_canonical =
-            fs::canonicalize(&app_data_root).map_err(|_| ResourceError::AppDataRootInvalid)?;
-        if repository == app_data_canonical
-            || repository.starts_with(&app_data_canonical)
-            || app_data_canonical.starts_with(&repository)
-        {
-            // The app-data root must not be the repository itself or live
-            // inside it (and vice versa), otherwise a worktree could overlap
-            // the source checkout and lose isolation.
-            return Err(ResourceError::AppDataRootInvalid);
-        }
-
         let slug = stable_slug(root_id);
-        let branch = branch_name_from_slug(&slug)?;
-
-        if let Some(existing) = existing {
-            if existing.root_id != root_id {
-                return Err(ResourceError::AllocationMismatch);
-            }
-            let workspace = absolute_path(Path::new(&existing.workspace_path))?;
-            let run_directory = absolute_path(Path::new(&existing.run_directory))?;
-            assert_within(&app_data_root, &workspace)?;
-            assert_within(&app_data_root, &run_directory)?;
-            let workspace_real =
-                fs::canonicalize(&workspace).map_err(|_| ResourceError::ResourceMissing)?;
-            let run_directory_real =
-                fs::canonicalize(&run_directory).map_err(|_| ResourceError::ResourceMissing)?;
-            assert_within(&app_data_canonical, &workspace_real)?;
-            assert_within(&app_data_canonical, &run_directory_real)?;
-            if workspace == run_directory || workspace == repository || run_directory == repository
-            {
-                return Err(ResourceError::AllocationMismatch);
-            }
-            if workspace_real.starts_with(&repository)
-                || repository.starts_with(&workspace_real)
-                || run_directory_real.starts_with(&workspace_real)
-                || workspace_real.starts_with(&run_directory_real)
-            {
-                return Err(ResourceError::AllocationMismatch);
-            }
-            validate_existing_workspace(&workspace, &repository, &branch)?;
-            validate_existing_run_directory(&run_directory)?;
-            return Ok(existing.clone());
-        }
-
-        let workspace = app_data_root.join(WORKSPACE_DIRECTORY).join(&slug);
+        let workspace_path = app_data_root.join(WORKSPACE_DIRECTORY).join(&slug);
         let run_directory = app_data_root.join(RUN_DIRECTORY).join(&slug);
-        assert_within(&app_data_root, &workspace)?;
-        assert_within(&app_data_root, &run_directory)?;
-        if workspace.starts_with(&repository) || repository.starts_with(&workspace) {
-            return Err(ResourceError::AppDataRootInvalid);
-        }
-        if workspace.exists() || run_directory.exists() {
-            // Never adopt an untracked directory.  The caller must provide the
-            // exact persisted allocation if it intends to reuse one.
-            return Err(ResourceError::ResourceExists);
-        }
 
-        fs::create_dir_all(workspace.parent().ok_or(ResourceError::AppDataRootInvalid)?)
+        fs::create_dir_all(workspace_path.parent().ok_or(ResourceError::AppDataRootInvalid)?)
             .map_err(|_| ResourceError::Io)?;
         fs::create_dir_all(run_directory.parent().ok_or(ResourceError::AppDataRootInvalid)?)
             .map_err(|_| ResourceError::Io)?;
+        fs::create_dir_all(&run_directory).map_err(|_| ResourceError::Io)?;
 
-        // Podium reserves the stable path only. Root Reconcile's Prepare phase
-        // owns worktree and branch creation at that exact location.
-        if let Err(error) = fs::create_dir(&run_directory) {
-            return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
-                ResourceError::ResourceExists
-            } else {
-                ResourceError::Io
-            });
-        }
-
-        let allocation = RootAllocation {
-            root_id: root_id.to_owned(),
-            workspace_path: path_string(&workspace)?,
-            run_directory: path_string(&run_directory)?,
-        };
-        validate_existing_run_directory(&run_directory)?;
-        Ok(allocation)
+        Ok(RootResources { workspace_path, run_directory })
     }
 
-    pub fn allocate_root(
+    pub fn allocate_root(&self, root_id: &str) -> Result<RootResources, ResourceError> {
+        self.allocate(root_id)
+    }
+
+    /// Remove one completed Root worktree after an explicit operator action.
+    ///
+    /// The target is derived from this allocator's app-data root and `root_id`;
+    /// callers cannot supply an arbitrary path. Git must identify the target
+    /// as a clean linked worktree of `repository_path` before the bounded,
+    /// non-forced removal is attempted. The diagnostics directory is never
+    /// touched by this operation.
+    pub fn cleanup_workspace(
         &self,
-        binding: &ProjectBinding,
+        repository_path: impl AsRef<Path>,
         root_id: &str,
-        existing: Option<&RootAllocation>,
-    ) -> Result<RootAllocation, ResourceError> {
-        self.allocate(binding, root_id, existing)
+    ) -> Result<(), ResourceError> {
+        validate_root_id(root_id)?;
+        let app_data_root = existing_app_data_root(&self.app_data_root)?;
+        let repository = canonical_repository(repository_path.as_ref())?;
+        validate_disjoint_paths(&app_data_root, &repository)?;
+        let workspace = derived_workspace_target(&app_data_root, root_id)?;
+        validate_workspace(&workspace, &app_data_root, &repository)?;
+        if workspace_is_dirty(&workspace)? {
+            return Err(ResourceError::WorkspaceDirty);
+        }
+        remove_worktree(&repository, &workspace)
     }
-}
-
-/// Convenience function for callers that do not need to retain an allocator.
-pub fn allocate_root_allocation(
-    repository_path: impl AsRef<Path>,
-    base_branch: &str,
-    root_id: &str,
-    app_data_root: impl AsRef<Path>,
-    existing: Option<&RootAllocation>,
-) -> Result<RootAllocation, ResourceError> {
-    let binding = ProjectBinding {
-        project_id: "resource-allocation".into(),
-        routing_label: "resource-allocation".into(),
-        repository_path: path_string(repository_path.as_ref())?,
-        base_branch: base_branch.to_owned(),
-        concurrency: 1,
-        reconcile_agent: "codex".into(),
-        reconcile_model: None,
-        reconcile_reasoning_effort: None,
-        artist_agent: "codex".into(),
-        artist_model: None,
-        artist_reasoning_effort: None,
-        critic_agent: "codex".into(),
-        critic_model: None,
-        critic_reasoning_effort: None,
-    };
-    // Keep this helper's public input focused on repository/base/root while
-    // using the same validation and Git path as ProjectBinding callers.
-    RootResourceAllocator::new(app_data_root.as_ref()).allocate(&binding, root_id, existing)
-}
-
-/// Derive the branch used for a Root.  It contains only Git-safe ASCII and is
-/// deterministic for a provider Root ID.
-pub fn root_branch_name(root_id: &str) -> Result<String, ResourceError> {
-    validate_root_id(root_id)?;
-    branch_name_from_slug(&stable_slug(root_id))
 }
 
 /// Derive the stable path component used for both workspace and run paths.
 pub fn root_resource_slug(root_id: &str) -> Result<String, ResourceError> {
     validate_root_id(root_id)?;
     Ok(stable_slug(root_id))
-}
-
-fn canonical_repository(path: &Path) -> Result<PathBuf, ResourceError> {
-    if !path.is_absolute() || !path.is_dir() {
-        return Err(ResourceError::RepositoryInvalid);
-    }
-    let canonical = fs::canonicalize(path).map_err(|_| ResourceError::RepositoryInvalid)?;
-    let top = git_output(&canonical, &["rev-parse", "--show-toplevel"])?;
-    let top = PathBuf::from(top.trim());
-    let top = fs::canonicalize(top).map_err(|_| ResourceError::RepositoryInvalid)?;
-    if top != canonical {
-        return Err(ResourceError::RepositoryInvalid);
-    }
-    let _ = git_output(&canonical, &["rev-parse", "--verify", "HEAD"])?;
-    Ok(canonical)
 }
 
 fn prepare_app_data_root(path: &Path) -> Result<PathBuf, ResourceError> {
@@ -252,68 +142,176 @@ fn prepare_app_data_root(path: &Path) -> Result<PathBuf, ResourceError> {
     if !canonical.is_dir() {
         return Err(ResourceError::AppDataRootInvalid);
     }
-    Ok(path.to_path_buf())
+    Ok(canonical)
 }
 
-fn validate_existing_workspace(
+fn existing_app_data_root(path: &Path) -> Result<PathBuf, ResourceError> {
+    if !path.is_absolute() || path.to_string_lossy().contains('\0') {
+        return Err(ResourceError::AppDataRootInvalid);
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| ResourceError::AppDataRootInvalid)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ResourceError::AppDataRootInvalid);
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| ResourceError::AppDataRootInvalid)?;
+    if !canonical.is_dir() {
+        return Err(ResourceError::AppDataRootInvalid);
+    }
+    Ok(canonical)
+}
+
+fn canonical_repository(path: &Path) -> Result<PathBuf, ResourceError> {
+    if !path.is_absolute() || path.to_string_lossy().contains('\0') {
+        return Err(ResourceError::RepositoryInvalid);
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| ResourceError::RepositoryInvalid)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ResourceError::RepositoryInvalid);
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| ResourceError::RepositoryInvalid)?;
+    let top = git_output(&canonical, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| ResourceError::RepositoryInvalid)?;
+    let top = canonicalize_git_path(&canonical, top.trim())
+        .map_err(|_| ResourceError::RepositoryInvalid)?;
+    if top != canonical {
+        return Err(ResourceError::RepositoryInvalid);
+    }
+    let bare = git_output(&canonical, &["rev-parse", "--is-bare-repository"])
+        .map_err(|_| ResourceError::RepositoryInvalid)?;
+    if bare.trim() != "false" {
+        return Err(ResourceError::RepositoryInvalid);
+    }
+    Ok(canonical)
+}
+
+fn derived_workspace_target(app_data_root: &Path, root_id: &str) -> Result<PathBuf, ResourceError> {
+    let workspace_directory = app_data_root.join(WORKSPACE_DIRECTORY);
+    let metadata =
+        fs::symlink_metadata(&workspace_directory).map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ResourceError::WorkspaceInvalid);
+    }
+    let canonical_directory =
+        fs::canonicalize(&workspace_directory).map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if canonical_directory != workspace_directory || !canonical_directory.starts_with(app_data_root)
+    {
+        return Err(ResourceError::WorkspaceInvalid);
+    }
+
+    let target = workspace_directory.join(stable_slug(root_id));
+    let metadata = fs::symlink_metadata(&target).map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ResourceError::WorkspaceInvalid);
+    }
+    let canonical_target =
+        fs::canonicalize(&target).map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if canonical_target != target || !canonical_target.starts_with(app_data_root) {
+        return Err(ResourceError::WorkspaceInvalid);
+    }
+    Ok(target)
+}
+
+fn validate_workspace(
     workspace: &Path,
+    app_data_root: &Path,
     repository: &Path,
-    branch: &str,
 ) -> Result<(), ResourceError> {
-    if !workspace.is_absolute() || !workspace.is_dir() {
-        return Err(ResourceError::ResourceMissing);
+    if workspace == app_data_root
+        || workspace == repository
+        || workspace.starts_with(repository)
+        || repository.starts_with(workspace)
+    {
+        return Err(ResourceError::WorkspaceInvalid);
     }
-    let workspace_top = git_output(workspace, &["rev-parse", "--show-toplevel"])?;
-    let workspace_top =
-        fs::canonicalize(workspace_top.trim()).map_err(|_| ResourceError::ResourceInvalid)?;
-    if workspace_top != fs::canonicalize(workspace).map_err(|_| ResourceError::ResourceInvalid)? {
-        return Err(ResourceError::AllocationMismatch);
+    let top = git_output(workspace, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| ResourceError::WorkspaceInvalid)?;
+    let top = canonicalize_git_path(workspace, top.trim())
+        .map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if top != workspace {
+        return Err(ResourceError::WorkspaceInvalid);
     }
-    let common_git_directory = git_output(workspace, &["rev-parse", "--git-common-dir"])?;
-    let common_git_directory = fs::canonicalize(common_git_directory.trim())
-        .map_err(|_| ResourceError::ResourceInvalid)?;
-    let repository_git_directory =
-        fs::canonicalize(repository.join(".git")).map_err(|_| ResourceError::ResourceInvalid)?;
-    if common_git_directory != repository_git_directory {
-        return Err(ResourceError::AllocationMismatch);
+    let inside = git_output(workspace, &["rev-parse", "--is-inside-work-tree"])
+        .map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if inside.trim() != "true" {
+        return Err(ResourceError::WorkspaceInvalid);
     }
-    let current_branch = git_output(workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    if current_branch.trim() != branch {
-        return Err(ResourceError::AllocationMismatch);
+    let repository_common = git_output(repository, &["rev-parse", "--git-common-dir"])
+        .map_err(|_| ResourceError::RepositoryInvalid)?;
+    let repository_common = canonicalize_git_path(repository, repository_common.trim())
+        .map_err(|_| ResourceError::RepositoryInvalid)?;
+    let workspace_common = git_output(workspace, &["rev-parse", "--git-common-dir"])
+        .map_err(|_| ResourceError::WorkspaceInvalid)?;
+    let workspace_common = canonicalize_git_path(workspace, workspace_common.trim())
+        .map_err(|_| ResourceError::WorkspaceInvalid)?;
+    if workspace_common != repository_common {
+        return Err(ResourceError::WorkspaceInvalid);
+    }
+    if !workspace.starts_with(app_data_root) {
+        return Err(ResourceError::WorkspaceInvalid);
+    }
+    Ok(())
+}
+
+fn workspace_is_dirty(workspace: &Path) -> Result<bool, ResourceError> {
+    let status = git_output(
+        workspace,
+        &["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"],
+    )
+    .map_err(|_| ResourceError::WorkspaceInvalid)?;
+    Ok(!status.is_empty())
+}
+
+fn remove_worktree(repository: &Path, workspace: &Path) -> Result<(), ResourceError> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["worktree", "remove", "--"])
+        .arg(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| ResourceError::Git)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ResourceError::Git)
+    }
+}
+
+fn validate_disjoint_paths(app_data_root: &Path, repository: &Path) -> Result<(), ResourceError> {
+    if app_data_root == repository
+        || app_data_root.starts_with(repository)
+        || repository.starts_with(app_data_root)
+    {
+        return Err(ResourceError::AppDataRootInvalid);
     }
     Ok(())
 }
 
-fn validate_existing_run_directory(path: &Path) -> Result<(), ResourceError> {
-    if !path.is_absolute() || !path.is_dir() {
-        return Err(ResourceError::ResourceMissing);
+fn canonicalize_git_path(cwd: &Path, value: &str) -> Result<PathBuf, ResourceError> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(ResourceError::Git);
     }
-    let metadata = fs::metadata(path).map_err(|_| ResourceError::ResourceMissing)?;
-    if metadata.permissions().readonly() {
-        return Err(ResourceError::ResourceInvalid);
-    }
-    Ok(())
+    let path = Path::new(value);
+    let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+    fs::canonicalize(path).map_err(|_| ResourceError::Git)
 }
 
-fn absolute_path(path: &Path) -> Result<PathBuf, ResourceError> {
-    if !path.is_absolute() || path.to_string_lossy().contains('\0') {
-        return Err(ResourceError::AllocationMismatch);
+fn git_output(repository: &Path, args: &[&str]) -> Result<String, ResourceError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| ResourceError::Git)?;
+    if !output.status.success() || output.stdout.len() > MAX_GIT_OUTPUT_BYTES {
+        return Err(ResourceError::Git);
     }
-    Ok(path.to_path_buf())
-}
-
-fn path_string(path: &Path) -> Result<String, ResourceError> {
-    if !path.is_absolute() || path.to_string_lossy().contains('\0') {
-        return Err(ResourceError::InvalidInput);
-    }
-    Ok(path.to_string_lossy().into_owned())
-}
-
-fn assert_within(root: &Path, child: &Path) -> Result<(), ResourceError> {
-    if !child.starts_with(root) || child == root {
-        return Err(ResourceError::AllocationMismatch);
-    }
-    Ok(())
+    String::from_utf8(output.stdout).map_err(|_| ResourceError::Git)
 }
 
 fn validate_root_id(root_id: &str) -> Result<(), ResourceError> {
@@ -322,31 +320,6 @@ fn validate_root_id(root_id: &str) -> Result<(), ResourceError> {
         || root_id.chars().any(|ch| ch == '\0' || ch == '\r' || ch == '\n')
     {
         return Err(ResourceError::InvalidInput);
-    }
-    Ok(())
-}
-
-fn validate_base_branch(branch: &str) -> Result<(), ResourceError> {
-    if branch.is_empty()
-        || branch.len() > 256
-        || branch.starts_with('-')
-        || branch.ends_with('.')
-        || branch.ends_with('/')
-        || branch.contains("..")
-        || branch.contains("@{")
-        || branch.chars().any(|ch| {
-            ch.is_ascii_control()
-                || ch == ' '
-                || ch == '~'
-                || ch == '^'
-                || ch == ':'
-                || ch == '?'
-                || ch == '*'
-                || ch == '['
-                || ch == '\\'
-        })
-    {
-        return Err(ResourceError::BaseBranchInvalid);
     }
     Ok(())
 }
@@ -367,14 +340,6 @@ fn stable_slug(root_id: &str) -> String {
     format!("{readable}-{digest}")
 }
 
-fn branch_name_from_slug(slug: &str) -> Result<String, ResourceError> {
-    let branch = format!("symphony/{slug}");
-    if branch.len() > MAX_BRANCH_LENGTH || branch.contains("..") || branch.contains("//") {
-        return Err(ResourceError::InvalidInput);
-    }
-    Ok(branch)
-}
-
 fn fnv1a_hex(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
@@ -384,22 +349,10 @@ fn fnv1a_hex(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-fn git_output(repository: &Path, args: &[&str]) -> Result<String, ResourceError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(args)
-        .output()
-        .map_err(|_| ResourceError::Git)?;
-    if !output.status.success() {
-        return Err(ResourceError::Git);
-    }
-    String::from_utf8(output.stdout).map_err(|_| ResourceError::Git)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempDir(PathBuf);
@@ -422,44 +375,17 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            // Test-owned temporary state is removed by the fixture only.  The
-            // production allocator has no cleanup path.
-            let _ = Command::new("git")
-                .arg("worktree")
-                .arg("remove")
-                .arg("--force")
-                .arg(self.path().join("app/workspaces/root"))
-                .output();
             let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn binding(repository: &Path) -> ProjectBinding {
-        ProjectBinding {
-            project_id: "project-1".into(),
-            routing_label: "core".into(),
-            repository_path: repository.to_string_lossy().into_owned(),
-            base_branch: "main".into(),
-            concurrency: 1,
-            reconcile_agent: "codex".into(),
-            reconcile_model: None,
-            reconcile_reasoning_effort: None,
-            artist_agent: "codex".into(),
-            artist_model: None,
-            artist_reasoning_effort: None,
-            critic_agent: "codex".into(),
-            critic_model: None,
-            critic_reasoning_effort: None,
         }
     }
 
     fn git(repository: &Path, args: &[&str]) {
         let output = Command::new("git").arg("-C").arg(repository).args(args).output().unwrap();
-        assert!(output.status.success(), "git fixture command failed: {:?}", args);
+        assert!(output.status.success(), "git fixture command failed: {args:?}");
     }
 
-    fn fixture_repo(temp: &TempDir) -> PathBuf {
-        let repository = temp.path().join("repo");
+    fn fixture_repo(temp: &TempDir, name: &str) -> PathBuf {
+        let repository = temp.path().join(name);
         fs::create_dir_all(&repository).unwrap();
         git(&repository, &["init", "-q", "-b", "main"]);
         git(&repository, &["config", "user.email", "fixture@example.invalid"]);
@@ -470,112 +396,150 @@ mod tests {
         repository
     }
 
-    fn simulate_root_prepare(repository: &Path, allocation: &RootAllocation) {
-        let status = Command::new("git")
+    fn add_worktree(repository: &Path, target: &Path, root_id: &str) {
+        let branch = format!("fixture/{}", root_resource_slug(root_id).unwrap());
+        let output = Command::new("git")
             .arg("-C")
             .arg(repository)
             .args(["worktree", "add", "-b"])
-            .arg(root_branch_name(&allocation.root_id).unwrap())
-            .arg(&allocation.workspace_path)
-            .arg("main")
-            .status()
+            .arg(branch)
+            .arg(target)
+            .arg("HEAD")
+            .output()
             .unwrap();
-        assert!(status.success());
+        assert!(output.status.success(), "git worktree fixture failed");
     }
 
     #[test]
-    fn first_allocation_reserves_workspace_for_root_prepare_and_creates_run_directory() {
+    fn derives_preferred_workspace_and_creates_only_the_run_directory() {
         let temp = TempDir::new("first");
-        let repository = fixture_repo(&temp);
-        let app_data = temp.path().join("app");
-        let allocator = RootResourceAllocator::new(&app_data);
-        let binding = binding(&repository);
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
 
-        let allocation = allocator.allocate(&binding, "issue-123", None).unwrap();
+        let resources = allocator.allocate("issue-123").unwrap();
 
-        assert_eq!(allocation.root_id, "issue-123");
-        assert!(!Path::new(&allocation.workspace_path).exists());
-        assert!(Path::new(&allocation.run_directory).is_dir());
-        assert!(Path::new(&allocation.workspace_path).starts_with(&app_data));
-        assert!(Path::new(&allocation.run_directory).starts_with(&app_data));
+        assert!(!resources.workspace_path.exists());
+        assert!(resources.run_directory.is_dir());
+        let app_data = fs::canonicalize(temp.path().join("app")).unwrap();
+        assert!(resources.workspace_path.starts_with(&app_data));
+        assert!(resources.run_directory.starts_with(&app_data));
     }
 
     #[test]
-    fn persisted_allocation_is_reused_exactly_after_restart() {
-        let temp = TempDir::new("reuse");
-        let repository = fixture_repo(&temp);
+    fn restart_derives_the_same_paths_and_accepts_a_root_worktree() {
+        let temp = TempDir::new("restart");
         let app_data = temp.path().join("app");
-        let binding = binding(&repository);
-        let first =
-            RootResourceAllocator::new(&app_data).allocate(&binding, "issue-123", None).unwrap();
-        simulate_root_prepare(&repository, &first);
-        let second = RootResourceAllocator::new(&app_data)
-            .allocate(&binding, "issue-123", Some(&first))
-            .unwrap();
+        let allocator = RootResourceAllocator::new(&app_data);
+        let first = allocator.allocate("issue-123").unwrap();
+        fs::create_dir_all(&first.workspace_path).unwrap();
+
+        let second = RootResourceAllocator::new(&app_data).allocate("issue-123").unwrap();
+
         assert_eq!(second, first);
+        assert!(second.workspace_path.is_dir());
+        assert!(second.run_directory.is_dir());
     }
 
     #[test]
-    fn mismatched_or_missing_existing_allocation_fails_closed_without_replacement() {
-        let temp = TempDir::new("mismatch");
-        let repository = fixture_repo(&temp);
-        let app_data = temp.path().join("app");
-        let binding = binding(&repository);
-        let allocator = RootResourceAllocator::new(&app_data);
-        let first = allocator.allocate(&binding, "issue-123", None).unwrap();
-        simulate_root_prepare(&repository, &first);
+    fn derives_distinct_stable_paths_without_git_or_persisted_allocations() {
+        let temp = TempDir::new("stable");
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
+        let first = allocator.allocate("TEAM/123 unsafe").unwrap();
+        let second = allocator.allocate("TEAM/123 unsafe").unwrap();
+        let other = allocator.allocate("TEAM/124 unsafe").unwrap();
 
-        let wrong_id = RootAllocation { root_id: "other".into(), ..first.clone() };
-        assert_eq!(
-            allocator.allocate(&binding, "issue-123", Some(&wrong_id)),
-            Err(ResourceError::AllocationMismatch)
-        );
-
-        let wrong_workspace = RootAllocation {
-            workspace_path: temp.path().join("other").to_string_lossy().into_owned(),
-            ..first.clone()
-        };
-        assert_eq!(
-            allocator.allocate(&binding, "issue-123", Some(&wrong_workspace)),
-            Err(ResourceError::AllocationMismatch)
-        );
-
-        let missing_run = RootAllocation {
-            run_directory: app_data.join("runs/missing").to_string_lossy().into_owned(),
-            ..first.clone()
-        };
-        assert_eq!(
-            allocator.allocate(&binding, "issue-123", Some(&missing_run)),
-            Err(ResourceError::ResourceMissing)
-        );
-        assert!(Path::new(&first.workspace_path).exists());
-    }
-
-    #[test]
-    fn branch_and_path_names_are_safe_and_stable() {
-        let first = root_branch_name("TEAM/123 unsafe").unwrap();
-        let second = root_branch_name("TEAM/123 unsafe").unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("symphony/"));
-        assert!(!first.contains(' '));
-        assert!(!first.contains(".."));
+        assert_ne!(first, other);
         assert!(root_resource_slug("TEAM/123 unsafe")
             .unwrap()
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')));
-        assert_eq!(root_branch_name("bad\nroot"), Err(ResourceError::InvalidInput));
+        assert_eq!(root_resource_slug("bad\nroot"), Err(ResourceError::InvalidInput));
     }
 
     #[test]
-    fn app_data_inside_repository_is_rejected_before_worktree_creation() {
-        let temp = TempDir::new("overlap");
-        let repository = fixture_repo(&temp);
-        let binding = binding(&repository);
-        let app_data = repository.join(".symphony-data");
+    fn rejects_relative_app_data_and_invalid_root_ids() {
+        assert_eq!(
+            RootResourceAllocator::new("relative").allocate("issue-123"),
+            Err(ResourceError::AppDataRootInvalid),
+        );
+        let temp = TempDir::new("invalid");
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
+        assert_eq!(allocator.allocate(""), Err(ResourceError::InvalidInput));
+        assert_eq!(allocator.allocate("bad\nroot"), Err(ResourceError::InvalidInput));
+    }
 
-        let result = RootResourceAllocator::new(app_data).allocate(&binding, "issue-123", None);
+    #[test]
+    fn cleanup_removes_only_a_clean_worktree_and_keeps_run_diagnostics() {
+        let temp = TempDir::new("cleanup-success");
+        let repository = fixture_repo(&temp, "repo");
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
+        let root_id = "issue-123";
+        let resources = allocator.allocate(root_id).unwrap();
+        add_worktree(&repository, &resources.workspace_path, root_id);
+        let diagnostic = resources.run_directory.join("diagnostic.json");
+        fs::write(&diagnostic, "{\"event\":\"done\"}\n").unwrap();
 
-        assert_eq!(result, Err(ResourceError::AppDataRootInvalid));
-        assert!(!repository.join(".symphony-data/workspaces").exists());
+        allocator.cleanup_workspace(&repository, root_id).unwrap();
+
+        assert!(!resources.workspace_path.exists());
+        assert!(resources.run_directory.is_dir());
+        assert_eq!(fs::read_to_string(diagnostic).unwrap(), "{\"event\":\"done\"}\n");
+    }
+
+    #[test]
+    fn cleanup_rejects_dirty_worktree_and_preserves_workspace_and_diagnostics() {
+        let temp = TempDir::new("cleanup-dirty");
+        let repository = fixture_repo(&temp, "repo");
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
+        let root_id = "issue-123";
+        let resources = allocator.allocate(root_id).unwrap();
+        add_worktree(&repository, &resources.workspace_path, root_id);
+        let diagnostic = resources.run_directory.join("diagnostic.json");
+        fs::write(&diagnostic, "private evidence\n").unwrap();
+        fs::write(resources.workspace_path.join("dirty.txt"), "keep me\n").unwrap();
+
+        assert_eq!(
+            allocator.cleanup_workspace(&repository, root_id),
+            Err(ResourceError::WorkspaceDirty)
+        );
+
+        assert!(resources.workspace_path.is_dir());
+        assert!(resources.workspace_path.join("dirty.txt").is_file());
+        assert_eq!(fs::read_to_string(diagnostic).unwrap(), "private evidence\n");
+    }
+
+    #[test]
+    fn cleanup_rejects_wrong_repository_or_root_without_boundary_escape() {
+        let temp = TempDir::new("cleanup-boundary");
+        let repository = fixture_repo(&temp, "repo");
+        let wrong_repository = fixture_repo(&temp, "wrong-repo");
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
+        let root_id = "issue-123";
+        let resources = allocator.allocate(root_id).unwrap();
+        add_worktree(&repository, &resources.workspace_path, root_id);
+
+        assert!(allocator.cleanup_workspace(&wrong_repository, root_id).is_err());
+        assert!(resources.workspace_path.is_dir());
+        assert!(allocator.cleanup_workspace(&repository, "other-root").is_err());
+        assert!(resources.workspace_path.is_dir());
+
+        allocator.cleanup_workspace(&repository, root_id).unwrap();
+        assert!(!resources.workspace_path.exists());
+    }
+
+    #[test]
+    fn cleanup_rejects_a_non_worktree_directory_without_removing_it() {
+        let temp = TempDir::new("cleanup-non-worktree");
+        let repository = fixture_repo(&temp, "repo");
+        let allocator = RootResourceAllocator::new(temp.path().join("app"));
+        let root_id = "issue-123";
+        let resources = allocator.allocate(root_id).unwrap();
+        fs::create_dir_all(&resources.workspace_path).unwrap();
+
+        assert_eq!(
+            allocator.cleanup_workspace(&repository, root_id),
+            Err(ResourceError::WorkspaceInvalid)
+        );
+        assert!(resources.workspace_path.is_dir());
     }
 }

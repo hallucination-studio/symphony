@@ -98,6 +98,12 @@ fresh Codex CLI uses the user's local `~/.codex` configuration and
 authentication unchanged. No capability matrix or default model/effort is
 hardcoded.
 
+The Linear credential follows the same boundary: a Podium-launched process
+receives the current app-actor access token as the `LINEAR_API_KEY`
+environment value at startup. OAuth tokens and the credentials file are never
+contract fields, `ProjectBinding` values, Linear data, log lines, or
+diagnostic content.
+
 ## Podium Desktop values
 
 ```text
@@ -113,6 +119,7 @@ ProjectBinding {
   repository_path: absolute path,
   base_branch: non-empty string,
   concurrency: positive integer,
+  completed_workspace_retention?: positive integer,
   reconcile_agent: codex,
   reconcile_model?: string,
   reconcile_reasoning_effort?: string,
@@ -123,20 +130,18 @@ ProjectBinding {
   critic_model?: string,
   critic_reasoning_effort?: string
 }
-
-RootAllocation {
-  root_id: RootIssueId,
-  workspace_path: absolute path,
-  run_directory: absolute path
-}
 ```
 
 The three flattened role groups in `ProjectBinding` normalize to independent
 `RoleLaunchConfig` values at launch. `project_id` identifies a Linear Project;
 `routing_label` is visible Desktop configuration, not a hidden Linear status.
-Project Bindings and `RootAllocation` paths persist locally. Assignment, PID,
-and queue values are in-memory Desktop runtime state only. The binding carries
-no key, cookie, token, base URL, process handle, or arbitrary provider object.
+Only Project Bindings persist locally. Root workspace/run paths are
+deterministically derived at assignment time and become durable only in Root
+State after Prepare; assignment, path, PID, and queue values are otherwise
+runtime state. The binding carries no key, cookie, token, base URL, process
+handle, or arbitrary provider object. Codex is fixed directly; optional
+per-role connection overrides live in the private startup environment rather
+than an agent catalog or public contract.
 
 ## Linear values
 
@@ -173,8 +178,7 @@ RootState {
   root_branch,
   current_phase,
   task_state_markdown,
-  latest_critique?: CritiqueResult,
-  pending_finding?,
+  latest_critique?: CritiqueCheckpoint,
   harness_feedback?,
   comment_cursor?,
   delivery?: Delivery,
@@ -194,19 +198,18 @@ line to an Artist/Critic description. Child descriptions separate frozen
 regions. It preserves all frozen bytes outside the owned region and cannot
 update a Cycle description. The file operation is
 `upload_file(filename, content_type: "application/json", contents: Uint8Array)
--> LinearUploadedFile`. It returns only `{ url }`. Only the re-read typed Critic
-result is uploaded to the Cycle as `cycle-NNN-critique-result.json`; role Markdown
+-> LinearUploadedFile`. It returns only `{ url }`. The once-serialized typed
+Critic artifact is uploaded to the Cycle as `cycle-NNN-critique-result.json`; role Markdown
 is description-only.
 JSONL, stderr, prompts, and arbitrary provider payloads are private and never
 uploaded.
 
 `task_state_markdown` contains only facts promoted from Succeeded Cycles.
-`latest_critique` is the complete validated `CritiqueResult` from the newest
-terminal Critic, including the `process_error` variant; it is the only recent
-Critic detail supplied to Root Reconcile. The Cycle DAG and child comments are
-never reconstructed to fill or replace it.
-`pending_finding` is the single current Rejected or Failed outcome that the next
-Reconcile must address; later terminal failures replace it. `harness_feedback`
+`latest_critique` contains only the newest verdict, task state, optional pending
+finding, and artifact URL; it is the only recent Critic checkpoint supplied to
+Root Reconcile. Complete report detail remains in the local/uploaded artifact.
+The Cycle DAG and child comments are never reconstructed to fill or replace it.
+`harness_feedback`
 is one current bounded operational warning, not history or verified progress.
 External responses are validated at the Gateway. Root Reconcile receives the
 Root, Root State, comments after `comment_cursor`, and a typed mechanical
@@ -346,18 +349,27 @@ never supplied to Critic or Root Reconcile and never uploaded to Linear.
 ## Role and Cycle results
 
 ```text
-CritiqueResult =
+CritiqueEnvelope =
   | {
       verdict: accepted | incomplete | blocked | violation,
-      scope_reviewed,
-      implementation_review,
-      checks[],
-      evidence[],
-      findings[],
-      task_state_markdown?,
+      task_state_markdown,
       pending_finding?
     }
   | { verdict: process_error, reason }
+
+CritiqueArtifact {
+  envelope: CritiqueEnvelope,
+  report_markdown: string
+}
+
+CritiqueCheckpoint =
+  | {
+      verdict: accepted | incomplete | blocked | violation,
+      task_state_markdown,
+      pending_finding?,
+      artifact_url?
+    }
+  | { verdict: process_error, reason, artifact_url? }
 
 CycleTerminalResult {
   result: succeeded | rejected | failed,
@@ -369,21 +381,22 @@ CycleTerminalResult {
 
 Each Cycle role prompt requires its final response to be Markdown in the last
 response position and writes it to a local `cycle-NNN-*-result.md` file. The
-Artist report contains `## Summary`, `## File Changes` with
-`### Created`/`### Updated`/`### Deleted` path and +/- line-count entries, and
-`## Verification`; it is appended byte-for-byte once to the Artist description
+Artist report gives a human-readable summary of actual file changes and
+verification without a machine-parsed heading schema; it is appended
+byte-for-byte once to the Artist description
 with one human-readable local `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line and
 is never parsed or supplied to Critic. Git porcelain markers (`??`, `M`,
 `D`) must be translated to those semantic sections rather than copied verbatim.
-The Critic report contains the verdict and
-`## Scope Reviewed`, `## Implementation Review`, `## Checks`, `## Evidence`,
-`## Findings`, and `## Task State`; it is appended byte-for-byte once to the Critic
-description with one human-readable local `Updated at:
+The Critic report starts with the compact JSON `CritiqueEnvelope`, then gives a
+human-readable audit of scope, implementation logic, checks, evidence, and
+findings. It is appended byte-for-byte once to the Critic description with one
+human-readable local `Updated at:
 <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line. Neither report repeats the Cycle
 description. Byte-for-byte describes the Harness write request. Linear may
 normalize equivalent Markdown syntax when the description is read back; public
-validation therefore requires the same report structure and content, not the
-same list-marker bytes.
+validation therefore requires a valid machine envelope and non-empty report,
+not an exact human heading layout or list-marker bytes. Human timestamps are
+presentation only and are never parsed as state.
 
 | Result | Required Critic verdict |
 |---|---|
@@ -401,15 +414,16 @@ summary.
 `CycleTerminalResult` remains the internal mechanical mapping. The visible Cycle
 Result shows only the mapped result, a linked Critic Issue identifier, and the
 Critique JSON resource outcome, avoiding repetition of Critic verdict, reason,
-or evidence. Additional Cycle history comments are append-only records of each
-status transition, Root decision, terminal result, and JSON upload/link outcome;
-their event timestamp is Linear `createdAt`, not a duplicate body timestamp.
-Cycle Runner parses Critic Markdown once, serializes the typed
-result to `cycle-NNN-critique-result.json`, reads it back and validates it, and
-uses that re-read value for Cycle/Root semantics. The JSON file is the only
+or evidence. Each Cycle has exactly one creation rationale and one terminal
+result comment; intermediate progress is represented only by Issue statuses.
+Their event timestamp is Linear `createdAt`, not a duplicate body timestamp.
+Cycle Runner parses the Critic envelope once, creates the typed artifact in
+memory, serializes it once to `cycle-NNN-critique-result.json`, and writes/uploads
+the same bytes. The JSON file is the only
 Cycle uploaded file and uses `application/json`; the Cycle Result links its asset
 or reports the current upload error's first 50 characters. Only the validated
-re-read fields are written to `RootState.latest_critique` before Reconcile. The
+compact fields and artifact URL are written to `RootState.latest_critique`
+before Reconcile. The
 Cycle Result is never direct Reconcile input and Reconcile never reads the Cycle
 DAG or either role's content.
 

@@ -1,17 +1,17 @@
 //! Local Podium scheduling and process supervision.
 //!
-//! The runtime owns only Desktop-local state.  Project bindings and stable
-//! allocations are loaded from [`JsonStore`]; enabled bindings, assignments,
-//! queues, and process handles remain in memory.  Provider and process
-//! boundaries are deliberately small so Linear, resource allocation, and the
-//! real Conductor launcher can be wired without changing scheduling policy.
+//! The runtime owns only Desktop-local state. Project bindings are loaded from
+//! [`JsonStore`]; enabled bindings, assignments, queues, and process handles
+//! remain in memory. Root paths are derived by the resource provider for each
+//! launch and are never persisted by the runtime.
 
-use crate::domain::{ProjectBinding, RootAllocation, RootCandidate};
+use crate::domain::{AgentKind, ProjectBinding, RootCandidate};
 use crate::launch::{ConductorOutcome, LaunchError, LaunchRequest, RunningConductor};
+use crate::resources::RootResources;
 use crate::scheduler::{self, CurrentAssignment, ScheduleAction};
 use crate::store::{JsonStore, PersistedState};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -54,7 +54,7 @@ pub trait CandidateSource {
         -> Result<Vec<CandidateRecord>, Self::Error>;
 }
 
-/// Stable workspace/run-directory allocation for one candidate Root.
+/// Stable workspace/run-directory paths for one candidate Root.
 pub trait AllocationProvider {
     type Error: Debug;
 
@@ -62,8 +62,17 @@ pub trait AllocationProvider {
         &mut self,
         binding: &ProjectBinding,
         candidate: &CandidateRecord,
-        existing: Option<&RootAllocation>,
-    ) -> Result<RootAllocation, Self::Error>;
+    ) -> Result<RootResources, Self::Error>;
+
+    /// Remove the derived workspace for a completed Root.  Runtime performs
+    /// the status and delivery gate before calling this boundary; providers
+    /// remain responsible for validating the exact repository/workspace
+    /// relationship.
+    fn cleanup_workspace(
+        &mut self,
+        binding: &ProjectBinding,
+        root_id: &str,
+    ) -> Result<(), Self::Error>;
 }
 
 /// Sanitized terminal result emitted by a bound Conductor.
@@ -142,8 +151,6 @@ pub struct RuntimeEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slot_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<TerminalOutcome>,
@@ -151,20 +158,13 @@ pub struct RuntimeEvent {
 
 impl RuntimeEvent {
     fn binding(kind: RuntimeEventKind, binding_id: &str) -> Self {
-        Self {
-            kind,
-            binding_id: Some(binding_id.to_owned()),
-            slot_id: None,
-            root_id: None,
-            outcome: None,
-        }
+        Self { kind, binding_id: Some(binding_id.to_owned()), root_id: None, outcome: None }
     }
 
     fn assignment(kind: RuntimeEventKind, assignment: &SlotIdentity) -> Self {
         Self {
             kind,
             binding_id: Some(assignment.binding_id.clone()),
-            slot_id: Some(assignment.slot_id.clone()),
             root_id: Some(assignment.root_id.clone()),
             outcome: None,
         }
@@ -174,35 +174,78 @@ impl RuntimeEvent {
         Self {
             kind: RuntimeEventKind::Terminal,
             binding_id: Some(assignment.binding_id.clone()),
-            slot_id: Some(assignment.slot_id.clone()),
             root_id: Some(assignment.root_id.clone()),
             outcome: Some(outcome),
         }
     }
 }
 
-/// Serializable view of one running slot.  There is intentionally no process
-/// handle, PID, command line, environment, or credential field here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The closed action vocabulary exposed to the operator surface. Action
+/// availability is explicit so an unimplemented native boundary is never a
+/// successful no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SlotSnapshot {
-    pub slot_id: String,
-    pub binding_id: String,
-    pub root_id: String,
-    pub priority: u8,
-    pub identifier: String,
-    pub title: String,
+#[serde(rename_all = "snake_case")]
+pub enum RootActionKind {
+    OpenLinear,
+    OpenWorkspace,
+    OpenDelivery,
+    OpenDiagnostics,
+    CleanupWorkspace,
 }
 
-pub type DesktopSlot = SlotSnapshot;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootActionView {
+    pub kind: RootActionKind,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
 
-/// Public Desktop projection.  Bindings and slots are current state; events
-/// are bounded in-memory history and contain no process internals.
+/// A native target resolved for one Root action.  This value stays inside the
+/// Desktop host; paths and URLs never cross the browser snapshot boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RootActionTarget {
+    Url(String),
+    Path(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootStatus {
+    Running,
+    Waiting,
+    NeedsAttention,
+    Completed,
+}
+
+/// Serializable Root-centric view. Process handles, allocation paths,
+/// credentials, and scheduler slot IDs never cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootView {
+    pub root_id: String,
+    pub binding_id: String,
+    pub identifier: String,
+    pub title: String,
+    pub priority: u8,
+    pub status: RootStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<u32>,
+    pub observed_at: String,
+    pub actions: Vec<RootActionView>,
+}
+
+/// Public Desktop projection. Bindings and Root summaries are current state;
+/// events are bounded in-memory history and contain no process internals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesktopSnapshot {
     pub bindings: Vec<ProjectBinding>,
-    pub slots: Vec<SlotSnapshot>,
+    pub roots: Vec<RootView>,
     pub events: Vec<RuntimeEvent>,
 }
 
@@ -214,6 +257,10 @@ pub enum RuntimeError {
     InvalidBinding,
     StopFailed,
     PersistenceFailed,
+    RootNotFound,
+    RootActionUnavailable,
+    RootCleanupUnavailable,
+    RootCleanupFailed,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -223,6 +270,10 @@ impl std::fmt::Display for RuntimeError {
             Self::InvalidBinding => "invalid_binding",
             Self::StopFailed => "process_stop_failed",
             Self::PersistenceFailed => "state_persistence_failed",
+            Self::RootNotFound => "root_not_found",
+            Self::RootActionUnavailable => "root_action_unavailable",
+            Self::RootCleanupUnavailable => "root_cleanup_workspace_unavailable",
+            Self::RootCleanupFailed => "root_cleanup_workspace_failed",
         };
         formatter.write_str(reason)
     }
@@ -243,6 +294,7 @@ struct RunningAssignment<H> {
     priority: u8,
     identifier: String,
     title: String,
+    resources: RootResources,
     process: H,
 }
 
@@ -250,17 +302,21 @@ impl<H> RunningAssignment<H> {
     fn current(&self) -> CurrentAssignment {
         CurrentAssignment { root_id: self.identity.root_id.clone(), priority: self.priority }
     }
+}
 
-    fn snapshot(&self) -> SlotSnapshot {
-        SlotSnapshot {
-            slot_id: self.identity.slot_id.clone(),
-            binding_id: self.identity.binding_id.clone(),
-            root_id: self.identity.root_id.clone(),
-            priority: self.priority,
-            identifier: self.identifier.clone(),
-            title: self.title.clone(),
-        }
-    }
+#[derive(Debug, Clone)]
+struct RootHistory {
+    binding_id: String,
+    root_id: String,
+    identifier: String,
+    title: String,
+    resources: RootResources,
+    priority: u8,
+    status: RootStatus,
+    latest_event: Option<String>,
+    completed_order: Option<u64>,
+    workspace_cleaned: bool,
+    retention_attempted: bool,
 }
 
 const EVENT_HISTORY_LIMIT: usize = 256;
@@ -275,12 +331,15 @@ where
     store: JsonStore,
     persisted: PersistedState,
     candidate_source: C,
-    allocation_provider: A,
+    resource_provider: A,
     process_launcher: L,
     enabled_binding_ids: BTreeSet<String>,
     assignments: Vec<RunningAssignment<L::Handle>>,
+    candidate_records: BTreeMap<String, Vec<CandidateRecord>>,
+    root_history: BTreeMap<String, RootHistory>,
     events: VecDeque<RuntimeEvent>,
     next_slot_number: u64,
+    next_completion_order: u64,
 }
 
 impl<C, A, L> Runtime<C, A, L>
@@ -289,7 +348,7 @@ where
     A: AllocationProvider,
     L: ProcessLauncher,
 {
-    /// Load durable bindings/allocations and start with an empty local runtime.
+    /// Load durable bindings and start with an empty local runtime.
     pub fn new(
         store: JsonStore,
         candidate_source: C,
@@ -319,12 +378,15 @@ where
             store,
             persisted,
             candidate_source,
-            allocation_provider,
+            resource_provider: allocation_provider,
             process_launcher,
             enabled_binding_ids: BTreeSet::new(),
             assignments: Vec::new(),
+            candidate_records: BTreeMap::new(),
+            root_history: BTreeMap::new(),
             events: VecDeque::new(),
             next_slot_number: 1,
+            next_completion_order: 1,
         }
     }
 
@@ -341,9 +403,10 @@ where
     }
 
     pub fn snapshot(&self) -> DesktopSnapshot {
+        let observed_at = observed_at();
         DesktopSnapshot {
             bindings: self.persisted.bindings.clone(),
-            slots: self.assignments.iter().map(RunningAssignment::snapshot).collect(),
+            roots: self.root_views(&observed_at),
             events: self.events.iter().cloned().collect(),
         }
     }
@@ -402,11 +465,52 @@ where
         Ok(())
     }
 
+    /// Explicitly remove a completed Root's derived workspace.  A successful
+    /// Conductor `Completed` outcome is the Desktop's only trusted delivery
+    /// proof, so active, waiting, and NeedsAttention Roots are rejected before
+    /// the provider boundary is reached.
+    pub fn cleanup_workspace(&mut self, root_id: &str) -> Result<(), RuntimeError> {
+        let Some((binding_id, status, workspace_cleaned)) = self
+            .root_history
+            .get(root_id)
+            .map(|root| (root.binding_id.clone(), root.status, root.workspace_cleaned))
+        else {
+            let active =
+                self.assignments.iter().any(|assignment| assignment.identity.root_id == root_id);
+            let waiting = self.candidate_records.values().any(|candidates| {
+                candidates.iter().any(|candidate| candidate.candidate.id == root_id)
+            });
+            return Err(if active || waiting {
+                RuntimeError::RootCleanupUnavailable
+            } else {
+                RuntimeError::RootNotFound
+            });
+        };
+        if status != RootStatus::Completed || workspace_cleaned {
+            return Err(RuntimeError::RootCleanupUnavailable);
+        }
+        let binding = self
+            .persisted
+            .bindings
+            .iter()
+            .find(|binding| binding.project_id == binding_id)
+            .cloned()
+            .ok_or(RuntimeError::RootCleanupUnavailable)?;
+        self.resource_provider
+            .cleanup_workspace(&binding, root_id)
+            .map_err(|_| RuntimeError::RootCleanupFailed)?;
+        if let Some(root) = self.root_history.get_mut(root_id) {
+            root.workspace_cleaned = true;
+        }
+        Ok(())
+    }
+
     /// Observe terminal children and perform one scheduling pass per enabled
     /// binding.  Provider failures become visible fixed-kind events and do not
     /// spin/retry inside this call.
     pub fn tick(&mut self) -> Result<(), RuntimeError> {
         let terminal_bindings = self.observe_terminals();
+        self.apply_retention();
         let enabled = self.enabled_binding_ids.iter().cloned().collect::<Vec<_>>();
         for binding_id in enabled {
             // A terminal child is released now; defer replacement to the next
@@ -436,6 +540,7 @@ where
                     continue;
                 }
             };
+            self.candidate_records.insert(binding_id.clone(), candidates.clone());
             self.schedule_binding(&binding, candidates)?;
         }
         Ok(())
@@ -508,66 +613,30 @@ where
             self.record(RuntimeEvent {
                 kind: RuntimeEventKind::RootConflict,
                 binding_id: Some(binding.project_id.clone()),
-                slot_id: None,
                 root_id: Some(root_id.clone()),
                 outcome: None,
             });
             return Ok(());
         }
 
-        let existing = self
-            .persisted
-            .allocations
-            .iter()
-            .find(|allocation| allocation.root_id == *root_id)
-            .cloned();
-        let allocation = match self.allocation_provider.allocate(binding, record, existing.as_ref())
-        {
-            Ok(allocation) => allocation,
+        let resources = match self.resource_provider.allocate(binding, record) {
+            Ok(resources) => resources,
             Err(_) => {
                 self.record(RuntimeEvent {
                     kind: RuntimeEventKind::AllocationUnavailable,
                     binding_id: Some(binding.project_id.clone()),
-                    slot_id: None,
                     root_id: Some(root_id.clone()),
                     outcome: None,
                 });
                 return Ok(());
             }
-        };
-        if allocation.root_id != *root_id
-            || existing.as_ref().is_some_and(|expected| expected != &allocation)
-        {
-            self.record(RuntimeEvent {
-                kind: RuntimeEventKind::AllocationConflict,
-                binding_id: Some(binding.project_id.clone()),
-                slot_id: None,
-                root_id: Some(root_id.clone()),
-                outcome: None,
-            });
-            return Ok(());
-        }
-        if existing.is_none() {
-            let mut next = self.persisted.clone();
-            next.allocations.push(allocation.clone());
-            if self.persist(&next).is_err() {
-                self.record(RuntimeEvent {
-                    kind: RuntimeEventKind::PersistenceFailed,
-                    binding_id: Some(binding.project_id.clone()),
-                    slot_id: None,
-                    root_id: Some(root_id.clone()),
-                    outcome: None,
-                });
-                return Ok(());
-            }
-            self.persisted = next;
         };
 
         let request = LaunchRequest::new(
             root_id.clone(),
             PathBuf::from(&binding.repository_path),
-            PathBuf::from(&allocation.workspace_path),
-            PathBuf::from(&allocation.run_directory),
+            resources.workspace_path.clone(),
+            resources.run_directory.clone(),
             DEFAULT_MAX_CYCLES,
             binding.reconcile_config(),
             binding.artist_config(),
@@ -579,7 +648,6 @@ where
                 self.record(RuntimeEvent {
                     kind: RuntimeEventKind::LaunchFailed,
                     binding_id: Some(binding.project_id.clone()),
-                    slot_id: None,
                     root_id: Some(root_id.clone()),
                     outcome: None,
                 });
@@ -599,6 +667,7 @@ where
             priority: record.candidate.priority,
             identifier: record.identifier.clone(),
             title: record.title.clone(),
+            resources,
             process,
         });
         self.record(RuntimeEvent::assignment(RuntimeEventKind::AssignmentStarted, &event_identity));
@@ -615,6 +684,40 @@ where
                 Ok(Some(outcome)) => {
                     let assignment = self.assignments.remove(index);
                     terminal_bindings.insert(assignment.identity.binding_id.clone());
+                    let completed_order = if outcome == TerminalOutcome::Completed {
+                        let order = self.next_completion_order;
+                        self.next_completion_order = self.next_completion_order.saturating_add(1);
+                        Some(order)
+                    } else {
+                        None
+                    };
+                    self.root_history.insert(
+                        assignment.identity.root_id.clone(),
+                        RootHistory {
+                            binding_id: assignment.identity.binding_id.clone(),
+                            root_id: assignment.identity.root_id.clone(),
+                            identifier: assignment.identifier.clone(),
+                            title: assignment.title.clone(),
+                            resources: assignment.resources.clone(),
+                            priority: assignment.priority,
+                            status: match outcome {
+                                TerminalOutcome::Completed => RootStatus::Completed,
+                                TerminalOutcome::NeedsHuman | TerminalOutcome::Failed => {
+                                    RootStatus::NeedsAttention
+                                }
+                            },
+                            latest_event: Some(match outcome {
+                                TerminalOutcome::Completed => "Conductor completed".to_owned(),
+                                TerminalOutcome::NeedsHuman => {
+                                    "Conductor needs attention".to_owned()
+                                }
+                                TerminalOutcome::Failed => "Conductor failed".to_owned(),
+                            }),
+                            completed_order,
+                            workspace_cleaned: false,
+                            retention_attempted: false,
+                        },
+                    );
                     self.record(RuntimeEvent::terminal(&assignment.identity, outcome));
                 }
                 Ok(None) => {}
@@ -629,6 +732,45 @@ where
             }
         }
         terminal_bindings
+    }
+
+    /// Apply the optional per-binding retention bound after terminal
+    /// observations. Only Roots with the trusted Completed outcome are
+    /// candidates, and the newest `retention` entries are always retained.
+    /// Provider failures leave the entry visible and eligible for a later
+    /// bounded attempt; no workspace is force-removed or hidden.
+    fn apply_retention(&mut self) {
+        let bindings = self
+            .persisted
+            .bindings
+            .iter()
+            .filter_map(|binding| {
+                binding
+                    .completed_workspace_retention
+                    .map(|retention| (binding.project_id.clone(), retention))
+            })
+            .collect::<Vec<_>>();
+        for (binding_id, retention) in bindings {
+            let mut completed = self
+                .root_history
+                .values()
+                .filter(|root| {
+                    root.binding_id == binding_id
+                        && root.status == RootStatus::Completed
+                        && !root.workspace_cleaned
+                        && !root.retention_attempted
+                })
+                .map(|root| (root.root_id.clone(), root.completed_order.unwrap_or(u64::MAX)))
+                .collect::<Vec<_>>();
+            completed.sort_by_key(|(_, order)| *order);
+            let remove_count = completed.len().saturating_sub(retention as usize);
+            for (root_id, _) in completed.into_iter().take(remove_count) {
+                if let Some(root) = self.root_history.get_mut(&root_id) {
+                    root.retention_attempted = true;
+                }
+                let _ = self.cleanup_workspace(&root_id);
+            }
+        }
     }
 
     fn stop_assignments_for(
@@ -687,6 +829,165 @@ where
         slot_id
     }
 
+    fn root_views(&self, observed_at: &str) -> Vec<RootView> {
+        let assigned = self
+            .assignments
+            .iter()
+            .map(|assignment| assignment.identity.root_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut roots = self
+            .assignments
+            .iter()
+            .map(|assignment| RootView {
+                root_id: assignment.identity.root_id.clone(),
+                binding_id: assignment.identity.binding_id.clone(),
+                identifier: assignment.identifier.clone(),
+                title: assignment.title.clone(),
+                priority: assignment.priority,
+                status: RootStatus::Running,
+                latest_event: Some("Conductor is running".to_owned()),
+                queue_position: None,
+                observed_at: observed_at.to_owned(),
+                actions: root_actions(RootStatus::Running, false, Some(&assignment.resources)),
+            })
+            .collect::<Vec<_>>();
+
+        roots.extend(
+            self.root_history
+                .values()
+                .filter(|root| !assigned.contains(root.root_id.as_str()))
+                .map(|root| RootView {
+                    root_id: root.root_id.clone(),
+                    binding_id: root.binding_id.clone(),
+                    identifier: root.identifier.clone(),
+                    title: root.title.clone(),
+                    priority: root.priority,
+                    status: root.status,
+                    latest_event: root.latest_event.clone(),
+                    queue_position: None,
+                    observed_at: observed_at.to_owned(),
+                    actions: root_actions(
+                        root.status,
+                        root.workspace_cleaned,
+                        Some(&root.resources),
+                    ),
+                }),
+        );
+
+        for binding_id in &self.enabled_binding_ids {
+            let Some(candidates) = self.candidate_records.get(binding_id) else {
+                continue;
+            };
+            let mut waiting = candidates.clone();
+            waiting.sort_by(compare_candidate_records);
+            let mut queue_position = 0_u32;
+            for candidate in waiting {
+                if assigned.contains(candidate.candidate.id.as_str())
+                    || self.root_history.contains_key(&candidate.candidate.id)
+                {
+                    continue;
+                }
+                queue_position = queue_position.saturating_add(1);
+                roots.push(RootView {
+                    root_id: candidate.candidate.id,
+                    binding_id: binding_id.clone(),
+                    identifier: candidate.identifier,
+                    title: candidate.title,
+                    priority: candidate.candidate.priority,
+                    status: RootStatus::Waiting,
+                    latest_event: Some("Waiting for capacity".to_owned()),
+                    queue_position: Some(queue_position),
+                    observed_at: observed_at.to_owned(),
+                    actions: root_actions(RootStatus::Waiting, false, None),
+                });
+            }
+        }
+
+        roots.sort_by(|left, right| {
+            root_status_rank(left.status)
+                .cmp(&root_status_rank(right.status))
+                .then_with(|| left.priority.cmp(&right.priority))
+                .then_with(|| left.root_id.cmp(&right.root_id))
+        });
+        roots
+    }
+
+    /// Resolve a native target from the runtime's current Root view.  Resource
+    /// paths are retained only in memory after allocation, so this lookup never
+    /// creates directories or writes durable state.
+    pub(crate) fn root_action_target(
+        &self,
+        root_id: &str,
+        kind: RootActionKind,
+    ) -> Result<RootActionTarget, RuntimeError> {
+        let Some((status, workspace_cleaned, identifier, resources)) = self
+            .assignments
+            .iter()
+            .find(|assignment| assignment.identity.root_id == root_id)
+            .map(|assignment| {
+                (
+                    RootStatus::Running,
+                    false,
+                    assignment.identifier.clone(),
+                    Some(assignment.resources.clone()),
+                )
+            })
+            .or_else(|| {
+                self.root_history.get(root_id).map(|root| {
+                    (
+                        root.status,
+                        root.workspace_cleaned,
+                        root.identifier.clone(),
+                        Some(root.resources.clone()),
+                    )
+                })
+            })
+            .or_else(|| {
+                self.candidate_records.values().find_map(|candidates| {
+                    candidates.iter().find(|candidate| candidate.candidate.id == root_id).map(
+                        |candidate| {
+                            (RootStatus::Waiting, false, candidate.identifier.clone(), None)
+                        },
+                    )
+                })
+            })
+        else {
+            return Err(RuntimeError::RootNotFound);
+        };
+
+        let issue_url = || {
+            (!identifier.trim().is_empty()
+                && !identifier.chars().any(|character| matches!(character, '\0' | '\r' | '\n')))
+            .then(|| RootActionTarget::Url(format!("https://linear.app/issue/{identifier}")))
+            .ok_or(RuntimeError::RootActionUnavailable)
+        };
+
+        match kind {
+            RootActionKind::OpenLinear => issue_url(),
+            RootActionKind::OpenDelivery if status == RootStatus::Completed => issue_url(),
+            RootActionKind::OpenDelivery => Err(RuntimeError::RootActionUnavailable),
+            RootActionKind::OpenWorkspace => {
+                let Some(resources) = resources else {
+                    return Err(RuntimeError::RootActionUnavailable);
+                };
+                if workspace_cleaned || !resources.workspace_path.is_dir() {
+                    return Err(RuntimeError::RootActionUnavailable);
+                }
+                Ok(RootActionTarget::Path(resources.workspace_path))
+            }
+            RootActionKind::OpenDiagnostics => {
+                let Some(resources) = resources else {
+                    return Err(RuntimeError::RootActionUnavailable);
+                };
+                if !resources.run_directory.is_dir() {
+                    return Err(RuntimeError::RootActionUnavailable);
+                }
+                Ok(RootActionTarget::Path(resources.run_directory))
+            }
+            RootActionKind::CleanupWorkspace => Err(RuntimeError::RootActionUnavailable),
+        }
+    }
+
     fn require_binding(&self, binding_id: &str) -> Result<(), RuntimeError> {
         self.persisted
             .bindings
@@ -720,15 +1021,109 @@ impl ProcessHandle for RunningConductor {
     }
 }
 
+fn root_actions(
+    status: RootStatus,
+    workspace_cleaned: bool,
+    resources: Option<&RootResources>,
+) -> Vec<RootActionView> {
+    let workspace_available =
+        !workspace_cleaned && resources.is_some_and(|resources| resources.workspace_path.is_dir());
+    let diagnostics_available = resources.is_some_and(|resources| resources.run_directory.is_dir());
+    let availability = [
+        (RootActionKind::OpenLinear, true),
+        (RootActionKind::OpenWorkspace, workspace_available),
+        (RootActionKind::OpenDelivery, status == RootStatus::Completed),
+        (RootActionKind::OpenDiagnostics, diagnostics_available),
+        (RootActionKind::CleanupWorkspace, status == RootStatus::Completed && !workspace_cleaned),
+    ];
+    availability
+        .into_iter()
+        .map(|(kind, available)| RootActionView {
+            kind,
+            available,
+            reason: (!available).then_some(
+                match kind {
+                    RootActionKind::OpenLinear => "root_open_linear_unavailable",
+                    RootActionKind::OpenWorkspace => "root_open_workspace_unavailable",
+                    RootActionKind::OpenDelivery => "root_open_delivery_unavailable",
+                    RootActionKind::OpenDiagnostics => "root_open_diagnostics_unavailable",
+                    RootActionKind::CleanupWorkspace => "root_cleanup_workspace_unavailable",
+                }
+                .to_owned(),
+            ),
+        })
+        .collect()
+}
+
+fn root_status_rank(status: RootStatus) -> u8 {
+    match status {
+        RootStatus::Running => 0,
+        RootStatus::Waiting => 1,
+        RootStatus::NeedsAttention => 2,
+        RootStatus::Completed => 3,
+    }
+}
+
+fn compare_candidate_records(
+    left: &CandidateRecord,
+    right: &CandidateRecord,
+) -> std::cmp::Ordering {
+    fn priority_rank(priority: u8) -> u8 {
+        match priority {
+            1..=4 => priority,
+            0 => 5,
+            _ => 6,
+        }
+    }
+
+    priority_rank(left.candidate.priority)
+        .cmp(&priority_rank(right.candidate.priority))
+        .then_with(|| left.candidate.created_at.cmp(&right.candidate.created_at))
+        .then_with(|| left.candidate.id.cmp(&right.candidate.id))
+}
+
+fn observed_at() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let days = (seconds / 86_400) as i64;
+    let day_seconds = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        day_seconds / 3_600,
+        (day_seconds % 3_600) / 60,
+        day_seconds % 60
+    )
+}
+
+// Howard Hinnant's public-domain civil date conversion, kept local so the
+// public snapshot can carry RFC3339 timestamps without another dependency.
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let shifted = days_since_epoch + 719_468;
+    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
 fn validate_binding(binding: &ProjectBinding) -> Result<(), RuntimeError> {
     if binding.project_id.trim().is_empty()
         || binding.routing_label.trim().is_empty()
         || binding.repository_path.trim().is_empty()
         || binding.base_branch.trim().is_empty()
         || binding.concurrency == 0
-        || binding.reconcile_agent != "codex"
-        || binding.artist_agent != "codex"
-        || binding.critic_agent != "codex"
+        || binding.reconcile_agent != AgentKind::Codex
+        || binding.artist_agent != AgentKind::Codex
+        || binding.critic_agent != AgentKind::Codex
     {
         Err(RuntimeError::InvalidBinding)
     } else {
@@ -762,8 +1157,9 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct FakeAllocation {
-        paths: HashMap<String, RootAllocation>,
-        existing: Rc<RefCell<Vec<Option<RootAllocation>>>>,
+        paths: HashMap<String, RootResources>,
+        cleanup_calls: Rc<RefCell<Vec<(String, String)>>>,
+        cleanup_ok: bool,
     }
 
     impl AllocationProvider for FakeAllocation {
@@ -773,10 +1169,17 @@ mod tests {
             &mut self,
             _binding: &ProjectBinding,
             candidate: &CandidateRecord,
-            existing: Option<&RootAllocation>,
-        ) -> Result<RootAllocation, Self::Error> {
-            self.existing.borrow_mut().push(existing.cloned());
-            self.paths.get(&candidate.candidate.id).cloned().ok_or("missing allocation")
+        ) -> Result<RootResources, Self::Error> {
+            self.paths.get(&candidate.candidate.id).cloned().ok_or("missing resources")
+        }
+
+        fn cleanup_workspace(
+            &mut self,
+            binding: &ProjectBinding,
+            root_id: &str,
+        ) -> Result<(), Self::Error> {
+            self.cleanup_calls.borrow_mut().push((binding.project_id.clone(), root_id.to_owned()));
+            self.cleanup_ok.then_some(()).ok_or("cleanup failed")
         }
     }
 
@@ -851,13 +1254,14 @@ mod tests {
             repository_path: format!("/repo/{id}"),
             base_branch: "main".into(),
             concurrency,
-            reconcile_agent: "codex".into(),
+            completed_workspace_retention: None,
+            reconcile_agent: AgentKind::Codex,
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            artist_agent: "codex".into(),
+            artist_agent: AgentKind::Codex,
             artist_model: None,
             artist_reasoning_effort: None,
-            critic_agent: "codex".into(),
+            critic_agent: AgentKind::Codex,
             critic_model: None,
             critic_reasoning_effort: None,
         }
@@ -871,11 +1275,10 @@ mod tests {
         )
     }
 
-    fn allocation(id: &str) -> RootAllocation {
-        RootAllocation {
-            root_id: id.into(),
-            workspace_path: format!("/workspace/{id}"),
-            run_directory: format!("/run/{id}"),
+    fn resources(id: &str) -> RootResources {
+        RootResources {
+            workspace_path: format!("/workspace/{id}").into(),
+            run_directory: format!("/run/{id}").into(),
         }
     }
 
@@ -889,7 +1292,7 @@ mod tests {
             .iter()
             .flat_map(|binding| {
                 source.values.get(&binding.project_id).into_iter().flatten().map(|candidate| {
-                    (candidate.candidate.id.clone(), allocation(&candidate.candidate.id))
+                    (candidate.candidate.id.clone(), resources(&candidate.candidate.id))
                 })
             })
             .collect();
@@ -898,7 +1301,11 @@ mod tests {
         let mut runtime = Runtime::new(
             store,
             source,
-            FakeAllocation { paths, existing: Rc::new(RefCell::new(Vec::new())) },
+            FakeAllocation {
+                paths,
+                cleanup_calls: Rc::new(RefCell::new(Vec::new())),
+                cleanup_ok: true,
+            },
             FakeLauncher {
                 stopped: Rc::clone(&stopped),
                 launches: Rc::clone(&launches),
@@ -924,16 +1331,16 @@ mod tests {
         runtime.start_binding("project-b").unwrap();
         runtime.tick().unwrap();
         let snapshot = runtime.snapshot();
-        assert_eq!(snapshot.slots.len(), 3);
+        assert_eq!(snapshot.roots.len(), 3);
         assert_eq!(launches.borrow().len(), 3);
         assert!(launches.borrow().iter().all(|request| request.max_cycles == DEFAULT_MAX_CYCLES));
-        assert_eq!(snapshot.slots[0].identifier, "A-1-identifier");
-        assert!(snapshot.slots.iter().all(|slot| slot.slot_id.starts_with("slot-")));
+        assert_eq!(snapshot.roots[0].identifier, "A-1-identifier");
+        assert!(snapshot.roots.iter().all(|root| !root.root_id.is_empty()));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn preemption_stops_before_starting_replacement_and_equal_priority_stays() {
+    fn higher_priority_waiting_root_does_not_preempt_running_root() {
         let binding = binding("project-a", 1);
         let mut candidates = HashMap::new();
         candidates.insert("project-a".into(), vec![candidate("low", 3)]);
@@ -944,16 +1351,15 @@ mod tests {
         assert_eq!(launches.borrow().len(), 1);
 
         runtime.candidate_source.values.insert("project-a".into(), vec![candidate("high", 1)]);
-        runtime.allocation_provider.paths.insert("high".into(), allocation("high"));
+        runtime.resource_provider.paths.insert("high".into(), resources("high"));
         runtime.tick().unwrap();
-        assert_eq!(stopped.borrow().as_slice(), ["low"]);
-        assert_eq!(launches.borrow().len(), 2);
-        assert_eq!(launches.borrow()[1].root, "high");
+        assert!(stopped.borrow().is_empty());
+        assert_eq!(launches.borrow().len(), 1);
 
         runtime.candidate_source.values.insert("project-a".into(), vec![candidate("equal", 1)]);
         runtime.tick().unwrap();
-        assert_eq!(stopped.borrow().as_slice(), ["low"]);
-        assert_eq!(launches.borrow().len(), 2);
+        assert!(stopped.borrow().is_empty());
+        assert_eq!(launches.borrow().len(), 1);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -968,68 +1374,40 @@ mod tests {
         runtime.delete_binding("project-a").unwrap();
         assert_eq!(stopped.borrow().as_slice(), ["root"]);
         assert!(runtime.bindings().is_empty());
-        assert!(runtime.snapshot().slots.is_empty());
+        assert!(runtime.snapshot().roots.is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn existing_allocation_is_revalidated_before_restart_launch() {
+    fn restart_launches_with_the_same_provider_derived_paths_without_persisting_resources() {
         let binding = binding("project-a", 1);
         let record = candidate("root", 1);
-        let stable = allocation("root");
-        let (store, directory) = state_path("existing-allocation");
-        let existing = Rc::new(RefCell::new(Vec::new()));
+        let stable = resources("root");
+        let (store, directory) = state_path("derived-resources");
         let launches = Rc::new(RefCell::new(Vec::new()));
         let stopped = Rc::new(RefCell::new(Vec::new()));
-        let source =
-            FakeSource { values: HashMap::from([(binding.project_id.clone(), vec![record])]) };
+        let source = FakeSource {
+            values: HashMap::from([(binding.project_id.clone(), vec![record.clone()])]),
+        };
         let mut runtime = Runtime::from_persisted(
             store,
-            PersistedState { bindings: vec![binding], allocations: vec![stable.clone()] },
+            PersistedState { bindings: vec![binding.clone()] },
             source,
             FakeAllocation {
-                paths: HashMap::from([(stable.root_id.clone(), stable)]),
-                existing: Rc::clone(&existing),
+                paths: HashMap::from([(String::from("root"), stable.clone())]),
+                cleanup_calls: Rc::new(RefCell::new(Vec::new())),
+                cleanup_ok: true,
             },
             FakeLauncher { stopped, launches: Rc::clone(&launches), stop_ok: true },
         );
         runtime.start_binding("project-a").unwrap();
         runtime.tick().unwrap();
-
-        assert_eq!(existing.borrow().len(), 1);
-        assert!(existing.borrow()[0].is_some());
         assert_eq!(launches.borrow().len(), 1);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn mismatched_existing_allocation_is_visible_and_not_launched() {
-        let binding = binding("project-a", 1);
-        let record = candidate("root", 1);
-        let stable = allocation("root");
-        let mut replacement = stable.clone();
-        replacement.run_directory = "/run/mismatch".into();
-        let (store, directory) = state_path("allocation-mismatch");
-        let launches = Rc::new(RefCell::new(Vec::new()));
-        let stopped = Rc::new(RefCell::new(Vec::new()));
-        let mut runtime = Runtime::from_persisted(
-            store,
-            PersistedState { bindings: vec![binding.clone()], allocations: vec![stable] },
-            FakeSource { values: HashMap::from([(binding.project_id.clone(), vec![record])]) },
-            FakeAllocation {
-                paths: HashMap::from([(String::from("root"), replacement)]),
-                existing: Rc::new(RefCell::new(Vec::new())),
-            },
-            FakeLauncher { stopped, launches: Rc::clone(&launches), stop_ok: true },
-        );
-        runtime.start_binding("project-a").unwrap();
-        runtime.tick().unwrap();
-
-        assert!(launches.borrow().is_empty());
-        assert!(runtime.snapshot().events.iter().any(|event| {
-            event.kind == RuntimeEventKind::AllocationConflict
-                && event.root_id.as_deref() == Some("root")
-        }));
+        assert_eq!(runtime.persisted_state(), &PersistedState { bindings: vec![binding.clone()] });
+        let state_json = std::fs::read_to_string(runtime.store.path()).unwrap_or_default();
+        assert!(!state_json.contains("allocations"));
+        assert_eq!(launches.borrow()[0].workspace, stable.workspace_path);
+        assert_eq!(launches.borrow()[0].run_directory, stable.run_directory);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1043,8 +1421,15 @@ mod tests {
         runtime.tick().unwrap();
         runtime.assignments[0].process.terminal = Some(TerminalOutcome::NeedsHuman);
         runtime.tick().unwrap();
-        assert!(runtime.snapshot().slots.is_empty());
-        let events = runtime.snapshot().events;
+        let snapshot = runtime.snapshot();
+        let root = snapshot.roots.first().expect("needs-attention root remains visible");
+        assert_eq!(root.status, RootStatus::NeedsAttention);
+        assert!(root
+            .actions
+            .iter()
+            .find(|action| action.kind == RootActionKind::CleanupWorkspace)
+            .is_some_and(|action| !action.available));
+        let events = snapshot.events;
         assert!(events.iter().any(|event| {
             event.kind == RuntimeEventKind::Terminal
                 && event.outcome == Some(TerminalOutcome::NeedsHuman)
@@ -1061,11 +1446,212 @@ mod tests {
         runtime.start_binding("project-a").unwrap();
         runtime.tick().unwrap();
         let encoded = serde_json::to_string(&runtime.snapshot()).unwrap();
+        assert!(encoded.contains("roots"));
+        assert!(!encoded.contains("slots"));
+        assert!(!encoded.contains("slot_id"));
+        assert!(!encoded.contains("workspace_path"));
+        assert!(!encoded.contains("run_directory"));
         assert!(!encoded.contains("process"));
         assert!(!encoded.contains("pid"));
         assert!(!encoded.contains("token"));
         assert!(!encoded.contains("rawenv"));
         assert!(!encoded.contains("stopped"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn root_snapshot_contains_status_and_closed_action_capabilities() {
+        let binding = binding("project-a", 1);
+        let mut candidates = HashMap::new();
+        candidates.insert("project-a".into(), vec![candidate("root", 1)]);
+        let (mut runtime, _, _, directory) = runtime(&[binding], candidates);
+        runtime.start_binding("project-a").unwrap();
+        runtime.tick().unwrap();
+
+        let snapshot = runtime.snapshot();
+        let root = snapshot.roots.first().expect("running root should be visible");
+        assert_eq!(root.root_id, "root");
+        assert_eq!(root.status, RootStatus::Running);
+        assert_eq!(root.queue_position, None);
+        assert_eq!(
+            root.actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
+            vec![
+                RootActionKind::OpenLinear,
+                RootActionKind::OpenWorkspace,
+                RootActionKind::OpenDelivery,
+                RootActionKind::OpenDiagnostics,
+                RootActionKind::CleanupWorkspace,
+            ]
+        );
+        assert!(root
+            .actions
+            .iter()
+            .find(|action| action.kind == RootActionKind::OpenLinear)
+            .is_some_and(|action| action.available && action.reason.is_none()));
+        assert!(root
+            .actions
+            .iter()
+            .filter(|action| action.kind != RootActionKind::OpenLinear)
+            .all(|action| !action.available && action.reason.is_some()));
+        assert_eq!(
+            runtime.root_action_target("root", RootActionKind::OpenLinear),
+            Ok(RootActionTarget::Url("https://linear.app/issue/root-identifier".into()))
+        );
+        assert_eq!(
+            runtime.root_action_target("root", RootActionKind::OpenDelivery),
+            Err(RuntimeError::RootActionUnavailable)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn completed_root_can_open_delivery_without_exposing_local_paths() {
+        let binding = binding("project-a", 1);
+        let mut candidates = HashMap::new();
+        candidates.insert("project-a".into(), vec![candidate("root", 1)]);
+        let (mut runtime, _, _, directory) = runtime(&[binding], candidates);
+        runtime.start_binding("project-a").unwrap();
+        runtime.tick().unwrap();
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Completed);
+        runtime.tick().unwrap();
+
+        assert_eq!(
+            runtime.root_action_target("root", RootActionKind::OpenDelivery),
+            Ok(RootActionTarget::Url("https://linear.app/issue/root-identifier".into()))
+        );
+        let snapshot = runtime.snapshot();
+        let root = snapshot.roots.first().expect("completed root should be visible");
+        assert!(root
+            .actions
+            .iter()
+            .find(|action| action.kind == RootActionKind::OpenDelivery)
+            .is_some_and(|action| action.available && action.reason.is_none()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn completed_root_exposes_cleanup_and_marks_it_consumed_after_success() {
+        let binding = binding("project-a", 1);
+        let mut candidates = HashMap::new();
+        candidates.insert("project-a".into(), vec![candidate("root", 1)]);
+        let (mut runtime, _, _, directory) = runtime(&[binding], candidates);
+        runtime.start_binding("project-a").unwrap();
+        runtime.tick().unwrap();
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Completed);
+        runtime.tick().unwrap();
+
+        let snapshot = runtime.snapshot();
+        let root = snapshot.roots.first().expect("completed root should be visible");
+        let cleanup = root
+            .actions
+            .iter()
+            .find(|action| action.kind == RootActionKind::CleanupWorkspace)
+            .expect("cleanup action should be projected");
+        assert!(cleanup.available);
+        assert_eq!(cleanup.reason, None);
+
+        runtime.cleanup_workspace("root").unwrap();
+        assert_eq!(
+            runtime.resource_provider.cleanup_calls.borrow().as_slice(),
+            [("project-a".to_owned(), "root".to_owned())]
+        );
+        assert_eq!(runtime.cleanup_workspace("root"), Err(RuntimeError::RootCleanupUnavailable));
+        let snapshot = runtime.snapshot();
+        let root = snapshot.roots.first().expect("completed root should remain visible");
+        let cleanup = root
+            .actions
+            .iter()
+            .find(|action| action.kind == RootActionKind::CleanupWorkspace)
+            .unwrap();
+        assert!(!cleanup.available);
+        assert_eq!(cleanup.reason.as_deref(), Some("root_cleanup_workspace_unavailable"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_rejects_running_waiting_and_undelivered_roots() {
+        let binding = binding("project-a", 1);
+        let mut candidates = HashMap::new();
+        candidates
+            .insert("project-a".into(), vec![candidate("running", 1), candidate("waiting", 2)]);
+        let (mut runtime, _, _, directory) = runtime(&[binding], candidates);
+        runtime.start_binding("project-a").unwrap();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cleanup_workspace("running"), Err(RuntimeError::RootCleanupUnavailable));
+        assert_eq!(runtime.cleanup_workspace("waiting"), Err(RuntimeError::RootCleanupUnavailable));
+
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Failed);
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cleanup_workspace("running"), Err(RuntimeError::RootCleanupUnavailable));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retention_attempts_only_older_completed_roots() {
+        let mut binding = binding("project-a", 1);
+        binding.completed_workspace_retention = Some(1);
+        let mut candidates = HashMap::new();
+        candidates.insert("project-a".into(), vec![candidate("first", 1), candidate("second", 2)]);
+        let (mut runtime, _, _, directory) = runtime(&[binding], candidates);
+        runtime.start_binding("project-a").unwrap();
+        runtime.tick().unwrap();
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Completed);
+        runtime.tick().unwrap();
+        assert!(runtime.resource_provider.cleanup_calls.borrow().is_empty());
+
+        runtime.candidate_source.values.insert("project-a".into(), vec![candidate("second", 2)]);
+        runtime.tick().unwrap();
+        assert_eq!(runtime.assignments[0].identity.root_id, "second");
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Completed);
+        runtime.tick().unwrap();
+        assert_eq!(
+            runtime.resource_provider.cleanup_calls.borrow().as_slice(),
+            [("project-a".to_owned(), "first".to_owned())]
+        );
+        let roots = runtime.snapshot().roots;
+        let first = roots.iter().find(|root| root.root_id == "first").unwrap();
+        let second = roots.iter().find(|root| root.root_id == "second").unwrap();
+        assert!(
+            !first
+                .actions
+                .iter()
+                .find(|action| action.kind == RootActionKind::CleanupWorkspace)
+                .unwrap()
+                .available
+        );
+        assert!(
+            second
+                .actions
+                .iter()
+                .find(|action| action.kind == RootActionKind::CleanupWorkspace)
+                .unwrap()
+                .available
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_retention_attempt_is_not_retried_by_later_ticks() {
+        let mut binding = binding("project-a", 1);
+        binding.completed_workspace_retention = Some(1);
+        let mut candidates = HashMap::new();
+        candidates.insert("project-a".into(), vec![candidate("first", 1), candidate("second", 2)]);
+        let (mut runtime, _, _, directory) = runtime(&[binding], candidates);
+        runtime.resource_provider.cleanup_ok = false;
+        runtime.start_binding("project-a").unwrap();
+        runtime.tick().unwrap();
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Completed);
+        runtime.tick().unwrap();
+        runtime.candidate_source.values.insert("project-a".into(), vec![candidate("second", 2)]);
+        runtime.tick().unwrap();
+        runtime.assignments[0].process.terminal = Some(TerminalOutcome::Completed);
+        runtime.tick().unwrap();
+        assert_eq!(runtime.resource_provider.cleanup_calls.borrow().len(), 1);
+
+        runtime.tick().unwrap();
+        assert_eq!(runtime.resource_provider.cleanup_calls.borrow().len(), 1);
+        assert_eq!(runtime.cleanup_workspace("first"), Err(RuntimeError::RootCleanupFailed));
+        assert_eq!(runtime.resource_provider.cleanup_calls.borrow().len(), 2);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

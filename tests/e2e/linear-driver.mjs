@@ -21,7 +21,9 @@ function uploadContents(value) {
 }
 
 function requireStatus(value) {
-  if (!["todo", "active", "completed", "canceled"].includes(value)) throw new Error("linear_status_invalid");
+  if (!["todo", "in_progress", "in_review", "done", "canceled"].includes(value)) {
+    throw new Error("linear_status_invalid");
+  }
   return value;
 }
 
@@ -98,8 +100,32 @@ export class LinearDriver {
   }
 
   async setRootStatus(status) {
-    this.#root.status = requireStatus(status);
-    this.#events.push(frozen({ event: "root_status", status }));
+    await this.updateIssueStatus(this.#root.id, status);
+  }
+
+  async updateIssueStatus(issueId, status) {
+    const nextStatus = requireStatus(status);
+    let issue;
+    if (issueId === this.#root.id) {
+      issue = this.#root;
+    } else {
+      for (const cycle of this.#cycles) {
+        if (cycle.id === issueId) issue = cycle;
+        else if (cycle.artist_issue.id === issueId) issue = cycle.artist_issue;
+        else if (cycle.critic_issue.id === issueId) issue = cycle.critic_issue;
+        if (issue !== undefined) break;
+      }
+    }
+    if (issue === undefined) throw new Error("linear_issue_not_found");
+    const previousStatus = issue.status;
+    if (previousStatus === nextStatus) return;
+    issue.status = nextStatus;
+    this.#events.push(frozen({
+      event: "status_transition",
+      issue_id: issueId,
+      from: previousStatus,
+      to: nextStatus,
+    }));
   }
 
   async listRootCommentsAfter(cursor) {
@@ -194,7 +220,7 @@ export class LinearDriver {
       acceptance: requireText(acceptance, "cycle_acceptance_invalid"),
       boundaries: requireText(boundaries, "cycle_boundaries_invalid"),
       consumed_comment_ids: [...consumedCommentIds],
-      status: "active",
+      status: "todo",
       artist: null,
       critic: null,
       artist_issue: {
@@ -202,6 +228,7 @@ export class LinearDriver {
         identifier: `ENG-${this.#cycleNumber * 3 - 1}`,
         url: `https://linear.example/issue/ENG-${this.#cycleNumber * 3 - 1}`,
         title: `[Artist] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
+        status: "todo",
         description: managedDescription(
           ["## Objective", objective, "## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
           "## Role\n\nArtist\n\n## Access\n\nworkspace-write",
@@ -212,6 +239,7 @@ export class LinearDriver {
         identifier: `ENG-${this.#cycleNumber * 3}`,
         url: `https://linear.example/issue/ENG-${this.#cycleNumber * 3}`,
         title: `[Critic] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
+        status: "todo",
         description: managedDescription(
           ["## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
           "## Role\n\nCritic\n\n## Access\n\nread-only",
@@ -220,7 +248,13 @@ export class LinearDriver {
       result: null,
     };
     this.#cycles.push(cycle);
-    this.#events.push(frozen({ event: "cycle_created", cycle_id: cycle.id }));
+    this.#events.push(frozen({
+      event: "cycle_created",
+      cycle_id: cycle.id,
+      cycle_status: cycle.status,
+      artist_status: cycle.artist_issue.status,
+      critic_status: cycle.critic_issue.status,
+    }));
     return frozen(clone(cycle));
   }
 
@@ -248,10 +282,10 @@ export class LinearDriver {
     const cycle = this.#cycle(cycleId);
     if (cycle.artist === null || cycle.critic === null) throw new Error("cycle_incomplete");
     if (!["succeeded", "rejected", "failed"].includes(result)) throw new Error("cycle_result_invalid");
-    cycle.status = "completed";
     cycle.result = result;
     if (uploadOutcome === undefined) delete cycle.upload_outcome;
     else cycle.upload_outcome = clone(uploadOutcome);
+    await this.updateIssueStatus(cycle.id, "done");
     this.#events.push(frozen({ event: "cycle_finished", cycle_id: cycleId, result }));
   }
 

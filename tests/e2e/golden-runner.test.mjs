@@ -334,7 +334,7 @@ test("golden rejects a team without one canonical Todo state before Root creatio
   }
 });
 
-test("golden visible tree requires Done Root, Cycle, Artist, and Critic issues", () => {
+test("golden visible tree validates canonical terminal states without fabricated history", () => {
   const done = { name: "Done", type: "completed" };
   const issue = {
     state: done,
@@ -352,6 +352,7 @@ test("golden visible tree requires Done Root, Cycle, Artist, and Critic issues",
       pageInfo: { hasNextPage: false },
     },
   };
+  assert.equal(issue.history, undefined);
   assert.doesNotThrow(() => validateGoldenVisibleTree(issue));
   assert.throws(
     () => validateGoldenVisibleTree({
@@ -379,6 +380,25 @@ test("golden visible tree requires Done Root, Cycle, Artist, and Critic issues",
   assert.throws(
     () => validateGoldenVisibleTree({ ...issue, state: { name: "In Review", type: "started" } }),
     /golden_visible_root_state_invalid/u,
+  );
+  assert.throws(
+    () => validateGoldenVisibleTree({
+      ...issue,
+      children: { ...issue.children, nodes: [{ ...issue.children.nodes[0], state: { name: "In Progress", type: "started" } }] },
+    }),
+    /golden_visible_cycle_state_invalid/u,
+  );
+  assert.throws(
+    () => validateGoldenVisibleTree({
+      ...issue,
+      children: { ...issue.children, nodes: [{
+        ...issue.children.nodes[0],
+        children: { ...issue.children.nodes[0].children, nodes: [{
+          ...issue.children.nodes[0].children.nodes[0], state: { name: "In Review", type: "started" },
+        }, issue.children.nodes[0].children.nodes[1]] },
+      }] },
+    }),
+    /golden_visible_role_state_invalid/u,
   );
   assert.throws(
     () => validateGoldenVisibleTree({
@@ -430,11 +450,21 @@ test("golden result projection uses role descriptions and one visible Critic JSO
     "### Deleted", "- obsolete.txt (-3 lines)",
     "", "## Verification", "- Read back the file.", "",
   ].join("\n");
-  const criticMarkdown = [
-    "verdict: accepted", "", "## Scope Reviewed", "Inspected the complete workspace diff.", "",
+  const criticEnvelope = {
+    verdict: "accepted",
+    task_state_markdown: "The golden file is verified.",
+  };
+  const criticReportMarkdown = [
+    "## Scope Reviewed", "Inspected the complete workspace diff.", "",
     "## Implementation Review", "The golden file is present.", "", "## Checks", "- file content matches",
     "", "## Evidence", "- read-only inspection passed", "", "## Findings", "- None", "",
-    "## Task State", "The golden file is verified.", "",
+  ].join("\n");
+  const criticMarkdown = [
+    "```json",
+    JSON.stringify(criticEnvelope),
+    "```",
+    "",
+    criticReportMarkdown,
   ].join("\n");
   const projection = {
     description: [
@@ -590,19 +620,41 @@ test("golden fetches the linked Critic JSON with the human token and validates i
         ok: true,
         headers: { get: (name) => name === "content-type" ? "application/json; charset=utf-8" : null },
         arrayBuffer: async () => Buffer.from(JSON.stringify({
-          verdict: "accepted",
-          scope_reviewed: "Workspace diff",
-          implementation_review: "File change inspected",
-          checks: ["read-only check"],
-          evidence: ["file read succeeded"],
-          findings: [],
-          task_state_markdown: "Verified",
+          envelope: {
+            verdict: "accepted",
+            task_state_markdown: "Verified",
+          },
+          report_markdown: [
+            "## Scope Reviewed",
+            "Workspace diff",
+            "",
+            "## Implementation Review",
+            "File change inspected",
+            "",
+            "## Checks",
+            "- read-only check",
+          ].join("\n"),
         }), "utf8"),
       };
     },
   );
 
-  assert.equal(result.verdict, "accepted");
+  assert.deepEqual(result, {
+    envelope: {
+      verdict: "accepted",
+      task_state_markdown: "Verified",
+    },
+    report_markdown: [
+      "## Scope Reviewed",
+      "Workspace diff",
+      "",
+      "## Implementation Review",
+      "File change inspected",
+      "",
+      "## Checks",
+      "- read-only check",
+    ].join("\n"),
+  });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "https://uploads.linear.app/assets/audit.json");
   assert.equal(calls[0].options.headers.Authorization, "human-linear-token");

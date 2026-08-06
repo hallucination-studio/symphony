@@ -1,7 +1,7 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { parseCycleSpec, type CritiqueResult, type CycleSpec } from "../contracts/cycle.js";
+import { parseCycleSpec, type CycleSpec } from "../contracts/cycle.js";
 import {
   parseRootReconcileRequest,
   parseRootReconcileReportMarkdown,
@@ -53,6 +53,7 @@ export type ConductorResult =
 const ROOT_RECONCILE_COMMENT_MARKER = "# Symphony Harness: Reconcile";
 const GIT_SUMMARY_TIMEOUT_MS = 10_000;
 const GIT_SUMMARY_OUTPUT_BYTES = 2 * 1024 * 1024;
+const UNTRACKED_FILE_SUMMARY_BYTES = GIT_SUMMARY_OUTPUT_BYTES;
 
 function currentErrorMessage(error: unknown, fallback: string): string {
   let message: string;
@@ -147,11 +148,15 @@ async function collectRootWorktreeSummary(workspace: RootWorkspace): Promise<Roo
         try {
           const filename = path.join(workspace.workspace_path, file);
           const metadata = await lstat(filename);
+          if (metadata.isFile() && metadata.size > UNTRACKED_FILE_SUMMARY_BYTES) {
+            throw new Error("worktree_file_too_large");
+          }
           lines = {
             added_lines: metadata.isFile() ? countTextLines(await readFile(filename)) : 0,
             deleted_lines: 0,
           };
-        } catch {
+        } catch (error) {
+          if (error instanceof Error && error.message === "worktree_file_too_large") throw error;
           lines = { added_lines: 0, deleted_lines: 0 };
         }
       }
@@ -315,7 +320,7 @@ function nextCursor(comments: readonly LinearComment[], current?: string): strin
 function withState(state: RootState, changes: Partial<RootState>): RootState {
   const value = { ...state, ...changes } as Record<string, unknown>;
   for (const key of [
-    "pending_finding", "latest_critique", "harness_feedback", "comment_cursor", "delivery",
+    "latest_critique", "harness_feedback", "comment_cursor", "delivery",
     "token_usage",
   ]) {
     if (value[key] === undefined) delete value[key];
@@ -323,15 +328,13 @@ function withState(state: RootState, changes: Partial<RootState>): RootState {
   return parseRootState(value);
 }
 
-function findingFromCritic(critique: CritiqueResult): MarkdownText | undefined {
-  if (critique.verdict === "accepted") return critique.pending_finding;
-  if (critique.verdict === "process_error") return parseMarkdownText(critique.reason);
-  return critique.pending_finding ?? critique.findings[0] ?? critique.implementation_review;
-}
-
 function visibleErrorMessage(error: unknown): MarkdownText {
-  const message = error instanceof Error ? error.message : String(error);
-  return parseMarkdownText((message.length === 0 ? "Unknown error" : message).slice(0, 50));
+  const message = currentErrorMessage(error, "Unknown error");
+  try {
+    return parseMarkdownText(message);
+  } catch {
+    return parseMarkdownText("Error could not be displayed");
+  }
 }
 
 async function nextCycleNumber(runDirectory: string): Promise<number> {
@@ -431,7 +434,13 @@ export class Conductor {
       await updateRootStatus(this.options.workflow.in_review_status_id);
       const humanInput = await readRootInbox(this.options.gateway, root.id, state.comment_cursor);
       if (humanInput.length === 0) {
-        return { status: "needs_human", reason: state.harness_feedback ?? state.pending_finding ?? "human_input_required" };
+        const latestFinding = state.latest_critique?.verdict === "process_error"
+          ? state.latest_critique.reason
+          : state.latest_critique?.pending_finding;
+        return {
+          status: "needs_human",
+          reason: state.harness_feedback ?? latestFinding ?? "human_input_required",
+        };
       }
     }
 
@@ -531,7 +540,6 @@ export class Conductor {
         event: "cycle_completed", root_id: root.id,
         cycle_number: spec.cycle_number, result: outcome.terminal.result,
       });
-      const pendingFinding = findingFromCritic(outcome.critique);
       const cycleTokenUsage = addTokenUsage(
         addTokenUsage(state.token_usage, outcome.artistProcess.token_usage),
         outcome.criticProcess.token_usage,
@@ -539,15 +547,14 @@ export class Conductor {
       if (outcome.critique.verdict === "accepted") {
         await updateState(withState(state, {
           current_phase: "idle",
-          task_state_markdown: outcome.critique.task_state_markdown ?? state.task_state_markdown,
-          pending_finding: pendingFinding,
+          task_state_markdown: outcome.critique.task_state_markdown,
           latest_critique: outcome.critique,
           harness_feedback: undefined,
           token_usage: cycleTokenUsage,
         }));
       } else {
         await updateState(withState(state, {
-          current_phase: "idle", pending_finding: pendingFinding, latest_critique: outcome.critique,
+          current_phase: "idle", latest_critique: outcome.critique,
           token_usage: cycleTokenUsage,
         }));
       }

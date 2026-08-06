@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentKind } from "../contracts/identity.js";
@@ -11,9 +12,10 @@ import {
 } from "../contracts/root.js";
 import type { Performer } from "../performer/api/Performer.js";
 import type { LinearIssue } from "../contracts/task-management.js";
-import { parseRootWorkspace, type RootWorkspace } from "../contracts/workspace.js";
 import { parseMarkdownText } from "../contracts/validation.js";
+import { parseRootWorkspace, type RootWorkspace } from "../contracts/workspace.js";
 import { renderRootReconcilePrompt } from "./RootReconcilePrompt.js";
+import { bindRootWorkspace } from "../workspace/RootWorkspace.js";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_VISIBLE_REASON_LENGTH = 50;
@@ -21,6 +23,7 @@ const MAX_VISIBLE_REASON_LENGTH = 50;
 export interface RootReconcilerOptions {
   readonly performer: Performer;
   readonly runDirectory: string;
+  readonly invocationCwd?: string | undefined;
   readonly reconcileAgent: AgentKind;
   readonly reconcileModel?: string;
   readonly reconcileReasoningEffort?: string;
@@ -55,6 +58,9 @@ function parseSections(source: string): RootReconcileDecision {
   }
   flush();
 
+  const hasExactSections = (...expected: readonly string[]) =>
+    sections.size === expected.length && expected.every((name) => sections.has(name));
+
   if (decision === "cycle" && sections.size === 4 && sections.has("Report")) {
     return parseRootReconcileDecision({
       kind: "create_cycle",
@@ -71,8 +77,10 @@ function parseSections(source: string): RootReconcileDecision {
   }
   if (
     decision === "needs_human"
-    && (sections.size === 2 || sections.size === 3)
-    && sections.has("Report")
+    && (
+      hasExactSections("Reason", "Report")
+      || hasExactSections("Reason", "Question", "Report")
+    )
   ) {
     return parseRootReconcileDecision({
       kind: "needs_human", reason: sections.get("Reason"),
@@ -90,7 +98,12 @@ function visibleErrorMessage(error: unknown, fallback: string): string {
     try { message = String(error); } catch { message = fallback; }
   }
   const value = message.length === 0 ? fallback : message;
-  return value.slice(0, MAX_VISIBLE_REASON_LENGTH).replace(/[\r\n\0]/gu, " ");
+  const candidate = value.slice(0, MAX_VISIBLE_REASON_LENGTH).replace(/[\r\n\0]/gu, " ");
+  try {
+    return parseMarkdownText(candidate);
+  } catch {
+    return fallback;
+  }
 }
 
 function processFailureReason(result: {
@@ -114,49 +127,18 @@ export class RootReconciler {
   constructor(private readonly options: RootReconcilerOptions) {}
 
   async prepare(root: LinearIssue, preferredWorkspace?: string, signal?: AbortSignal): Promise<RootWorkspace> {
-    const runId = crypto.randomUUID();
-    const finalResponsePath = path.join(this.options.runDirectory, `root-prepare-${runId}.md`);
-    const diagnosticJsonlPath = path.join(this.options.runDirectory, `root-prepare-${runId}.jsonl`);
-    const diagnosticStderrPath = path.join(this.options.runDirectory, `root-prepare-${runId}.stderr`);
-    const currentDirectory = process.cwd();
-    const workingDirectory = currentDirectory;
-    const target = preferredWorkspace === undefined
-      ? "No preferred workspace was supplied. First try to create a dedicated Root worktree and branch under the current repository's parent directory. Only if worktree creation is unavailable, adopt the current working directory and branch without switching, cleaning, or resetting."
-      : `The preferred workspace is ${preferredWorkspace}. If it does not exist, create a dedicated git worktree and Root branch at exactly that path. Do not silently fall back to another path.`;
-    const prompt = parseMarkdownText([
-      "You are Symphony's Root Reconcile role executing the Prepare phase.",
-      "Prepare or adopt the Root workspace. You may run git commands. Do not implement the task, create a Cycle, or deliver it in this phase.",
-      target,
-      `Root: ${root.identifier} - ${root.title}`,
-      `External diagnostic run directory: ${this.options.runDirectory}`,
-      "Return only:",
-      "decision: prepared\n\n## Workspace\n{\"workspace_path\":\"absolute path\",\"run_directory\":\"absolute path\",\"root_branch\":\"branch\"}\n\n## Report\n### Summary\n[what was adopted or created]\n\n### Evidence\n[git evidence]",
-    ].join("\n\n"));
-    const processResult = await this.options.performer.launch({
-      agent: this.options.reconcileAgent,
-      ...(this.options.reconcileModel === undefined ? {} : { model: this.options.reconcileModel }),
-      ...(this.options.reconcileReasoningEffort === undefined ? {} : { reasoning_effort: this.options.reconcileReasoningEffort }),
-      prompt, working_directory: workingDirectory, sandbox: "danger_full_access",
-      additional_writable_directories: [path.dirname(preferredWorkspace ?? currentDirectory)],
-      final_response_path: finalResponsePath, diagnostic_jsonl_path: diagnosticJsonlPath,
-      diagnostic_stderr_path: diagnosticStderrPath, timeout_ms: this.options.timeoutMs,
-    }, signal);
-    if (processResult.launch_status !== "exited" || processResult.exit_code !== 0) {
-      throw new Error(visibleErrorMessage(processFailureReason(processResult), "Prepare failed"));
-    }
-    if (processResult.diagnostic_jsonl_ref !== diagnosticJsonlPath || processResult.diagnostic_stderr_ref !== diagnosticStderrPath) {
-      throw new Error("Diagnostic capture failed");
-    }
-    if (processResult.final_response_ref !== finalResponsePath) throw new Error("Final response unavailable");
-    const response = await readFile(finalResponsePath, "utf8");
-    const match = /^decision: prepared\n\n## Workspace\n([^\n]+)\n\n## Report\n[\s\S]+$/u.exec(response.trim());
-    if (match?.[1] === undefined) throw new Error("invalid_root_prepare_response");
-    let value: unknown;
-    try { value = JSON.parse(match[1]); } catch { throw new Error("invalid_root_prepare_response"); }
-    const workspace = parseRootWorkspace(value);
-    if (workspace.run_directory !== this.options.runDirectory) throw new Error("prepared_run_directory_mismatch");
-    if (preferredWorkspace !== undefined && workspace.workspace_path !== preferredWorkspace) throw new Error("prepared_workspace_mismatch");
-    return workspace;
+    void signal;
+    const bound = await bindRootWorkspace({
+      rootId: root.identifier,
+      ...(preferredWorkspace === undefined ? {} : { preferredWorkspace }),
+      invocationCwd: this.options.invocationCwd ?? process.cwd(),
+      runDirectory: this.options.runDirectory,
+    });
+    return parseRootWorkspace({
+      workspace_path: bound.workspacePath,
+      run_directory: bound.runDirectory,
+      root_branch: bound.rootBranch,
+    });
   }
 
   async reconcile(request: RootReconcileRequest, signal?: AbortSignal): Promise<RootReconcileOutcome> {
@@ -228,9 +210,29 @@ export class RootReconciler {
           process: processResult,
         };
       }
-      const response = await readFile(finalResponsePath);
-      if (response.byteLength > MAX_RESPONSE_BYTES) throw new Error("invalid_root_reconcile_response");
-      return { decision: parseSections(response.toString("utf8")), process: processResult };
+      let response: Buffer;
+      try {
+        const handle = await open(finalResponsePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const metadata = await handle.stat();
+          if (!metadata.isFile() || metadata.size > MAX_RESPONSE_BYTES) {
+            throw new Error("invalid_root_reconcile_response");
+          }
+          response = await handle.readFile();
+          if (response.byteLength > MAX_RESPONSE_BYTES) throw new Error("invalid_root_reconcile_response");
+        } finally {
+          await handle.close();
+        }
+      } catch {
+        throw new Error("invalid_root_reconcile_response");
+      }
+      let decoded: string;
+      try {
+        decoded = new TextDecoder("utf-8", { fatal: true }).decode(response);
+      } catch {
+        throw new Error("invalid_root_reconcile_response");
+      }
+      return { decision: parseSections(decoded), process: processResult };
     } catch (error) {
       const reason = visibleErrorMessage(error, "Unknown error");
       return {

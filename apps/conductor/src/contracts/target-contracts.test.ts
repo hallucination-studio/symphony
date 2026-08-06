@@ -24,7 +24,7 @@ import {
 import {
   parseCycleSpec,
   parseCycleTerminalResult,
-  parseCritiqueResult,
+  parseCritiqueCheckpoint,
 } from "./cycle.js";
 import {
   parseRootReconcileDecision,
@@ -65,7 +65,11 @@ const rootState = {
   root_branch: "symphony/ENG-123",
   current_phase: "idle",
   task_state_markdown: "## Task State\n\nThe parser is not verified.",
-  pending_finding: "The failure case is not covered.",
+  latest_critique: {
+    verdict: "incomplete",
+    task_state_markdown: "The parser is not verified.",
+    pending_finding: "The failure case is not covered.",
+  },
   harness_feedback: "",
   comment_cursor: comment.id,
 } as const;
@@ -189,21 +193,16 @@ test("Linear values and RootState normalize provider data without provider paylo
   assert.throws(() => parseRootState({ ...rootState, delivery: { kind: "branch", branch: "" } }), /invalid_delivery_branch/u);
 });
 
-test("RootState optionally persists a structured latest Critique", () => {
+test("RootState persists only the compact latest Critique checkpoint", () => {
   const latestCritic = {
     verdict: "accepted",
-    scope_reviewed: "Parser source, focused tests, and the complete workspace diff.",
-    implementation_review: "The parser rejects ambiguous input before token recovery.",
-    checks: ["npm test"],
-    evidence: ["Focused test passed."],
-    findings: [],
     task_state_markdown: "## Task State\n\nParser verified.",
+    artifact_url: "https://uploads.linear.app/critique.json",
   } as const;
   const parsed = parseRootState({ ...rootState, latest_critique: latestCritic });
 
   assert.deepEqual(parsed.latest_critique, latestCritic);
   assert.ok(Object.isFrozen(parsed.latest_critique));
-  assert.ok(Object.isFrozen(parsed.latest_critique?.checks));
   assert.deepEqual(
     parseRootState({
       ...rootState,
@@ -213,7 +212,7 @@ test("RootState optionally persists a structured latest Critique", () => {
   );
   assert.throws(() => parseRootState({
     ...rootState,
-    latest_critique: { ...latestCritic, unexpected: "child-report" },
+    latest_critique: { ...latestCritic, evidence: ["child-report"] },
   }), /invalid_contract_keys/u);
 });
 
@@ -402,29 +401,20 @@ test("Performer and Critic contracts keep process facts separate from semantic v
     },
   }), /invalid_total_tokens/u);
 
-  const audit = parseCritiqueResult({
+  const audit = parseCritiqueCheckpoint({
     verdict: "accepted",
-    scope_reviewed: "Parser source, focused tests, and the complete workspace diff.",
-    implementation_review: "The parser rejects ambiguous input before token recovery.",
-    checks: ["npm test"],
-    evidence: ["Focused test passed."],
-    findings: [],
     task_state_markdown: "## Task State\n\nParser verified.",
   });
   assert.equal(audit.verdict, "accepted");
   assert.ok(Object.isFrozen(audit));
-  assert.deepEqual(parseCritiqueResult({ verdict: "process_error", reason: "critic_start_failed" }), {
+  assert.deepEqual(parseCritiqueCheckpoint({ verdict: "process_error", reason: "critic_start_failed" }), {
     verdict: "process_error",
     reason: "critic_start_failed",
   });
-  assert.throws(() => parseCritiqueResult({
+  assert.throws(() => parseCritiqueCheckpoint({
     verdict: "accepted",
-    scope_reviewed: "scope",
-    implementation_review: "logic",
     checks: [],
-    evidence: [],
-    findings: [],
-    reason: "unexpected",
+    task_state_markdown: "trusted",
   }), /invalid_contract_keys/u);
 });
 

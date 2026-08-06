@@ -31,7 +31,6 @@ test("managed Issue descriptions separate task, Symphony metadata, and terminal 
     task: "## Objective\n\nPreserve the user's parser requirement.\n\n## Acceptance\n\nFocused tests pass.",
     metadata: "## Role\n\nArtist\n\n## Access\n\nworkspace-write",
     result: "## Summary\n\nCreated one parser test.\n\n## Verification\n\n- npm test: passed",
-    updated_at: updatedAt,
   });
   assert.throws(
     () => appendManagedIssueResult(terminal, updatedAt, "## Summary\n\nDuplicate."),
@@ -44,9 +43,13 @@ test("managed Issue descriptions reject missing, duplicate, or reordered semanti
     () => parseManagedIssueDescription("# Symphony Metadata\n\n## Role\n\nArtist\n\n# Task\n\nWork."),
     /linear_issue_description_malformed/u,
   );
-  assert.throws(
-    () => parseManagedIssueDescription("# Task\n\nWork.\n\n# Symphony Metadata\n\nMeta.\n\n# Result\n\nUpdated at: bad\n\nDone."),
-    /linear_issue_description_malformed/u,
+  assert.deepEqual(
+    parseManagedIssueDescription("# Task\n\nWork.\n\n# Symphony Metadata\n\nMeta.\n\n# Result\n\nUpdated at: display only\n\nDone."),
+    { task: "Work.", metadata: "Meta.", result: "Done." },
+  );
+  assert.deepEqual(
+    parseManagedIssueDescription("# Task\n\nWork.\n\n# Symphony Metadata\n\nMeta.\n\n# Result\n\nDone."),
+    { task: "Work.", metadata: "Meta.", result: "Done." },
   );
   assert.throws(
     () => parseManagedIssueDescription("# Task\n\nWork.\n\n# Symphony Metadata\n\nMeta.\n\n# Symphony Metadata\n\nDuplicate."),

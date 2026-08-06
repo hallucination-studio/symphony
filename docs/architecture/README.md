@@ -16,7 +16,7 @@ flowchart TD
   Reconcile --> Cycle[Immutable CycleSpec]
   Cycle --> Artist[Artist Issue<br/>fresh workspace-write session]
   Artist --> Critic[Critic Issue<br/>fresh read-only session]
-  Critic --> Result[Exact role descriptions + Cycle history + uploaded Critique JSON]
+  Critic --> Result[Role descriptions + two Cycle comments + uploaded Critique JSON]
   Result --> State[Trusted fields in Root State]
   State --> Reconcile
   Inbox[New Root comments] --> Reconcile
@@ -29,7 +29,7 @@ every Artist attempt, including process failures. Only a Succeeded Cycle can
 update the trusted fields in Root State.
 
 Podium Desktop is the local operator surface for V2. It persists Project
-Bindings and stable Root allocations, then runs multiple local Conductors. A
+Bindings, derives Root paths, then runs multiple local Conductors. A
 Conductor remains a deliberately narrow CLI process for exactly one Root,
 exactly one workspace, and exactly one external run directory. Podium owns
 local queueing and process lifecycle around those Conductor invocations; it
@@ -65,7 +65,7 @@ does not own Cycle semantics, Root State, role prompts, or Critic judgment.
 | Linear Gateway | normalized GraphQL reads/writes, canonical status resolution, and Issue projection behind an injectable protocol | workflow reasoning, Markdown policy, or hidden state |
 | Root State | persist the minimal checkpoint and promote trusted fields only from Succeeded Cycles | original requirement, child history, or a Trusted State service |
 | Conductor | deterministic serial orchestration, validation, persistence, visible status projection, and startup cancellation | semantic next-step, Critic judgment, Git/worktree/delivery execution, or recovery protocol |
-| Podium Desktop | persist Bindings and stable Root paths, prioritize local assignments, and supervise bound Conductors | Cycle semantics, Root State, role prompts, Critic judgment, Web, or cross-machine leases |
+| Podium Desktop | persist Bindings, derive paths, queue without preemption, supervise Conductors, and authorize Linear | Cycle semantics, Root State, role prompts, Critic judgment, Web, or cross-machine leases |
 
 ## V1 boundaries
 
@@ -73,7 +73,7 @@ does not own Cycle semantics, Root State, role prompts, or Critic judgment.
 |---|---|
 | one Root and at most one active Cycle | concurrent Cycles or multiple Roots per process |
 | exactly one Artist and one Critic per Cycle | planning stage, DAG, parallel work, or subagents |
-| one terminal report appended to each Artist/Critic description, plus append-only Cycle history/result comments | changing a Cycle title or description after creation |
+| one terminal report appended to each Artist/Critic description, plus exactly one Cycle creation and one terminal comment | changing a Cycle title or description after creation |
 | one exact Harness-managed checkpoint suffix on Root description | treating generated state as Root requirement or introducing a second checkpoint |
 | five canonical Linear statuses shared by Root and descendants | inferred mappings or editing/deleting user-defined state definitions |
 | new Root comments become next-Reconcile input | old-comment replay or descendant comments as instructions |
@@ -96,12 +96,12 @@ neither role report is copied to the Cycle.
 There is no second summarization or format-repair Agent call.
 
 Artist Markdown is untrusted process output and remains display-only. Critic
-Markdown is the sole semantic result. Conductor parses its validated fields,
-serializes them to `cycle-NNN-critique-result.json`, reads that file back and
-validates it, writes the re-read value to `RootState.latest_critique`, and uploads
-only that JSON file as `application/json`. Cycle comments contain append-only
-lifecycle, decision, terminal, and upload facts plus a link to the uploaded file
-or the current upload error. Upload failure is visible but
+Markdown contains a compact machine envelope and a free human audit. Conductor
+parses the envelope once, serializes the full typed artifact once to
+`cycle-NNN-critique-result.json`, writes/uploads the same bytes, and promotes
+only the compact checkpoint into `RootState.latest_critique`. Cycle comments
+contain the creating rationale and terminal/upload facts plus a link to the
+uploaded file or the current upload error. Upload failure is visible but
 does not change the Critic verdict. Reconcile never reads the Cycle DAG, Artist
 or Critic descriptions, comments, reports, or transcripts.
 
@@ -118,16 +118,32 @@ only `diagnostic_ref`. Only a visibly verified successful fixture is archived.
 
 Podium Desktop persists one `ProjectBinding` per configured Linear Project. A
 binding contains the project ID, an operator-visible routing label, repository
-path, base branch, local concurrency, and independent Reconcile, Artist, and
-Critic role launch configuration. It also persists each allocated Root's stable
-`root_id`, `workspace_path`, and `run_directory`. Assignment records, process
-IDs, and the pending queue are runtime memory only; they are rebuilt or dropped
-when Desktop stops.
+path, base branch, local concurrency, optional completed-workspace retention,
+and independent Reconcile, Artist, and Critic role launch configuration. Root
+workspace and run paths are derived from the app-data root and Root ID; Root
+State becomes the sole durable binding after Prepare. Assignment records,
+process IDs, derived paths, and the pending queue are runtime memory only.
 
-The scheduler is local to one Desktop instance. A higher-priority assignment
-may preempt a lower-priority running assignment; equal priorities never
-preempt. Preemption is ordered: Desktop requests the Conductor process tree to
-stop, confirms that the tree has stopped, and only then starts the replacement.
+Podium Desktop owns the Linear authorization session for exactly one built-in
+OAuth2 application: authorization code with PKCE and `actor=app`, so Symphony
+writes are authored by the application bot and never by a personal account.
+Tokens live only in a private credentials file in the app-data directory,
+Desktop refreshes them in place, and each Conductor launch receives the current
+access token in its environment. Codex is the single fixed Agent; optional
+per-role connection, model, and reasoning overrides remain direct launch
+configuration rather than an agent catalog.
+
+The scheduler is local to one Desktop instance. Waiting Roots are ordered by
+Linear priority, creation time, and ID, but never automatically preempt a
+running Root. Stop and completed-workspace cleanup are explicit operator
+actions; an enabled retention limit may remove only older completed workspaces.
+First run is one Binding flow: connect Linear, select a Project, select a
+repository, and accept local Codex defaults. Per-role connection, model, and
+reasoning overrides live under Advanced. The primary view is organized around
+Running, Waiting, Needs attention, and Recently completed Roots rather than
+slots. Root rows explain queue position or the latest event and provide direct
+actions to open Linear, workspace, delivery, and private diagnostics. Raw local
+paths remain behind those actions.
 There is no cross-machine lease, distributed claim, SQLite store, daemon IPC,
 or Web surface in this V2 target. Conductor `NeedsHuman` remains a V1 terminal
 state, but its Podium scheduling, UI, and E2E behavior are out of scope for this

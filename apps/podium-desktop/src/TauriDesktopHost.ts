@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import type {
   DesktopCommand,
   DesktopCommandResult,
   DesktopHost,
   DesktopState,
+  LinearConnectionView,
+  LinearProjectView,
   ProjectBindingDraftView,
   ProjectBindingView,
 } from "./ui/types";
@@ -15,6 +18,7 @@ interface RawBinding {
   repository_path: string;
   base_branch: string;
   concurrency: number;
+  completed_workspace_retention?: number;
   reconcile_agent: "codex";
   reconcile_model?: string;
   reconcile_reasoning_effort?: string;
@@ -26,26 +30,40 @@ interface RawBinding {
   critic_reasoning_effort?: string;
 }
 
-interface RawSlot {
-  slot_id: string;
-  binding_id: string;
+interface RawRoot {
   root_id: string;
-  priority: number;
+  binding_id: string;
   identifier: string;
   title: string;
+  priority: number;
+  status: "running" | "waiting" | "needs_attention" | "completed";
+  latest_event?: string;
+  queue_position?: number;
+  observed_at: string;
+  actions: Array<{ kind: "open_linear" | "open_workspace" | "open_delivery" | "open_diagnostics" | "cleanup_workspace"; available: boolean; reason?: string }>;
 }
 
 interface RawEvent {
   kind: string;
   binding_id?: string;
-  slot_id?: string;
   root_id?: string;
 }
 
 interface RawSnapshot {
   bindings: RawBinding[];
-  slots: RawSlot[];
+  roots: RawRoot[];
   events: RawEvent[];
+  linear: RawLinearConnection;
+}
+
+type RawLinearConnection =
+  | { status: "connected"; organization: string }
+  | { status: "disconnected" }
+  | { status: "reconnect_required" };
+
+interface RawLinearProject {
+  id: string;
+  name: string;
 }
 
 export class TauriDesktopHost implements DesktopHost {
@@ -77,11 +95,37 @@ export class TauriDesktopHost implements DesktopHost {
         case "stop_binding":
           await invoke("stop_binding", { bindingId: command.bindingId });
           break;
+        case "connect_linear":
+          await invoke("connect_linear");
+          break;
+        case "disconnect_linear":
+          await invoke("disconnect_linear");
+          break;
+        case "list_linear_projects": {
+          const projects = await invoke<RawLinearProject[]>("list_linear_projects");
+          return { kind: "projects", projects: mapProjects(projects) };
+        }
+        case "open_linear":
+        case "open_workspace":
+        case "open_delivery":
+        case "open_diagnostics":
+        case "cleanup_workspace":
+          await invoke(command.kind, { rootId: command.rootId });
+          break;
       }
       return { kind: "confirmed" };
-    } catch {
-      return { kind: "rejected", sanitizedReason: "The Podium operation could not be completed." };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return {
+        kind: "rejected",
+        sanitizedReason: (reason || "The Podium operation could not be completed.").slice(0, 50),
+      };
     }
+  }
+
+  async pickDirectory(): Promise<string | null> {
+    const selected = await open({ directory: true, multiple: false });
+    return typeof selected === "string" ? selected : null;
   }
 }
 
@@ -92,28 +136,40 @@ function mapSnapshot(snapshot: RawSnapshot): DesktopState {
     kind: "ready",
     overview: {
       bindings,
-      slots: snapshot.slots.map((slot) => {
-        const event = [...snapshot.events].reverse().find((candidate) => candidate.slot_id === slot.slot_id);
-        return {
-          slotId: slot.slot_id,
-          bindingId: slot.binding_id,
-          root: {
-            rootId: slot.root_id,
-            identifier: slot.identifier,
-            title: slot.title,
-            priority: slot.priority,
-            workspaceSummary: "Managed locally",
-            runDirectorySummary: "Managed locally",
-          },
-          processState: "running" as const,
-          recentEvent: event ? label(event.kind) : "Conductor is running",
-          observedAt,
-        };
-      }),
+      roots: snapshot.roots.map((root) => ({
+        rootId: root.root_id,
+        bindingId: root.binding_id,
+        identifier: root.identifier,
+        title: root.title,
+        priority: root.priority,
+        status: root.status,
+        latestEvent: root.latest_event ?? null,
+        queuePosition: root.queue_position ?? null,
+        observedAt: root.observed_at,
+        actions: root.actions,
+      })),
+      linear: mapLinearConnection(snapshot.linear),
       observedAt,
     },
     application: { desktopVersion: "0.1.0", startedAt: observedAt },
   };
+}
+
+function mapLinearConnection(connection: RawLinearConnection): LinearConnectionView {
+  if (connection.status === "connected") {
+    return { status: "connected", organization: connection.organization };
+  }
+  return { status: connection.status };
+}
+
+function mapProjects(projects: RawLinearProject[]): LinearProjectView[] {
+  if (!Array.isArray(projects)) throw new Error("linear_projects_invalid");
+  return projects.map((project) => {
+    if (!project || typeof project.id !== "string" || typeof project.name !== "string") {
+      throw new Error("linear_projects_invalid");
+    }
+    return { id: project.id, name: project.name };
+  });
 }
 
 function fromRawBinding(binding: RawBinding): ProjectBindingView {
@@ -124,6 +180,7 @@ function fromRawBinding(binding: RawBinding): ProjectBindingView {
     repositoryPath: binding.repository_path,
     baseBranch: binding.base_branch,
     concurrency: binding.concurrency,
+    completedWorkspaceRetention: binding.completed_workspace_retention ?? null,
     reconcile_agent: binding.reconcile_agent,
     reconcile_model: binding.reconcile_model ?? null,
     reconcile_reasoning_effort: binding.reconcile_reasoning_effort ?? null,
@@ -143,6 +200,8 @@ function toRawBinding(binding: ProjectBindingDraftView | ProjectBindingView): Ra
     repository_path: binding.repositoryPath.trim(),
     base_branch: binding.baseBranch.trim(),
     concurrency: Number(binding.concurrency),
+    ...(binding.completedWorkspaceRetention === null || binding.completedWorkspaceRetention === undefined
+      ? {} : { completed_workspace_retention: Number(binding.completedWorkspaceRetention) }),
     reconcile_agent: "codex",
     ...optional("reconcile_model", binding.reconcile_model),
     ...optional("reconcile_reasoning_effort", binding.reconcile_reasoning_effort),
@@ -158,8 +217,4 @@ function toRawBinding(binding: ProjectBindingDraftView | ProjectBindingView): Ra
 function optional<Key extends string>(key: Key, value: string | null | undefined): Partial<Record<Key, string>> {
   const normalized = value?.trim();
   return normalized ? { [key]: normalized } as Record<Key, string> : {};
-}
-
-function label(value: string): string {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }

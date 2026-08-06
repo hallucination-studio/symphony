@@ -10,9 +10,11 @@ export function renderArtistPrompt(spec: CycleSpec, state: RootState): MarkdownT
     boundaries: spec.boundaries,
   }, null, 2));
   const trustedState = renderRuntimeContext("PRIOR_TRUSTED_STATE", state.task_state_markdown);
-  const pendingFinding = state.pending_finding === undefined
+  const pendingFinding = state.latest_critique === undefined
+    || state.latest_critique.verdict === "process_error"
+    || state.latest_critique.pending_finding === undefined
     ? undefined
-    : renderRuntimeContext("PENDING_FINDING", state.pending_finding);
+    : renderRuntimeContext("PENDING_FINDING", state.latest_critique.pending_finding);
 
   return parseMarkdownText([
     "You are Symphony's Artist role. Implement exactly one frozen Cycle in the current workspace.",

@@ -3,98 +3,78 @@ import test from "node:test";
 
 import { parseCritiqueResultMarkdown } from "./cycle.js";
 
-test("parses the fixed Critic Markdown sections into CritiqueResult", () => {
+test("parses a compact Critic envelope followed by a free human audit", () => {
   const markdown = [
-    "verdict: accepted",
+    "```json",
+    JSON.stringify({
+      verdict: "accepted",
+      task_state_markdown: "The parser behavior is trusted.",
+    }),
+    "```",
     "",
-    "## Scope Reviewed",
-    "Inspected the parser implementation, focused tests, and complete workspace diff.",
+    "## What I reviewed",
+    "Inspected the parser, focused tests, and complete workspace diff.",
     "",
-    "## Implementation Review",
-    "The parser rejects ambiguous input before token recovery and keeps diagnostics local.",
-    "",
-    "## Checks",
-    "- npm test",
-    "- npm run typecheck",
-    "",
-    "## Evidence",
-    "- Complete workspace patch:",
-    "  ```diff",
-    "  +verified",
-    "  ```",
-    "- The focused test passed.",
-    "",
-    "## Findings",
-    "- None",
-    "",
-    "## Task State",
-    "The parser behavior is now trusted.",
-    "",
+    "The focused checks passed and no boundary violation was found.",
   ].join("\n");
 
   assert.deepEqual(parseCritiqueResultMarkdown(markdown), {
-    verdict: "accepted",
-    scope_reviewed: "Inspected the parser implementation, focused tests, and complete workspace diff.",
-    implementation_review: "The parser rejects ambiguous input before token recovery and keeps diagnostics local.",
-    checks: ["npm test", "npm run typecheck"],
-    evidence: ["Complete workspace patch:\n```diff\n+verified\n```", "The focused test passed."],
-    findings: [],
-    task_state_markdown: "The parser behavior is now trusted.",
+    envelope: {
+      verdict: "accepted",
+      task_state_markdown: "The parser behavior is trusted.",
+    },
+    report_markdown: [
+      "## What I reviewed",
+      "Inspected the parser, focused tests, and complete workspace diff.",
+      "",
+      "The focused checks passed and no boundary violation was found.",
+    ].join("\n"),
   });
 });
 
-test("parses process_error Markdown with only a fixed Reason section", () => {
+test("parses process_error without imposing human report headings", () => {
   assert.deepEqual(parseCritiqueResultMarkdown([
-    "verdict: process_error",
+    "```json",
+    JSON.stringify({ verdict: "process_error", reason: "critic could not start" }),
+    "```",
     "",
-    "## Reason",
-    "critic could not start",
-    "",
+    "The Critic process could not complete its inspection.",
   ].join("\n")), {
-    verdict: "process_error",
-    reason: "critic could not start",
+    envelope: { verdict: "process_error", reason: "critic could not start" },
+    report_markdown: "The Critic process could not complete its inspection.",
   });
 });
 
-test("rejects an invalid verdict header or incomplete Critic sections", () => {
-  assert.throws(
-    () => parseCritiqueResultMarkdown("Verdict: accepted\n\n## Summary\nDone."),
-    /invalid_critic_markdown/u,
-  );
-  assert.throws(
-    () => parseCritiqueResultMarkdown([
-      "verdict: accepted", "", "## Scope Reviewed", "Parser source.", "", "## Checks", "- npm test",
-      "", "## Evidence", "- inspected", "", "## Findings", "- None",
-    ].join("\n")),
-    /invalid_critic_markdown/u,
-  );
-  assert.throws(
-    () => parseCritiqueResultMarkdown([
-      "verdict: accepted", "", "## Scope Reviewed", "Parser source.", "", "## Implementation Review", "Logic inspected.",
-      "", "## Checks", "- None",
-      "", "## Evidence", "- inspected", "", "## Findings", "- None", "",
-      "## Task State", "trusted", "", "## Extra", "not allowed",
-    ].join("\n")),
-    /invalid_critic_markdown/u,
-  );
-  assert.throws(
-    () => parseCritiqueResultMarkdown([
-      "verdict: accepted", "", "## Scope Reviewed", "Parser source.", "",
-      "## Implementation Review", "Logic inspected.", "", "## Checks", "- npm test",
-      "unindented continuation", "", "## Evidence", "- inspected", "", "## Findings", "- None",
-      "", "## Task State", "trusted", "",
-    ].join("\n")),
-    /invalid_critic_markdown/u,
+test("preserves the Critic report bytes after the machine envelope", () => {
+  const envelope = JSON.stringify({ verdict: "accepted", task_state_markdown: "Verified." });
+  const report = "## Audit\r\nInspected the worktree.  \r\n";
+  assert.equal(
+    parseCritiqueResultMarkdown(`\`\`\`json\r\n${envelope}\r\n\`\`\`\r\n\r\n${report}`).report_markdown,
+    report,
   );
 });
 
-test("rejects the old repetitive Summary section", () => {
+test("rejects missing, extra, or ambiguous machine envelopes", () => {
+  assert.throws(
+    () => parseCritiqueResultMarkdown("verdict: accepted\n\n## Summary\nDone."),
+    /invalid_critic_markdown/u,
+  );
+  assert.throws(
+    () => parseCritiqueResultMarkdown("```json\n{\"verdict\":\"accepted\"}\n```\n\nReviewed."),
+    /invalid_contract_keys|invalid_critic/u,
+  );
   assert.throws(
     () => parseCritiqueResultMarkdown([
-      "verdict: accepted", "", "## Summary", "The description is complete.", "",
-      "## Checks", "- None", "", "## Evidence", "- None", "", "## Findings", "- None", "",
-      "## Task State", "No change.", "",
+      "```json",
+      JSON.stringify({ verdict: "accepted", task_state_markdown: "trusted", checks: [] }),
+      "```",
+      "",
+      "Reviewed.",
     ].join("\n")),
+    /invalid_critic_markdown/u,
+  );
+  assert.throws(
+    () => parseCritiqueResultMarkdown("```json\n{\"verdict\":\"accepted\",\"task_state_markdown\":\"trusted\"}\n```"),
     /invalid_critic_markdown/u,
   );
 });

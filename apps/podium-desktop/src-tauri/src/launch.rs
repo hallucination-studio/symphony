@@ -1,12 +1,12 @@
 //! Conductor command construction and terminal observation.
 //!
 //! This boundary owns only the mechanical launch contract.  It does not
-//! interpret Root/Cycle semantics or retry a `NeedsHuman` result.  Credentials
-//! are read from the backend environment and applied directly to the child
-//! environment; they are never represented in a request, argv, `Debug` value,
-//! or terminal observation.
+//! interpret Root/Cycle semantics or retry a `NeedsHuman` result.  Role
+//! connection overrides are read from the backend environment, while the
+//! current Linear token is supplied by Desktop's credential session.  Neither
+//! is represented in a request, argv, `Debug` value, or terminal observation.
 
-pub use crate::domain::RoleLaunchConfig;
+pub use crate::domain::{AgentKind, RoleLaunchConfig};
 use crate::process::{ManagedProcess, ProcessError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,8 +38,8 @@ pub struct LaunchRequest {
     pub run_directory: PathBuf,
     pub max_cycles: u32,
     pub reconcile: RoleLaunchConfig,
-    pub execute: RoleLaunchConfig,
-    pub audit: RoleLaunchConfig,
+    pub artist: RoleLaunchConfig,
+    pub critic: RoleLaunchConfig,
 }
 
 pub type ConductorLaunchRequest = LaunchRequest;
@@ -53,8 +53,8 @@ impl LaunchRequest {
         run_directory: impl Into<PathBuf>,
         max_cycles: u32,
         reconcile: RoleLaunchConfig,
-        execute: RoleLaunchConfig,
-        audit: RoleLaunchConfig,
+        artist: RoleLaunchConfig,
+        critic: RoleLaunchConfig,
     ) -> Self {
         Self {
             root: root.into(),
@@ -63,8 +63,8 @@ impl LaunchRequest {
             run_directory: run_directory.into(),
             max_cycles,
             reconcile,
-            execute,
-            audit,
+            artist,
+            critic,
         }
     }
 }
@@ -92,7 +92,7 @@ pub type TerminalObservation = ConductorObservation;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchError {
     InvalidRequest,
-    UnsupportedAgent,
+    NotConnected,
     SpawnFailed,
     Process(ProcessError),
 }
@@ -101,7 +101,7 @@ impl std::fmt::Display for LaunchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let reason = match self {
             Self::InvalidRequest => "invalid_conductor_launch_request",
-            Self::UnsupportedAgent => "unsupported_conductor_agent",
+            Self::NotConnected => "linear_not_connected",
             Self::SpawnFailed => "conductor_start_failed",
             Self::Process(error) => return error.fmt(formatter),
         };
@@ -166,6 +166,7 @@ impl RunningConductor {
 pub struct ConductorLauncher {
     executable: PathBuf,
     role_environment: BTreeMap<String, OsString>,
+    linear_token: Option<String>,
 }
 
 impl std::fmt::Debug for ConductorLauncher {
@@ -207,7 +208,14 @@ impl ConductorLauncher {
                 allowed.contains(key.as_str()).then_some((key, value.into()))
             })
             .collect();
-        Self { executable: executable.into(), role_environment }
+        Self { executable: executable.into(), role_environment, linear_token: None }
+    }
+
+    /// Set the current app-actor access token injected into each child as
+    /// `LINEAR_API_KEY` (TM-CRED-005).  The child never sees the Desktop
+    /// process value, the refresh token, or the credentials file.
+    pub fn set_linear_token(&mut self, token: &str) {
+        self.linear_token = Some(token.to_owned());
     }
 
     pub fn new(executable: impl Into<PathBuf>) -> Self {
@@ -273,6 +281,14 @@ impl ConductorLauncher {
                 command.env(key, value);
             }
         }
+
+        // The Linear token comes only from the Desktop credential session,
+        // never from the inherited Desktop process environment.
+        command.env_remove("LINEAR_API_KEY");
+        command.env_remove("SYMPHONY_LINEAR_TOKEN");
+        if let Some(token) = &self.linear_token {
+            command.env("LINEAR_API_KEY", token);
+        }
         Ok(command)
     }
 }
@@ -290,8 +306,8 @@ pub fn build_conductor_argv(request: &LaunchRequest) -> Result<Vec<OsString>, La
         request.run_directory.as_os_str().to_owned(),
     ];
     append_role_args(&mut args, "reconcile", &request.reconcile);
-    append_role_args(&mut args, "execute", &request.execute);
-    append_role_args(&mut args, "audit", &request.audit);
+    append_role_args(&mut args, "artist", &request.artist);
+    append_role_args(&mut args, "critic", &request.critic);
     args.extend([OsString::from("--max-cycles"), OsString::from(request.max_cycles.to_string())]);
     Ok(args)
 }
@@ -302,7 +318,10 @@ pub fn conductor_argv(request: &LaunchRequest) -> Result<Vec<OsString>, LaunchEr
 
 fn append_role_args(args: &mut Vec<OsString>, role: &str, config: &RoleLaunchConfig) {
     args.push(format!("--{role}-agent").into());
-    args.push(config.agent.clone().into());
+    let agent = match config.agent {
+        AgentKind::Codex => "codex",
+    };
+    args.push(agent.into());
     if let Some(model) = config.model.as_deref().filter(|value| !value.is_empty()) {
         args.push(format!("--{role}-model").into());
         args.push(model.into());
@@ -323,18 +342,11 @@ fn validate_request(request: &LaunchRequest) -> Result<(), LaunchError> {
     {
         return Err(LaunchError::InvalidRequest);
     }
-    for config in [&request.reconcile, &request.execute, &request.audit] {
-        if config.agent != "codex"
-            || config.agent.is_empty()
-            || config.agent.contains('\0')
-            || config.model.as_deref().is_some_and(|value| value.contains('\0'))
+    for config in [&request.reconcile, &request.artist, &request.critic] {
+        if config.model.as_deref().is_some_and(|value| value.contains('\0'))
             || config.reasoning_effort.as_deref().is_some_and(|value| value.contains('\0'))
         {
-            return if config.agent != "codex" {
-                Err(LaunchError::UnsupportedAgent)
-            } else {
-                Err(LaunchError::InvalidRequest)
-            };
+            return Err(LaunchError::InvalidRequest);
         }
     }
     Ok(())
@@ -437,7 +449,7 @@ mod tests {
 
     fn role(model: Option<&str>, reasoning_effort: Option<&str>) -> RoleLaunchConfig {
         RoleLaunchConfig {
-            agent: "codex".into(),
+            agent: AgentKind::Codex,
             model: model.map(str::to_owned),
             reasoning_effort: reasoning_effort.map(str::to_owned),
         }
@@ -535,7 +547,7 @@ mod tests {
         let mut file = File::create(&script).expect("script should be writable");
         writeln!(
             file,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \"$SYMPHONY_RECONCILE_CODEX_API_KEY\" \"$SYMPHONY_RECONCILE_CODEX_BASE_URL\" \"$SYMPHONY_ARTIST_CODEX_API_KEY\" \"$SYMPHONY_ARTIST_CODEX_BASE_URL\" \"$SYMPHONY_CRITIC_CODEX_API_KEY\" \"$SYMPHONY_CRITIC_CODEX_BASE_URL\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_BASE_URL-unset}}\" > '{}'\nprintf '%s\\n' '{{\"event\":\"conductor_stopped\",\"status\":\"done\"}}'",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \"$SYMPHONY_RECONCILE_CODEX_API_KEY\" \"$SYMPHONY_RECONCILE_CODEX_BASE_URL\" \"$SYMPHONY_ARTIST_CODEX_API_KEY\" \"$SYMPHONY_ARTIST_CODEX_BASE_URL\" \"$SYMPHONY_CRITIC_CODEX_API_KEY\" \"$SYMPHONY_CRITIC_CODEX_BASE_URL\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_BASE_URL-unset}}\" \"${{LINEAR_API_KEY-unset}}\" \"${{SYMPHONY_LINEAR_TOKEN-unset}}\" > '{}'\nprintf '%s\\n' '{{\"event\":\"conductor_stopped\",\"status\":\"done\"}}'",
             argv_file.display(),
             environment_file.display(),
         )
@@ -548,14 +560,15 @@ mod tests {
         let environment = [
             ("SYMPHONY_RECONCILE_CODEX_API_KEY", "reconcile-secret"),
             ("SYMPHONY_RECONCILE_CODEX_BASE_URL", "https://reconcile.invalid"),
-            ("SYMPHONY_ARTIST_CODEX_API_KEY", "execute-secret"),
-            ("SYMPHONY_ARTIST_CODEX_BASE_URL", "https://execute.invalid"),
-            ("SYMPHONY_CRITIC_CODEX_API_KEY", "audit-secret"),
-            ("SYMPHONY_CRITIC_CODEX_BASE_URL", "https://audit.invalid"),
+            ("SYMPHONY_ARTIST_CODEX_API_KEY", "artist-secret"),
+            ("SYMPHONY_ARTIST_CODEX_BASE_URL", "https://artist.invalid"),
+            ("SYMPHONY_CRITIC_CODEX_API_KEY", "critic-secret"),
+            ("SYMPHONY_CRITIC_CODEX_BASE_URL", "https://critic.invalid"),
             ("CODEX_API_KEY", "generic-secret-must-not-cross"),
             ("CODEX_BASE_URL", "https://generic.invalid"),
         ];
-        let launcher = ConductorLauncher::with_environment(&script, environment);
+        let mut launcher = ConductorLauncher::with_environment(&script, environment);
+        launcher.set_linear_token("linear-session-secret");
         let mut launch_request = request();
         launch_request.workspace = workspace;
         launch_request.run_directory = run_directory;
@@ -577,9 +590,10 @@ mod tests {
         let child_environment =
             fs::read_to_string(&environment_file).expect("environment should be written");
         assert!(child_environment.contains("reconcile-secret\nhttps://reconcile.invalid\n"));
-        assert!(child_environment.contains("execute-secret\nhttps://execute.invalid\n"));
-        assert!(child_environment.contains("audit-secret\nhttps://audit.invalid\n"));
+        assert!(child_environment.contains("artist-secret\nhttps://artist.invalid\n"));
+        assert!(child_environment.contains("critic-secret\nhttps://critic.invalid\n"));
         assert!(child_environment.contains("unset\nunset\n"));
+        assert!(child_environment.contains("linear-session-secret\nunset\n"));
         assert!(!format!("{observation:?}").contains("secret"));
 
         fs::remove_dir_all(directory).expect("fixture directory should be cleaned");

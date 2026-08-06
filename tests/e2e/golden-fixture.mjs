@@ -399,6 +399,8 @@ function exactObject(value, keys) {
 }
 
 function canonicalDone(issue) {
+  // Golden reads one final provider snapshot. Linear does not expose transition
+  // history here, so this validator checks only the canonical terminal state.
   return exactObject(issue?.state, ["name", "type"])
     && issue.state.name === "Done" && issue.state.type === "completed";
 }
@@ -463,8 +465,20 @@ function descriptionResult(description, separator) {
   if (start < 0) return undefined;
   const projection = description.slice(start + separator.length);
   const boundary = projection.indexOf("\n\n");
-  if (boundary < 0 || !LOCAL_TIMESTAMP.test(projection.slice(0, boundary))) return undefined;
-  return projection.slice(boundary + 2);
+  return boundary >= 0 && projection.startsWith("Updated at: ")
+    ? projection.slice(boundary + 2)
+    : projection;
+}
+
+function validCriticMarkdown(body) {
+  if (typeof body !== "string") return false;
+  const match = /^```json\n([^\n]+)\n```\n\n([\s\S]+)$/u.exec(body.trim());
+  if (match?.[1] === undefined || match[2]?.trim().length === 0) return false;
+  try {
+    return validCriticEnvelope(JSON.parse(match[1]));
+  } catch {
+    return false;
+  }
 }
 
 function validArtistHumanReport(body) {
@@ -582,10 +596,7 @@ export function validateGoldenResultComments(issue) {
     if (cycleTransition === undefined || cycleResult === undefined
       || !validRootReconcileReport(cycleTransition, "cycle")
       || !(validArtistHumanReport(artistBody) || validArtistErrorReport(artistBody))
-      || !auditBody.startsWith("verdict: ")
-      || !auditBody.includes("## Scope Reviewed")
-      || !auditBody.includes("## Implementation Review")
-      || !auditBody.includes("## Findings")
+      || !validCriticMarkdown(auditBody)
       || cycleBodies.includes(auditBody)
       || !cycleResult.includes(`- Critic: [${audit.identifier}](${audit.url})`)
       || cycleResult.includes("Critic verdict")
@@ -593,8 +604,7 @@ export function validateGoldenResultComments(issue) {
       || !cycleResult.includes(`- Critique: [cycle-${cycleTitle[1]}-critique-result.json](https://`)
       || cycleResult.includes("cycle-" + cycleTitle[1] + "-artist-result.md")
       || cycleResult.includes("cycle-" + cycleTitle[1] + "-critic-result.md")
-      || cycleResult.includes("## Scope Reviewed")
-      || cycleResult.includes("## Implementation Review")
+      || cycleResult.includes("```json")
       || cycleBodies.some((body) => /(?:\.jsonl|\.stderr)/u.test(body))) {
       throw new Error("golden_result_comments_projection_invalid");
     }
@@ -603,17 +613,28 @@ export function validateGoldenResultComments(issue) {
   return critiqueResultUrls[0];
 }
 
-function validCriticJson(value) {
+function validCriticEnvelope(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   if (!["accepted", "incomplete", "blocked", "violation", "process_error"].includes(value.verdict)) return false;
-  if (value.verdict === "process_error") return typeof value.reason === "string" && value.reason.length > 0;
-  return typeof value.scope_reviewed === "string" && value.scope_reviewed.length > 0
-    && typeof value.implementation_review === "string" && value.implementation_review.length > 0
-    && ["checks", "evidence", "findings"].every((key) => (
-      Array.isArray(value[key]) && value[key].every((entry) => typeof entry === "string")
-    ))
-    && typeof value.task_state_markdown === "string" && value.task_state_markdown.length > 0
-    && (value.pending_finding === undefined || typeof value.pending_finding === "string");
+  if (value.verdict === "process_error") {
+    return exactObject(value, ["verdict", "reason"])
+      && typeof value.reason === "string" && value.reason.length > 0;
+  }
+  return exactObject(
+    value,
+    value.pending_finding === undefined
+      ? ["verdict", "task_state_markdown"]
+      : ["verdict", "task_state_markdown", "pending_finding"],
+  ) && typeof value.task_state_markdown === "string" && value.task_state_markdown.length > 0
+    && (value.pending_finding === undefined
+      || (typeof value.pending_finding === "string" && value.pending_finding.length > 0));
+}
+
+function validCriticJson(value) {
+  return exactObject(value, ["envelope", "report_markdown"])
+    && validCriticEnvelope(value.envelope)
+    && typeof value.report_markdown === "string"
+    && value.report_markdown.length > 0;
 }
 
 export async function fetchGoldenCriticResult(url, token, fetchImpl = globalThis.fetch) {

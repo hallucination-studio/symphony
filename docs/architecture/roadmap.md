@@ -13,12 +13,12 @@ finalizer code and attempt to keep both paths valid.
 | Order | Slice | Required outcome | Check |
 |---|---|---|---|
 | 1 | delete obsolete implementation and tests | remove every system listed in the permanent subtraction gate and its field-shaped tests | removed-symbol and dependency search |
-| 2 | minimal contracts | Root state/`latest_critique`, managed snapshot, terminal role descriptions, Cycle history, typed Critique JSON, Performer, Gateway, workspace, and PR values | focused contract tests |
+| 2 | minimal contracts | Root state/compact `latest_critique`, managed snapshot, terminal role descriptions, two Cycle comments, typed Critique JSON, Performer, Gateway, workspace, and Delivery values | focused contract tests |
 | 3 | Linear boundary and CLI | injectable Gateway, GraphQL adapter, and one Root-run command | fake Gateway and built CLI scenarios |
-| 4 | Root Prepare resources | Root Reconcile adopts current checkout or creates the preferred worktree; bind its result and external run directory | real Agent/Git/filesystem boundary scenario |
-| 5 | Root Reconcile and Cycle projection | frozen small-step contract, managed snapshot, terminal role reports, Cycle history, typed Critique JSON, and Root/Cycle/Artist/Critic hierarchy | semantic and fake Linear tests |
+| 4 | Root Prepare resources | deterministic Root Reconcile adopts current checkout or creates the preferred worktree without an Agent call; bind its result and external run directory | real Git/filesystem boundary scenario |
+| 5 | Root Reconcile and Cycle projection | frozen small-step contract, managed snapshot, terminal role reports, two Cycle comments, typed Critique JSON, and Root/Cycle/Artist/Critic hierarchy | semantic and fake Linear tests |
 | 6 | Artist and Critic | fresh workspace-write Artist and distinct fresh read-only Critic each deliver one final Markdown file; Critic remains sole semantic authority, including failed Artist inspection | real Agent CLI boundary tests |
-| 7 | Root State and Inbox | save every complete terminal Critic as `latest_critique`; promote only `accepted` Critics; checkpoint supplied paths, task state, pending finding, and comment cursor | focused transaction scenarios |
+| 7 | Root State and Inbox | save the compact terminal Critic checkpoint as `latest_critique`; promote only `accepted` Critics; checkpoint supplied paths, task state, and comment cursor | focused transaction scenarios |
 | 8 | Root Reconcile Delivery | final Inbox check, structured PR/branch/files result, visible projection, then Root Done | real Agent boundary plus three contract scenarios |
 | 9 | scenario suite and docs | rebuild tests around reusable business scenarios and prove the complete manual single-machine flow | black-box suite |
 
@@ -76,6 +76,9 @@ and target documentation must no longer depend on:
 - a second summarization or format-repair Agent call, or any Cycle Result that
   invents or semantically interprets role evidence; Cycle Result keeps only
   mechanical terminal fields and the typed Critique JSON file link/upload error.
+- a Prepare Agent call, self-authored Critique file read-back, a second durable
+  Desktop Root allocation, automatic priority preemption, or an Agent catalog
+  for the single fixed `codex` adapter.
 
 Only these direct replacements are allowed:
 
@@ -88,7 +91,7 @@ Only these direct replacements are allowed:
 | app-server, tool bridge, session resume | one fresh process from the run-selected thin Agent CLI adapter per role |
 | generic Task Manager and capabilities | one injectable `LinearGateway` with the listed operations |
 | Reconcile quality inference from workspace | reviewed task state, one pending finding, and Harness feedback |
-| Trusted State subsystem | one task-state field, one pending finding, and parsed Critic fields in `latest_critique` updated mechanically in Root State |
+| Trusted State subsystem | one task-state field and compact Critic checkpoint in `latest_critique` updated mechanically in Root State |
 | PR exactly-once/recovery protocol | one ordered attempt; ambiguous restart becomes `NeedsHuman` |
 | per-role Agent/model configuration | optional independent Reconcile, Artist, and Critic role configuration fixed for the Root run |
 
@@ -102,16 +105,16 @@ only as evidence-path compatibility. They are not target domain concepts.
 
 | Scenario | Observable pass condition |
 |---|---|
-| minimal launch | the only public execution command accepts independent `--reconcile-*`, `--artist-*`, and `--critic-*` role values, one Root, one supplied workspace, and one supplied external run directory |
+| minimal launch | the only public execution command accepts independent `--reconcile-*`, `--artist-*`, and `--critic-*` role values, one Root, an optional preferred workspace, and one supplied external run directory |
 | visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Artist/Critic transition follows the Workflow Model matrix |
 | exact topology | Linear shows `Root -> Cycle -> Artist + Critic`; at most one Cycle is active |
-| visible snapshots | Root description has exactly one managed snapshot block refreshed with a human-readable local `Updated at` line; Artist/Critic each receive exactly one terminal report append with the same local format |
+| visible snapshots | Root description has exactly one managed snapshot block refreshed with a presentation-only local `Updated at` line; Artist/Critic each receive exactly one terminal report append with the same local format |
 | frozen input | a Root comment arriving during Artist/Critic appears only in the next Cycle |
 | role isolation | Artist can write; Critic is a different fresh session and cannot write, with independent role capabilities/providers and no shared transcript |
 | failed Artist | Critic still runs against the real residual workspace; Artist output is neither parsed nor supplied as evidence |
 | private diagnostics | bounded raw Agent JSONL/stderr and causal error context remain only under the external run directory; refs/thread IDs never enter Critic, Root, or Linear |
 | trust gate | only an `accepted` Critic adopts the Critic-supported task state and optional pending finding; Artist exit facts cannot pre-judge the result |
-| Markdown/JSON result projection | role Markdown appends once; typed Critique JSON is the only Cycle upload; history uses Linear `createdAt`; Reconcile sees only parsed `latest_critique` |
+| Markdown/JSON result projection | role Markdown appends once; typed Critique JSON is serialized once and is the only Cycle upload; exactly two Cycle comments use Linear `createdAt`; Reconcile sees only compact `latest_critique` |
 | comment transaction | failed family creation does not consume selected Root comments or start Artist |
 | final delivery | Root Reconcile returns a PR, branch, or files Delivery; Conductor persists it, renders `## Delivery`, then sets Root Done |
 | remote delivery failure | Root Reconcile may return local files; Conductor never retries or runs Git |
@@ -119,7 +122,7 @@ only as evidence-path compatibility. They are not target domain concepts.
 ## V2 Podium Desktop
 
 V1 remains a manually launched Conductor on one machine with one explicitly
-supplied Root, workspace, and run directory. V2 adds Podium Desktop as a local
+supplied Root and run directory plus an optional preferred workspace. V2 adds Podium Desktop as a local
 operator and scheduler surface above that unchanged CLI. Podium Desktop may
 manage multiple local Conductors, but each Conductor still receives exactly one
 Root, one workspace, and one external run directory.
@@ -129,21 +132,41 @@ Each persisted `ProjectBinding` contains:
 - one Linear `project_id` and a visible `routing_label`;
 - one `repository_path` and `base_branch`;
 - one positive local `concurrency` limit; and
+- one optional positive completed-workspace retention limit; and
 - independent Reconcile, Artist, and Critic `RoleLaunchConfig` values.
 
-For every assigned Root, Desktop persists stable `root_id`, `workspace_path`,
-and `run_directory` paths. Assignment records, process IDs, and the pending
-queue are in-memory runtime state only. A higher-priority assignment may
-preempt a lower-priority local assignment; equal priority never preempts. The
-stop sequence confirms that the complete Conductor process tree has exited
-before a replacement starts.
+For every assigned Root, Desktop derives stable preferred workspace and run
+paths from its app-data root and Root ID. Root State becomes the sole durable
+binding after Prepare; assignment, paths, process IDs, and the pending queue are
+runtime state. Waiting Roots are ordered by Linear priority, creation time, and
+ID but never automatically preempt running work. Explicit stop confirms the
+complete Conductor process tree has exited.
 
 Podium Desktop owns local routing, queueing, process supervision, and resource
-lifecycle. Conductor owns Root Reconcile, Cycle execution, Critic judgment, Root
+lifecycle. It also owns the Linear authorization session for the one built-in
+application, keeps tokens only in a private credentials file, and injects the current
+access token into each Conductor environment. Codex remains fixed; private
+per-role connection overrides are injected directly without an Agent catalog.
+Conductor owns Root Reconcile, Cycle execution, Critic judgment, Root
 State promotion, and terminal delivery. There is no cross-machine lease, SQLite
 store, daemon IPC, or Web surface. This round does not add Podium scheduling,
 UI, or E2E behavior for Conductor `NeedsHuman`; the existing V1 terminal state
 and workflow remain unchanged.
+
+## Verification layers
+
+The reusable test surface has three named layers:
+
+| Layer | Purpose | Default report |
+|---|---|---|
+| local | deterministic unit, contract, architecture, fake Linear, and temporary Git scenarios | one aggregate result with focused failures |
+| boundary | independently diagnose Linear, Agent CLI, Git/push, and `gh` prerequisites | shown on failure or when explicitly requested |
+| golden | create only a real Root Issue and prove the complete visible workflow and best available Delivery | the authoritative real end-to-end result |
+
+Golden does not publish redundant blocked boundary records for capabilities it
+has already exercised successfully. Fixtures own only the Linear/remote/temp
+resources they create; Root-created workspaces follow the explicit Podium or
+manual cleanup policy rather than being silently removed by the fixture.
 
 ## Completion gates
 
@@ -156,4 +179,5 @@ and workflow remain unchanged.
 | end to end | fake Linear plus temporary Git remote proves Rejected repair Cycle, Succeeded Cycle, final Inbox check, and PR creation |
 | diagnostics and failures | unknown failures retain causal local evidence, publish the current message's first 50 characters plus optional `diagnostic_ref`, and archive golden evidence before local cleanup |
 | golden fixture cleanup | failed Linear trees remain visible; Issue trees are archived only after visible success |
+| workspace lifecycle | completed Podium workspaces expose explicit cleanup; an optional retention limit removes only older completed workspaces |
 | repository | full test suite, secret scan, scoped diff review, and human review pass |

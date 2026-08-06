@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,61 +10,114 @@ import { bindRootWorkspace } from "./RootWorkspace.js";
 
 const execute = promisify(execFile);
 
+async function git(cwd: string, args: readonly string[]): Promise<string> {
+  const result = await execute("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  return result.stdout.trim();
+}
+
 async function fixture() {
   const base = await mkdtemp(path.join(os.tmpdir(), "symphony-workspace-"));
   const workspace = path.join(base, "workspace");
   const runDirectory = path.join(base, "evidence");
-  const remote = path.join(base, "remote.git");
   await Promise.all([mkdir(workspace), mkdir(runDirectory)]);
-  await execute("git", ["init", "--bare", remote]);
-  await execute("git", ["init", "-b", "root/ENG-1", workspace]);
-  await execute("git", ["-C", workspace, "remote", "add", "origin", remote]);
+  await execute("git", ["init", "-b", "main", workspace]);
   await writeFile(path.join(workspace, "README.md"), "root workspace\n", "utf8");
   await execute("git", ["-C", workspace, "add", "README.md"]);
-  await execute("git", ["-C", workspace, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]);
-  return { workspace: await realpath(workspace), runDirectory: await realpath(runDirectory) };
+  await execute("git", [
+    "-C", workspace, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+    "commit", "-m", "init",
+  ]);
+  return {
+    base,
+    workspace: await realpath(workspace),
+    runDirectory: await realpath(runDirectory),
+  };
 }
 
-test("binds one supplied Root to an external Git workspace and run directory", async () => {
+test("adopts an exact supplied Git root without persisting a second binding", async () => {
   const input = await fixture();
-  const bound = await bindRootWorkspace({ rootId: "ENG-1", ...input });
-
-  assert.equal(bound.rootId, "ENG-1");
-  assert.equal(bound.rootBranch, "root/ENG-1");
-  assert.equal(bound.workspacePath, input.workspace);
-  assert.equal(bound.runDirectory, input.runDirectory);
-  const record = JSON.parse(await readFile(path.join(input.runDirectory, "root-binding.json"), "utf8")) as unknown;
-  assert.deepEqual(record, {
-    root_id: "ENG-1",
-    workspace_path: input.workspace,
-    run_directory: input.runDirectory,
-    root_branch: "root/ENG-1",
+  const bound = await bindRootWorkspace({
+    rootId: "ENG-1",
+    preferredWorkspace: input.workspace,
+    invocationCwd: input.workspace,
+    runDirectory: input.runDirectory,
   });
+
+  assert.deepEqual(bound, {
+    rootId: "ENG-1",
+    workspacePath: input.workspace,
+    runDirectory: input.runDirectory,
+    rootBranch: "main",
+  });
+  await assert.rejects(stat(path.join(input.runDirectory, "root-binding.json")), { code: "ENOENT" });
 });
 
-test("accepts an exact restart binding and rejects a different Root", async () => {
+test("creates a missing preferred path as an exact Root worktree and branch", async () => {
   const input = await fixture();
-  const first = await bindRootWorkspace({ rootId: "ENG-1", ...input });
-  assert.deepEqual(await bindRootWorkspace({ rootId: "ENG-1", ...input }), first);
-  await assert.rejects(bindRootWorkspace({ rootId: "ENG-2", ...input }), /root_binding_mismatch/u);
+  const preferred = path.join(input.base, "prepared", "ENG-2");
+  await mkdir(path.dirname(preferred));
+
+  const bound = await bindRootWorkspace({
+    rootId: "ENG-2",
+    preferredWorkspace: preferred,
+    invocationCwd: input.workspace,
+    runDirectory: input.runDirectory,
+  });
+
+  const prepared = await realpath(preferred);
+  assert.equal(bound.workspacePath, prepared);
+  assert.equal(bound.rootBranch, "root/ENG-2");
+  assert.equal(await git(prepared, ["symbolic-ref", "--quiet", "--short", "HEAD"]), "root/ENG-2");
+  assert.equal(await git(input.workspace, ["worktree", "list", "--porcelain"]).then((value) => value.includes(prepared)), true);
 });
 
-test("rejects run directories inside the workspace", async () => {
+test("uses the invocation Git top-level and current branch when no preferred path is supplied", async () => {
+  const input = await fixture();
+  const invocationCwd = path.join(input.workspace, "nested");
+  await mkdir(invocationCwd);
+  await writeFile(path.join(input.workspace, "untracked.txt"), "keep me\n", "utf8");
+
+  const bound = await bindRootWorkspace({
+    rootId: "ENG-3",
+    invocationCwd,
+    runDirectory: input.runDirectory,
+  });
+
+  assert.equal(bound.workspacePath, input.workspace);
+  assert.equal(bound.rootBranch, "main");
+  assert.equal(await git(input.workspace, ["status", "--porcelain"]), "?? untracked.txt");
+  assert.equal(await git(input.workspace, ["symbolic-ref", "--quiet", "--short", "HEAD"]), "main");
+});
+
+test("does not fall back when an exact preferred path cannot be prepared", async () => {
+  const input = await fixture();
+  const preferred = path.join(input.base, "not-a-worktree");
+  await writeFile(preferred, "occupied\n", "utf8");
+
+  await assert.rejects(
+    bindRootWorkspace({
+      rootId: "ENG-4",
+      preferredWorkspace: preferred,
+      invocationCwd: input.workspace,
+      runDirectory: input.runDirectory,
+    }),
+    /invalid_root_workspace/u,
+  );
+  assert.equal(await git(input.workspace, ["symbolic-ref", "--quiet", "--short", "HEAD"]), "main");
+  assert.equal(await git(input.workspace, ["status", "--porcelain"]), "");
+});
+
+test("requires a writable run directory outside the workspace", async () => {
   const input = await fixture();
   const nested = path.join(input.workspace, "evidence");
   await mkdir(nested);
   await assert.rejects(
-    bindRootWorkspace({ rootId: "ENG-1", workspace: input.workspace, runDirectory: nested }),
+    bindRootWorkspace({
+      rootId: "ENG-5",
+      preferredWorkspace: input.workspace,
+      invocationCwd: input.workspace,
+      runDirectory: nested,
+    }),
     /run_directory_inside_workspace/u,
   );
-});
-
-test("rejects a detached workspace or a workspace without a remote", async () => {
-  const detached = await fixture();
-  await execute("git", ["-C", detached.workspace, "checkout", "--detach"]);
-  await assert.rejects(bindRootWorkspace({ rootId: "ENG-1", ...detached }), /workspace_branch_unavailable/u);
-
-  const noRemote = await fixture();
-  await execute("git", ["-C", noRemote.workspace, "remote", "remove", "origin"]);
-  await assert.rejects(bindRootWorkspace({ rootId: "ENG-1", ...noRemote }), /workspace_remote_unavailable/u);
 });

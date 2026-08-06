@@ -6,14 +6,15 @@
 
 ## Prepare
 
-`Prepare` is the first phase of the Root Reconcile role. It is not another
-Agent role, Linear Issue, or Linear workflow status. Conductor launches the
-phase and validates its structured result; it must not execute Git commands.
+`Prepare` is the first phase owned by `RootReconciler`. It is deterministic
+code, not an Agent call, Linear Issue, or Linear workflow status. Conductor
+invokes the phase and validates its structured result; it must not execute Git
+commands.
 
 ```text
 Root Reconcile Prepare
   -> supplied preferred path: validate it or create a worktree and Root branch there
-  -> no preferred path: prefer a dedicated Root worktree and branch; fall back to the current checkout only when creation is unavailable
+  -> no preferred path: adopt the invocation current checkout and branch
   -> return workspace_path, run_directory, root_branch
   -> Conductor persists the exact binding in Root State
 ```
@@ -22,23 +23,23 @@ Root Reconcile Prepare
 |---|---|
 | `WS-PREP-001` | when a preferred workspace is supplied, Root Reconcile uses that exact valid workspace or creates a worktree there |
 | `WS-PREP-002` | failure at a supplied path is visible and must not silently fall back to another path |
-| `WS-PREP-003` | without a supplied workspace, Root Reconcile first attempts a dedicated Root worktree and branch; only when unavailable may it adopt the current directory and branch without switching, cleaning, or resetting |
+| `WS-PREP-003` | without a supplied workspace, Root Reconcile adopts the current directory and branch without switching, cleaning, or resetting |
 | `WS-PREP-004` | keep the external run directory outside the workspace for private diagnostics |
 | `WS-PREP-005` | Conductor validates and persists the returned binding but runs no worktree or branch command |
 | `WS-PREP-006` | restart reuses the Root State binding and does not prepare a replacement |
 
-Podium Desktop may persist a preferred `workspace_path` and create the external
-`run_directory`, but it only reserves the workspace path. Root Reconcile owns
-the actual worktree and branch creation. Every Cycle then reuses the prepared
-workspace. There are no per-Cycle worktrees, snapshots, or patch stores.
-Assignment records, process IDs, and the pending queue are Desktop memory only;
-the stable allocation is the persisted Root ID, preferred path, and run directory.
+Podium Desktop derives a preferred `workspace_path` and external `run_directory`
+deterministically from its app-data root and Root ID, creates the run directory,
+and passes both paths to Conductor. It does not persist a second Root allocation.
+Root Reconcile owns actual worktree and branch creation, and Root State becomes
+the durable binding after Prepare. Every Cycle reuses that workspace. There are
+no per-Cycle worktrees, snapshots, or patch stores.
 
 ## Role access
 
 | Role and phase | Access | Constraint |
 |---|---|---|
-| Root Reconcile Prepare | full local process access | use the authority only for worktree/branch preparation; do not implement the task |
+| Root Reconcile Prepare | deterministic local Git/filesystem access | use the authority only for worktree/branch preparation; do not start an Agent or implement the task |
 | Root Reconcile Cycle decision | full local process access, reviewed-state authority | use Git/`gh` only for final delivery; do not replace Critic judgment with self-inspection |
 | Artist | workspace-write | implement only the frozen Cycle |
 | Critic | read-only | inspect the full current workspace independently |
@@ -83,7 +84,8 @@ files only as the final fallback; Conductor does not repeat those Git operations
 ## Non-goals
 
 - no Delivery Issue, finalizer, retry scheduler, receipt, or convergence protocol;
-- no automatic merge, rebase, rollback, reset, cleanup, or workspace deletion;
+- no automatic merge, rebase, rollback, reset, or invisible workspace deletion;
 - no Conductor Git/worktree/commit/push/PR execution;
+- completed Podium-owned workspaces remain until an explicit operator cleanup or an enabled bounded retention policy removes them;
 - no second Critic dedicated only to delivery;
 - no hidden compatibility fields for retired PR/pushed-branch state.

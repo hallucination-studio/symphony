@@ -17,7 +17,16 @@ test("binding editor keeps all controls keyboard addressable", () => {
   render(<App initialState={createDemoState()} onCommand={confirmed} />);
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   fireEvent.click(screen.getByRole("button", { name: "New binding" }));
-  expect(screen.getByRole("textbox", { name: "Project ID" })).toBeVisible();
+  expect(screen.getByRole("combobox", { name: "Linear Project" })).toBeVisible();
   expect(screen.getByRole("spinbutton", { name: "Concurrency" })).toHaveValue(1);
   expect(screen.getByRole("button", { name: "Save binding" })).toBeVisible();
+});
+
+test("binding editor is a modal dialog that closes on Escape", () => {
+  render(<App initialState={createDemoState()} onCommand={confirmed} />);
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "New binding" }));
+  expect(screen.getByRole("dialog", { name: "Create binding" })).toHaveAttribute("aria-modal", "true");
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

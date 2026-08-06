@@ -34,7 +34,7 @@ lh-harness run \
 |---|---|
 | `--linear-root` identifier or UUID | resolve one exact existing Root |
 | Root input | Root title and immutable requirement section are the only task; the managed snapshot is stripped and no separate task input is accepted |
-| `--workspace` | existing isolated Git workspace already allocated to this Root |
+| `--workspace` | optional preferred path; deterministic Root Reconcile Prepare creates/adopts it |
 | `--dir` | existing writable run directory outside the workspace |
 | resolved Root | resolve the Root team and five canonical workflow statuses by exact name and expected type |
 | `--reconcile-agent codex` | closed Reconcile role adapter; omission defaults to `codex` |
@@ -44,10 +44,14 @@ lh-harness run \
 | `--max-cycles` | in-memory maximum Cycles for this process; it is not durable Root State |
 
 Startup needs no caller-provided Linear team, project, or workflow-state IDs, and
-no harness config file. Missing Linear, Git, workspace, run-directory, or PR
-prerequisites fail before an Agent starts. Conductor does not claim Roots or
-allocate, replace, clean, or delete workspace/run directories; Podium Desktop
-performs that local allocation before invoking this CLI.
+no harness config file. `LINEAR_API_KEY` carries the current app-actor access
+token for the built-in application: a Podium-launched process receives
+Desktop's current token in its environment, and a manual launch supplies a
+token for the same application. Missing Linear, Git, workspace, run-directory,
+or PR prerequisites fail before an Agent starts. Conductor does not claim Roots
+or execute Git/worktree/cleanup commands. Podium derives preferred paths and
+creates the external run directory; deterministic Root Reconcile Prepare owns
+workspace creation or adoption.
 
 Reconcile, Artist, and Critic API keys and base URLs are startup-only
 environment values resolved independently by the backend from role-specific
@@ -65,15 +69,16 @@ boundaries directly without exposing another production command.
 
 ## Podium launch boundary
 
-Podium Desktop launches this CLI once per bound Root. The invocation always
-contains one `--linear-root`, one `--workspace`, and one `--dir`; it never asks a
+Podium Desktop launches this CLI once per bound Root. The invocation contains
+one `--linear-root`, one preferred `--workspace`, and one `--dir`; manual CLI
+launch may omit `--workspace` to adopt the current checkout. It never asks a
 Conductor to discover a Project, select another Root, or manage a fleet.
 
 | Rule | Required behavior | Forbidden behavior |
 |---|---|---|
-| `CO-PODIUM-001` | accept one already-bound Root, workspace, and run directory for the process lifetime | discover, claim, or adopt another Root or path |
+| `CO-PODIUM-001` | accept one bound Root, optional preferred workspace, and run directory; bind Prepare's result for the process lifetime | discover, claim, or adopt another Root after Prepare |
 | `CO-PODIUM-002` | accept independent Reconcile, Artist, and Critic role launch values | inherit Reconcile settings from Artist or share role credentials |
-| `CO-PODIUM-003` | let Podium stop and replace the process tree only at the external process boundary | implement priority, queue, preemption, or PID persistence inside Conductor |
+| `CO-PODIUM-003` | let an explicit Podium stop command terminate the process tree only at the external process boundary | implement priority, queue, automatic preemption, or PID persistence inside Conductor |
 | `CO-PODIUM-004` | retain V1 `NeedsHuman` terminal behavior inside Root workflow | add Podium scheduling, UI, or E2E behavior for `NeedsHuman` this round |
 
 ## Startup rebuild
@@ -94,8 +99,9 @@ resolve Root
 -> Root Done? exit without Root-owned mutation
   -> resolve Root State
   -> validate/project the exact Root managed snapshot block with a local RFC3339 timestamp
--> publishing without PR URL or delivery branch? set NeedsHuman, project Root In Review, and stop
--> validate supplied workspace and run directory against Root State
+-> Root State absent? run deterministic Prepare with the optional preferred path and persist its binding
+-> delivering without structured Delivery? set NeedsHuman, project Root In Review, and stop
+-> otherwise validate the saved binding and supplied run directory
 -> list unfinished descendant Issue IDs and statuses
 -> change every unfinished descendant to canonical Canceled
 -> update Root State phase to idle and add Harness feedback that the retained
@@ -110,12 +116,12 @@ resolver conflict, not a terminal Root, and cannot bypass startup validation.
 
 | Rule | Required behavior | Forbidden behavior |
 |---|---|---|
-| `CO-START-001` | if Root State is absent, validate the supplied workspace/run directory and create the initial managed Root snapshot | claim a Root or allocate directories |
-| `CO-START-002` | if Root State exists, require its workspace, run directory, and branch to match the supplied paths | adopt or create replacement directories |
+| `CO-START-001` | if Root State is absent, invoke deterministic Prepare with the optional preferred workspace and supplied run directory, then create the initial managed Root snapshot | start a Prepare Agent or let Conductor execute Git |
+| `CO-START-002` | if Root State exists, require its workspace, run directory, and branch to match the invocation inputs when supplied | adopt or create replacement directories |
 | `CO-START-003` | list only unfinished descendant identity/status for cancellation | parse or model old child descriptions, comments, or results |
 | `CO-START-004` | set every unfinished Cycle, Artist, and Critic to canonical `Canceled` before Reconcile | resume, complete, review, or synthesize results for them |
 | `CO-START-005` | if saved workspace/run directory is missing or invalid, set `NeedsHuman`, project Root `In Review`, and stop | reconstruct from Git hashes, patches, children, or logs |
-| `CO-START-006` | if phase is `publishing` without a PR URL or delivery branch, set `NeedsHuman`, project Root `In Review`, and stop before other startup actions | retry, inspect provider state, or adopt a branch/PR |
+| `CO-START-006` | if phase is `delivering` without structured Delivery, set `NeedsHuman`, project Root `In Review`, and stop before other startup actions | retry, inspect provider state, or adopt a branch/PR |
 | `CO-START-007` | after the team workflow-contract check, if Root is `Done`, exit before workspace, descendant, or Root State mutation | reopen Root or alter terminal descendants |
 
 This is abandonment followed by fresh reasoning, not execution recovery. The
@@ -129,7 +135,7 @@ flowchart TD
   Start[Startup rebuild] --> Reconcile[Fresh Root Reconcile]
   Reconcile --> Report[Refresh Root report snapshot]
   Report --> Decision{Decision}
-  Decision -->|Cycle| Create[Create family and append Cycle history]
+  Decision -->|Cycle| Create[Create family and append rationale]
   Create --> Artist[Fresh Artist]
   Artist --> Critic[Fresh read-only Critic]
   Critic --> Close[Close Cycle and update Root State]
@@ -148,7 +154,7 @@ flowchart TD
 | route from current in-memory run state plus Root State checkpoint | never parse the historical child tree for decisions |
 | checkpoint Root State after every durable transition | keep restart input and human view current |
 | collect a typed whole-worktree summary before each Reconcile | expose paths and line deltas only; never substitute it for Critic authority |
-| project one validated report after every Reconcile | refresh the latest Root report with local RFC3339 time; for `create_cycle`, copy it once to Cycle history; replace completion file/line/token sections; no summarizer call |
+| project one validated report after every Reconcile | refresh the Root report with local time; copy `create_cycle` reports to the Cycle creation comment; replace completion metrics; no summarizer |
 | accumulate Reconcile, Artist, and Critic usage | persist exact safe counters in Root State; one missing invocation makes the displayed total `Unknown` |
 | project status transitions at each lifecycle boundary | leave Linear statuses stale until a comment or local checkpoint changes |
 | retain comments arriving during an active Cycle as new Root input | never add them to active Artist or Critic |
@@ -177,8 +183,8 @@ before fresh Reconcile.
 | activate | after the family record is durable, set Cycle and Root `In Progress` | then start Artist |
 | Artist | fresh workspace-write process with final `cycle-NNN-artist-result.md` | append report plus human-readable local `Updated at` to Artist description; expose current error first 50 chars; finish, then Critic |
 | Critic | fresh read-only process with final `cycle-NNN-critic-result.md` | parse once; append report plus human-readable local `Updated at` to Critic description; expose current error first 50 chars; finish, then persist JSON |
-| result | apply `WF-RESULT-*` mechanically | append Cycle history/result comments (timestamps come from Linear `createdAt`), upload only `cycle-NNN-critique-result.json` as `application/json`, then set Cycle `Done` |
-| Root State | write parsed Critic fields to `latest_critique`; update trusted fields only for Succeeded; clear a workspace warning only after clean full-diff Critic | checkpoint Root `In Review`, then Reconcile |
+| result | apply `WF-RESULT-*` mechanically | append the sole terminal Cycle comment, upload only `cycle-NNN-critique-result.json` as `application/json`, then set Cycle `Done` |
+| Root State | write the compact Critic checkpoint to `latest_critique`; update trusted fields only for Succeeded; clear a workspace warning only after clean full-diff Critic | checkpoint Root `In Review`, then Reconcile |
 
 Artist process failure never bypasses Critic and never decides the Cycle result.
 Critic inspects the actual shared Root workspace and receives no Artist Markdown,
@@ -208,20 +214,18 @@ directory. Performer returns only local diagnostic refs and a mechanically
 indexed `thread_id`; neither is included in the role prompt or any Linear
 projection.
 
-Role separation is intentional: Artist and Critic can use different providers
-or capabilities while retaining fixed per-run configuration. There is no
+Role separation is intentional: Artist and Critic can use different Codex
+connection/model/reasoning settings while retaining fixed per-run configuration. There is no
 dynamic per-Cycle routing, plugin discovery, compatibility alias, or shared
 cross-role transcript.
 
-Role responses are Markdown files with fixed human-facing report sections. The
-Artist report is `## Summary`, `## File Changes` with
-`### Created`/`### Updated`/`### Deleted` path and +/- line-count entries, and
-`## Verification`; it is appended exactly once to Artist's description with
+Role responses are Markdown files. The Artist report is a human-readable
+summary of actual file changes and verification without a machine-parsed
+heading schema; it is appended exactly once to Artist's description with
 one mechanical human-readable local `Updated at: <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line.
-The Critic report starts with
-`verdict: accepted | incomplete | blocked | violation | process_error`, then
-uses `## Scope Reviewed`, `## Implementation Review`, `## Checks`, `## Evidence`,
-`## Findings`, and `## Task State` in that order; it is appended exactly once to
+The Critic report starts with a compact JSON envelope containing verdict, task
+state, and optional pending finding, then provides a free human-readable audit
+of scope, implementation logic, checks, evidence, and findings. It is appended exactly once to
 Critic's description with one mechanical human-readable local `Updated at:
 <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line.
 Neither report repeats the Cycle description. There is one Artist and one
@@ -273,59 +277,44 @@ only. It
 must explain the review scope, implementation logic, validation evidence, and
 findings for a human reader rather than restate the Cycle description:
 
-```text
-verdict: accepted | incomplete | blocked | violation | process_error
-
-## Scope Reviewed
-...
-## Implementation Review
-...
-## Checks
-...
-## Evidence
-...
-## Findings
-...
-## Task State
-...
+````text
+```json
+{"verdict":"accepted | incomplete | blocked | violation | process_error","task_state_markdown":"...","pending_finding":null}
 ```
+
+<human-readable audit Markdown>
+````
 
 The parser rejects a missing or invalid field/file. It never infers control
 values from prose and never starts another Agent call to repair formatting.
-Cycle Runner serializes the parsed Critic value to
-`cycle-NNN-critique-result.json`, re-reads and validates that file, and maps that
-re-read value mechanically to the Cycle Result and `RootState.latest_critique`.
+Cycle Runner creates the full Critique artifact in memory and serializes it once
+to `cycle-NNN-critique-result.json`. It writes and uploads the same bytes, then
+maps the already validated compact envelope to the Cycle Result and
+`RootState.latest_critique`.
 Only the JSON file is uploaded to Cycle as `application/json`; the Cycle Result
 contains `[cycle-NNN-critique-result.json](https://linear.example/asset)` or the current upload
-error's first 50 characters. Cycle history comments are append-only and use
-Linear `createdAt` as their timestamp without a duplicate body timestamp. Root
+error's first 50 characters. The Cycle has only its creation rationale and this
+terminal comment; Linear statuses show intermediate progress. Root
 Reconcile later reads only `latest_critique`, not the Cycle comments, role
 descriptions, or Cycle DAG.
 
 ## Terminal delivery function
 
-The PR path is an ordinary Conductor function, not a delivery component or
-state machine:
+Delivery is the final Root Reconcile Agent phase, not a Conductor function or
+delivery subsystem:
 
 ```text
-publishPullRequest(root, rootState)
+RootReconcileDelivery(root, rootState)
   -> require empty final Inbox and no active Cycle
   -> require workspace changes
   -> set Root State phase to publishing
-  -> git add --all
-  -> git commit
-  -> git push --set-upstream
-  -> validate Root Reconcile Delivery
-  -> return URL; if unavailable, return the already-pushed delivery branch
+  -> attempt commit/push and PR through git/gh
+  -> return validated PR, branch, or files Delivery
 ```
 
-No commit hash enters a contract. This is one ordered publication attempt, not
-an exactly-once protocol. Commit or push failure leaves Root open. After a
-successful push, unavailable `gh`, missing `gh` authentication, or PR creation
-files Delivery completes Root without an HTTP/API-token
-fallback. If a process later starts with phase `publishing` but neither a PR URL
-nor delivery branch, it sets `NeedsHuman` and stops without another publication
-attempt. It does not retry, read back, adopt an existing PR, roll back, or repair.
+No commit hash enters a contract. Root Reconcile attempts PR, branch, then files
+in that order and returns exactly one valid Delivery. Conductor only validates,
+persists, and projects it before Root `Done`; it never retries or repeats Git.
 
 ## Stop behavior
 
@@ -347,7 +336,7 @@ opaque local `diagnostic_ref`. They exclude prompts, raw model output, file
 contents, diffs, credentials, authorization headers, Git hashes, raw JSONL,
 stderr, and error context. The external run directory stores transaction
 records, the exact `cycle-NNN-*-result.md` files needed by role descriptions, the
-re-read `cycle-NNN-critique-result.json` used for progression, PR command evidence,
+once-serialized `cycle-NNN-critique-result.json`, PR command evidence,
 and private diagnostic artifacts. Role Markdown is appended only to its owned
 descriptions; only the typed Critique JSON is uploaded as a Cycle file. Diagnostic
 artifacts retain bounded raw Agent JSONL/stderr and causal context with private

@@ -87,21 +87,6 @@ pub fn schedule(
         return actions;
     }
 
-    let Some(best_waiting) = unique_candidates.first() else {
-        return unique_current.into_iter().map(ScheduleAction::Keep).collect();
-    };
-    let Some((lowest_index, lowest_running)) = unique_current
-        .iter()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| compare_priorities(left.priority, right.priority))
-    else {
-        return Vec::new();
-    };
-
-    if compare_priority_values(best_waiting.priority, lowest_running.priority) == Ordering::Less {
-        return vec![ScheduleAction::Stop { assignment: unique_current[lowest_index].clone() }];
-    }
-
     unique_current.into_iter().map(ScheduleAction::Keep).collect()
 }
 
@@ -115,10 +100,6 @@ fn linear_priority_rank(priority: u8) -> u8 {
 
 fn compare_priority_values(left: u8, right: u8) -> Ordering {
     linear_priority_rank(left).cmp(&linear_priority_rank(right))
-}
-
-fn compare_priorities(left: u8, right: u8) -> Ordering {
-    compare_priority_values(left, right)
 }
 
 fn compare_current_assignments(left: &CurrentAssignment, right: &CurrentAssignment) -> Ordering {
@@ -135,17 +116,18 @@ fn compare_candidates(left: &RootCandidate, right: &RootCandidate) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::RoleLaunchConfig;
+    use crate::domain::{AgentKind, RoleLaunchConfig};
 
     fn binding(concurrency: u32) -> ProjectBinding {
         let role =
-            || RoleLaunchConfig { agent: "codex".into(), model: None, reasoning_effort: None };
+            || RoleLaunchConfig { agent: AgentKind::Codex, model: None, reasoning_effort: None };
         ProjectBinding {
             project_id: "project-1".into(),
             routing_label: "core".into(),
             repository_path: "/repo".into(),
             base_branch: "main".into(),
             concurrency,
+            completed_workspace_retention: None,
             reconcile_agent: role().agent,
             reconcile_model: None,
             reconcile_reasoning_effort: None,
@@ -186,13 +168,10 @@ mod tests {
     }
 
     #[test]
-    fn strict_priority_preemption_is_stop_then_confirmed_start() {
+    fn higher_priority_waiting_root_does_not_preempt_running_root() {
         let current = [CurrentAssignment { root_id: "low".into(), priority: 2 }];
-        let first = schedule(&binding(1), &[root("urgent", 1, "2024-01-01")], &current);
-        assert_eq!(first, [ScheduleAction::Stop { assignment: current[0].clone() }]);
-
-        let second = schedule(&binding(1), &[root("urgent", 1, "2024-01-01")], &[]);
-        assert_eq!(second, [ScheduleAction::Start { candidate: root("urgent", 1, "2024-01-01") }]);
+        let actions = schedule(&binding(1), &[root("urgent", 1, "2024-01-01")], &current);
+        assert_eq!(actions, [ScheduleAction::Keep(current[0].clone())]);
     }
 
     #[test]
@@ -208,9 +187,7 @@ mod tests {
             let current = [CurrentAssignment { root_id: "none".into(), priority: 0 }];
             let actions =
                 schedule(&binding(1), &[root("waiting", waiting_priority, "2024-01-01")], &current);
-            assert!(
-                matches!(actions.as_slice(), [ScheduleAction::Stop { assignment }] if assignment.root_id == "none")
-            );
+            assert_eq!(actions, [ScheduleAction::Keep(current[0].clone())]);
         }
 
         let current = [CurrentAssignment { root_id: "urgent".into(), priority: 1 }];

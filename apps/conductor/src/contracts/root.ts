@@ -1,6 +1,6 @@
 import {
-  parseCritiqueResult,
-  type CritiqueResult,
+  parseCritiqueCheckpoint,
+  type CritiqueCheckpoint,
 } from "./cycle.js";
 import {
   parsePerformerTokenUsage,
@@ -35,8 +35,7 @@ export interface RootState {
   readonly root_branch: string;
   readonly current_phase: string;
   readonly task_state_markdown: MarkdownText;
-  readonly pending_finding?: MarkdownText | undefined;
-  readonly latest_critique?: CritiqueResult | undefined;
+  readonly latest_critique?: CritiqueCheckpoint | undefined;
   readonly harness_feedback?: MarkdownText | undefined;
   readonly comment_cursor?: string | undefined;
   readonly delivery?: Delivery | undefined;
@@ -114,7 +113,6 @@ const ROOT_STATE_REQUIRED_KEYS = [
   "task_state_markdown",
 ] as const;
 const ROOT_STATE_OPTIONAL_KEYS = [
-  "pending_finding",
   "latest_critique",
   "harness_feedback",
   "comment_cursor",
@@ -141,8 +139,7 @@ function optionalMarkdown(value: unknown, code: string): MarkdownText | undefine
 export function parseRootState(value: unknown): RootState {
   const record = asRecord(value, "invalid_root_state");
   assertKeysWithOptional(record, ROOT_STATE_REQUIRED_KEYS, ROOT_STATE_OPTIONAL_KEYS);
-  const pendingFinding = optionalMarkdown(record.pending_finding, "invalid_pending_finding");
-  const latestCritic = parseOptional(record.latest_critique, parseCritiqueResult);
+  const latestCritic = parseOptional(record.latest_critique, parseCritiqueCheckpoint);
   const harnessFeedback = optionalMarkdown(record.harness_feedback, "invalid_harness_feedback");
   const commentCursor = parseOptional(record.comment_cursor, parseCommentId);
   const delivery = parseOptional(record.delivery, parseDelivery);
@@ -153,7 +150,6 @@ export function parseRootState(value: unknown): RootState {
     root_branch: parseBoundedString(record.root_branch, "invalid_root_branch", 256),
     current_phase: parseBoundedString(record.current_phase, "invalid_root_phase", 64),
     task_state_markdown: parseMarkdownText(record.task_state_markdown, "invalid_task_state_markdown"),
-    ...(pendingFinding === undefined ? {} : { pending_finding: pendingFinding }),
     ...(latestCritic === undefined ? {} : { latest_critique: latestCritic }),
     ...(harnessFeedback === undefined ? {} : { harness_feedback: harnessFeedback }),
     ...(commentCursor === undefined ? {} : { comment_cursor: commentCursor }),

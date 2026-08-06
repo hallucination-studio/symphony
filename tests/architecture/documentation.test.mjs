@@ -159,7 +159,7 @@ test("task state, pending finding, and Inbox enforce the Root boundary", async (
   const rootIssue = sources.get("root-issue.md");
 
   assert.match(workflow, /trusted task state.*Succeeded Cycles with an `accepted` Critic verdict/);
-  assert.match(reconciliation, /Pending Finding.*one current Rejected\/Failed summary/);
+  assert.match(reconciliation, /promotes\s+only verdict, task state, one pending finding, and artifact URL/);
   assert.match(reconciliation, /active Cycle.*retain newer comments as pending/);
   assert.match(rootIssue, /Artist or Critic comments, any author \| display-only/);
 });
@@ -223,7 +223,7 @@ test("Linear statuses are canonical, visible, and explicitly projected", async (
   assert.match(taskManagement, /canonical-state creation fails \| expose the provider error and stop/);
   assert.match(taskManagement, /Any other user-defined state is ignored completely/);
   assert.match(taskManagement, /never treats another `started` state as/);
-  assert.match(workflow, /Root \| `Todo` after Prepare and before first fresh Reconcile[\s\S]*durable Cycle family -> `In Progress`[\s\S]*latest_critique[\s\S]*`In Review`[\s\S]*valid Delivery projection -> `Done`/);
+  assert.match(workflow, /Root \| `Todo` after Prepare[\s\S]*durable family -> `In Progress`[\s\S]*Critic checkpoint -> `In Review`[\s\S]*valid Delivery projection -> `Done`/);
   assert.match(workflow, /Cycle \| `Todo` when created[\s\S]*recorded family sets `In Progress`[\s\S]*starting Critic sets `In Review`[\s\S]*terminal Cycle result sets `Done`/);
   assert.match(workflow, /Artist \| `Todo` when created[\s\S]*process launch sets `In Progress`[\s\S]*process return, timeout, interruption, or start failure sets `Done`/);
   assert.match(workflow, /Critic \| `Todo` when created[\s\S]*Critic launch sets `In Review`[\s\S]*Critic report or process error sets `Done`; the report is exact Markdown/);
@@ -244,22 +244,19 @@ test("Critic Markdown is the sole semantic result and Root State is the Reconcil
   const rootIssue = sources.get("root-issue.md");
 
   assert.match(workflow, /Critic Markdown is appended byte-for-byte once to the Critic Issue description/);
-  assert.match(workflow, /Conductor parses this Markdown once into the typed\s+`CritiqueResult`/);
-  assert.match(workflow, /reads it back and validates it, then uses the\s+re-read value for Cycle and Root progression/);
-  assert.match(workflow, /Only this JSON file is uploaded to\s+the Cycle as `application\/json`/);
-  assert.match(workflow, /Cycle Result comment records its resource\s+link or the current upload error/);
+  assert.match(workflow, /Conductor parses only the envelope once/);
+  assert.match(workflow, /Conductor does\s+not reread that file/);
+  assert.match(workflow, /serializes the same bytes once to\s+`cycle-NNN-critique-result\.json` for local retention and upload/);
   assert.match(workflow, /never starts a second summarization or\s+format-repair Agent call/);
-  assert.match(workflow, /written to\s+`RootState\.latest_critique` before the\s+next\s+Reconcile/);
+  assert.match(workflow, /compact envelope and artifact URL are written to\s+`RootState\.latest_critique`/);
   assert.match(rootIssue, /role report to each role description/);
-  assert.match(rootIssue, /parsed Critique is mechanically serialized as\s+`cycle-NNN-critique-result\.json`, written privately, and read back and validated/);
-  assert.match(rootIssue, /Only this JSON file is uploaded\s+for the Cycle with `application\/json` content type/);
+  assert.match(rootIssue, /serializes it once as\s+`cycle-NNN-critique-result\.json`, writes and uploads those same bytes/);
+  assert.match(rootIssue, /Only this JSON file\s+is uploaded for the Cycle with `application\/json` content type/);
   assert.match(rootIssue, /If upload fails,[\s\S]*does not alter the Critic\s+verdict or progression/);
   assert.match(rootIssue, /JSONL and stderr\s+remain private local diagnostics[\s\S]*never\s+uploaded as comments or files/);
-  assert.match(reconciliation, /parses the exact Critique Markdown once, serializes its typed\s+value to `cycle-NNN-critique-result\.json`/);
-  assert.match(reconciliation, /then writes the re-read fields to `RootState\.latest_critique`, promotes trusted\s+fields/);
-  assert.match(reconciliation, /Cycle Result as a separate mechanical projection/);
-  assert.match(reconciliation, /Root Reconcile never receives the complete Root Issue\s+tree, the managed Root snapshot, Cycle history\/result comments, Cycle DAG/);
-  assert.match(reconciliation, /Cycle Result remains\s+a mechanical persistence and operator\s+projection only/);
+  assert.match(reconciliation, /parses the compact machine envelope in the Critic Markdown\s+once/);
+  assert.match(reconciliation, /promotes\s+only verdict, task state, one pending finding, and artifact URL/);
+  assert.match(reconciliation, /Root Reconcile never receives the complete Root Issue tree, the managed Root\s+snapshot, either Cycle comment, the Cycle DAG/);
   assert.doesNotMatch(reconciliation, /completed Cycle mechanical result, when/u);
 });
 
@@ -352,14 +349,14 @@ test("V2 Podium Desktop keeps local scheduling outside Conductor", async () => {
   assert.match(roadmap, /V2 Podium Desktop/);
   assert.match(roadmap, /manage multiple local Conductors/);
   assert.match(roadmap, /persisted `ProjectBinding`/);
-  assert.match(workflow, /higher priority.*preempt.*lower priority/);
-  assert.match(workflow, /equal priorities do not preempt/);
-  assert.match(workflow, /process-tree confirmation/);
-  assert.match(workspace, /Assignment records, process IDs, and the pending queue are Desktop memory/);
-  assert.match(workspace, /stable allocation/);
+  assert.match(workflow, /waiting Roots are ordered by Linear priority, creation time, and ID/);
+  assert.match(workflow, /running Roots are never automatically preempted/);
+  assert.match(workflow, /operator stop is explicit and confirms the complete process tree exited/);
+  assert.match(workspace, /does not persist a second Root allocation/);
+  assert.match(workspace, /Root State becomes\s+the durable binding after Prepare/);
   assert.match(contracts, /ProjectBinding/);
   assert.match(contracts, /routing_label/);
-  assert.match(conductor, /one `--linear-root`, one `--workspace`, and one `--dir`/);
+  assert.match(conductor, /one `--linear-root`, one preferred `--workspace`, and one `--dir`/);
   assert.match(conductor, /Podium scheduling, UI, or E2E behavior for `NeedsHuman`/);
 });
 

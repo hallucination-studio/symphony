@@ -9,9 +9,11 @@ import { SettingsPage } from "./ui/SettingsPage";
 export function App({
   initialState,
   onCommand,
+  onPickDirectory,
 }: {
   initialState: DesktopState;
   onCommand?: CommandHandler;
+  onPickDirectory?: (() => Promise<string | null>) | undefined;
 }) {
   const [page, setPage] = useState<Page>("overview");
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -44,12 +46,13 @@ export function App({
           view={initialState.overview}
           headingRef={headingRef}
           onOpenConductors={() => navigate("conductors")}
+          onCommand={command}
         />
       )}
       {page === "conductors" && (
         <ConductorsPage
           bindings={initialState.overview.bindings}
-          slots={initialState.overview.slots}
+          roots={initialState.overview.roots}
           headingRef={headingRef}
           onCommand={command}
         />
@@ -57,8 +60,10 @@ export function App({
       {page === "settings" && (
         <SettingsPage
           bindings={initialState.overview.bindings}
+          linear={initialState.overview.linear}
           headingRef={headingRef}
           onCommand={command}
+          onPickDirectory={onPickDirectory}
         />
       )}
     </Shell>

@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import type { CritiqueResult } from "../contracts/cycle.js";
+import type { CritiqueEnvelope } from "../contracts/cycle.js";
 import type { PerformerLaunchRequest } from "../contracts/performer.js";
 import type { RootReconcileDecision, RootReconcileRequest } from "../contracts/root.js";
 import { parseRootState } from "../contracts/root.js";
@@ -57,7 +57,7 @@ function scriptedReconciler(decisions: readonly RootReconcileDecision[], request
   };
 }
 
-function scriptedPerformer(audits: readonly CritiqueResult[], launches: PerformerLaunchRequest[]): Performer {
+function scriptedPerformer(audits: readonly CritiqueEnvelope[], launches: PerformerLaunchRequest[]): Performer {
   let auditIndex = 0;
   return {
     async launch(request) {
@@ -74,24 +74,15 @@ function scriptedPerformer(audits: readonly CritiqueResult[], launches: Performe
       }
       const critique = audits[auditIndex++];
       if (critique === undefined || request.final_response_path === undefined) throw new Error("unexpected_audit");
-      const markdown = critique.verdict === "process_error"
-        ? `verdict: process_error\n\n## Reason\n${critique.reason}\n`
-        : [
-          `verdict: ${critique.verdict}`,
-          "",
-          "## Scope Reviewed", critique.scope_reviewed,
-          "",
-          "## Implementation Review", critique.implementation_review,
-          "",
-          "## Checks", ...(critique.checks.length === 0 ? ["- None"] : critique.checks.map((entry) => `- ${entry}`)),
-          "",
-          "## Evidence", ...(critique.evidence.length === 0 ? ["- None"] : critique.evidence.map((entry) => `- ${entry}`)),
-          "",
-          "## Findings", ...(critique.findings.length === 0 ? ["- None"] : critique.findings.map((entry) => `- ${entry}`)),
-          "",
-          "## Task State", critique.task_state_markdown,
-          "",
-        ].join("\n");
+      const markdown = [
+        "```json",
+        JSON.stringify(critique),
+        "```",
+        "",
+        critique.verdict === "process_error"
+          ? "The Critic process could not complete its semantic audit."
+          : "The fresh read-only Critic inspected the complete workspace.",
+      ].join("\n");
       await writeFile(request.final_response_path, markdown, "utf8");
       return {
         launch_status: "exited", exit_code: 0, duration_ms: 3,
@@ -172,14 +163,10 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Critic
   };
   const rolePerformer = scriptedPerformer([
     {
-      verdict: "incomplete", scope_reviewed: "Parser behavior", implementation_review: "Ambiguity remains",
-      checks: [], evidence: ["test fails"], findings: ["ambiguous token accepted"],
-      task_state_markdown: "Ambiguity remains", pending_finding: "Reject ambiguous token",
+      verdict: "incomplete", task_state_markdown: "Ambiguity remains", pending_finding: "Reject ambiguous token",
     } as never,
     {
-      verdict: "accepted", scope_reviewed: "Parser behavior", implementation_review: "Strict behavior verified",
-      checks: ["npm test"], evidence: ["test passes"], findings: [],
-      task_state_markdown: "Strict parser behavior is verified",
+      verdict: "accepted", task_state_markdown: "Strict parser behavior is verified",
     } as never,
   ], launches);
   const performer: Performer = {
@@ -207,27 +194,24 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Critic
   assert.notEqual(state, undefined);
   if (state === undefined) throw new Error("missing_root_state");
   assert.equal(state.task_state_markdown, "Strict parser behavior is verified");
-  assert.equal(state.pending_finding, undefined);
+  assert.equal(
+    state.latest_critique !== undefined && "pending_finding" in state.latest_critique
+      ? state.latest_critique.pending_finding
+      : undefined,
+    undefined,
+  );
   assert.equal(state.delivery?.kind, "branch");
-  assert.equal(reconcileRequests[1]?.root_state.pending_finding, "ambiguous token accepted");
   assert.deepEqual(rootStatusesAtReconcile, ["todo-id", "review-id", "review-id"]);
   assert.deepEqual(reconcileRequests[1]?.root_state.latest_critique, {
     verdict: "incomplete",
-    scope_reviewed: "Parser behavior",
-    implementation_review: "Ambiguity remains",
-    checks: [],
-    evidence: ["test fails"],
-    findings: ["ambiguous token accepted"],
     task_state_markdown: "Ambiguity remains",
+    pending_finding: "Reject ambiguous token",
+    artifact_url: "https://linear.invalid/upload/fake-upload-1",
   });
   assert.deepEqual(state.latest_critique, {
     verdict: "accepted",
-    scope_reviewed: "Parser behavior",
-    implementation_review: "Strict behavior verified",
-    checks: ["npm test"],
-    evidence: ["test passes"],
-    findings: [],
     task_state_markdown: "Strict parser behavior is verified",
+    artifact_url: "https://linear.invalid/upload/fake-upload-2",
   });
   assert.equal(reconcileRequests[0]?.root.description, "Reject ambiguity.");
   assert.equal((await world.gateway.list_root_comments_after("root-id")).length, 0);
@@ -280,8 +264,6 @@ test("final Inbox input cancels completion and enters the next frozen Cycle", as
   };
   const launches: PerformerLaunchRequest[] = [];
   const rolePerformer = scriptedPerformer([{
-    verdict: "accepted", scope_reviewed: "Late Root input", implementation_review: "Late input applied",
-    checks: [], evidence: [], findings: [],
     task_state_markdown: "Late input is verified",
   } as never], launches);
   const runner = new CycleRunner({
@@ -477,10 +459,9 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
         };
       }
       await writeFile(request.final_response_path, [
-        "verdict: accepted", "", "## Scope Reviewed", "The complete worktree diff.", "",
-        "## Implementation Review", "The three intended file operations are correct.", "",
+        "```json", JSON.stringify({ verdict: "accepted", task_state_markdown: "The file change set is verified." }), "```", "",
+        "## Critic Audit", "The three intended file operations are correct.", "",
         "## Checks", "- git diff", "", "## Evidence", "- Created, updated, and deleted paths inspected.", "",
-        "## Findings", "- None", "", "## Task State", "The file change set is verified.", "",
       ].join("\n"), "utf8");
       return {
         launch_status: "exited", exit_code: 0, duration_ms: 1,
@@ -513,4 +494,29 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
   assert.match(completed, /### Run Metrics\nDuration: [0-9]+(?:ms|s|m [0-9]+s)\nTotal tokens: 1\.3k/u);
   assert.doesNotMatch(completed, /(?:^|\n)(?:\?\?|[ MADRCU?!]{1,2}) /u);
   assert.equal(projection.state?.token_usage?.total_tokens, 1_300);
+});
+
+test("bounds untracked file reads while collecting the Reconcile worktree summary", async () => {
+  const world = await scenario();
+  await exec("git", ["init"], { cwd: world.workspacePath });
+  await writeFile(path.join(world.workspacePath, "tracked.txt"), "baseline\n", "utf8");
+  await exec("git", ["add", "tracked.txt"], { cwd: world.workspacePath });
+  await exec("git", [
+    "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "-m", "baseline",
+  ], { cwd: world.workspacePath });
+  await writeFile(path.join(world.workspacePath, "oversized.txt"), Buffer.alloc(2 * 1024 * 1024 + 1));
+  const requests: RootReconcileRequest[] = [];
+  const conductor = new Conductor({
+    gateway: world.gateway,
+    workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    reconciler: scriptedReconciler([complete("The bounded summary behavior is verified.")], requests),
+    cycleRunner: { run: async () => { throw new Error("cycle_must_not_run"); } } as unknown as CycleRunner,
+    workspace: world.workspace,
+    maxCycles: 1,
+  });
+
+  assert.equal((await conductor.run("ENG-1")).status, "done");
+  assert.equal(requests[0]?.worktree_summary.status, "unavailable");
+  assert.match(requests[0]?.worktree_summary.reason ?? "", /worktree_file_too_large/u);
 });

@@ -8,11 +8,18 @@ import { runDeterministicScenario } from "./deterministic-runner.mjs";
 import { LinearDriver } from "./linear-driver.mjs";
 import { createScenarioWorld } from "./scenario-world.mjs";
 
+function statusTransitions(state) {
+  return state.events
+    .filter(({ event }) => event === "status_transition")
+    .map(({ issue_id: issueId, from, to }) => ({ issue_id: issueId, from, to }));
+}
+
 test("serial fake Linear and Agent flow uses real filesystem/Git and publishes one PR", async (context) => {
   const world = await createScenarioWorld();
   context.after(() => world.cleanup());
   await symlink(`${world.workspace}/README.md`, `${world.runDirectory}/diagnostic-link`);
   const linear = new LinearDriver({ root: { id: world.rootId, identifier: "ENG-1" } });
+  assert.equal((await linear.readRoot()).status, "todo");
   await linear.addRootComment("Write the verified result.");
   const agent = new AgentDriver({
     artist: [async (request, currentWorld) => {
@@ -40,34 +47,22 @@ test("serial fake Linear and Agent flow uses real filesystem/Git and publishes o
       assert.equal(request.sandbox, "read_only");
       assert.equal(await currentWorld.read("result.txt"), "verified\n");
       await currentWorld.writeRunFile("cycle-001-critic-result.md", [
-        "verdict: accepted",
+        "```json",
+        JSON.stringify({ verdict: "accepted", task_state_markdown: "The verified result is present." }),
+        "```",
         "",
-        "## Scope Reviewed",
+        "## Audit",
         "Inspected the complete workspace diff and result.txt.",
         "",
-        "## Implementation Review",
         "The requested file is present with the expected content.",
         "",
-        "## Checks",
+        "## Verification",
         "- result.txt matches the frozen acceptance",
-        "",
-        "## Evidence",
         "- Read-only inspection passed",
-        "",
-        "## Findings",
-        "- None",
-        "",
-        "## Task State",
-        "The verified result is present.",
         "",
       ].join("\n"));
       return {
         verdict: "accepted",
-        scope_reviewed: "Inspected the complete workspace diff and result.txt.",
-        implementation_review: "The requested file is present with the expected content.",
-        checks: ["result.txt matches the frozen acceptance"],
-        evidence: ["read-only inspection passed"],
-        findings: [],
         task_state_markdown: "The verified result is present.",
       };
     }],
@@ -86,8 +81,24 @@ test("serial fake Linear and Agent flow uses real filesystem/Git and publishes o
   assert.equal(result.status, "done");
   assert.equal(result.pull_request_url, "https://github.example/pull/1");
   assert.equal(result.evidence.workspace.status, "");
-  assert.equal(result.evidence.publicState.root.status, "completed");
+  assert.equal(result.evidence.publicState.root.status, "done");
   assert.equal(result.evidence.publicState.cycles[0].result, "succeeded");
+  const cycle = result.evidence.publicState.cycles[0];
+  assert.equal(cycle.status, "done");
+  assert.equal(cycle.artist_issue.status, "done");
+  assert.equal(cycle.critic_issue.status, "done");
+  assert.deepEqual(statusTransitions(result.evidence.publicState), [
+    { issue_id: cycle.id, from: "todo", to: "in_progress" },
+    { issue_id: world.rootId, from: "todo", to: "in_progress" },
+    { issue_id: cycle.artist_issue.id, from: "todo", to: "in_progress" },
+    { issue_id: cycle.artist_issue.id, from: "in_progress", to: "done" },
+    { issue_id: cycle.id, from: "in_progress", to: "in_review" },
+    { issue_id: cycle.critic_issue.id, from: "todo", to: "in_review" },
+    { issue_id: cycle.critic_issue.id, from: "in_review", to: "done" },
+    { issue_id: cycle.id, from: "in_review", to: "done" },
+    { issue_id: world.rootId, from: "in_progress", to: "in_review" },
+    { issue_id: world.rootId, from: "in_review", to: "done" },
+  ]);
   assert.equal(result.evidence.runEvidence.length, 4);
   assert.deepEqual(result.evidence.runEvidence.map(({ name }) => name).sort(), [
     "cycle-001-artist-result.md", "cycle-001-critic-result.md", "cycle-001-critique-result.json", "deterministic-evidence.jsonl",
@@ -108,18 +119,22 @@ test("serial fake Linear and Agent flow uses real filesystem/Git and publishes o
   assert.match(criticDescription, /^# Task\n/u);
   assert.match(criticDescription, /# Symphony Metadata\n/u);
   assert.match(criticDescription, /# Result\n/u);
-  assert.match(criticDescription, /verdict: accepted\n/u);
-  assert.match(criticDescription, /## Scope Reviewed[\s\S]*## Implementation Review[\s\S]*## Findings/u);
+  assert.equal(criticDescription.includes([
+    "```json",
+    JSON.stringify({ verdict: "accepted", task_state_markdown: "The verified result is present." }),
+    "```",
+  ].join("\n")), true);
+  assert.match(criticDescription, /## Audit[\s\S]*## Verification/u);
   assert.equal(comments.some((comment) => comment.issue_id === artistIssueId), false);
   assert.equal(comments.some((comment) => comment.issue_id === criticIssueId), false);
   const cycleComments = comments.filter((comment) => comment.issue_id === cycleId).map((comment) => comment.body);
-  assert.equal(cycleComments.some((body) => body.includes("## Scope Reviewed")), false);
+  assert.equal(cycleComments.some((body) => body.includes("## Audit")), false);
   assert.match(cycleComments.at(-1) ?? "", /- Critique: \[cycle-001-critique-result\.json\]\(https:\/\/linear\.example\/upload\/1\)/u);
   assert.deepEqual(result.evidence.publicState.uploads.map(({ filename, content_type }) => ({ filename, content_type })), [
     { filename: "cycle-001-critique-result.json", content_type: "application/json" },
   ]);
   const critiqueJsonText = await readFile(path.join(world.runDirectory, "cycle-001-critique-result.json"), "utf8");
-  assert.deepEqual(JSON.parse(critiqueJsonText), result.critic);
+  assert.deepEqual(JSON.parse(critiqueJsonText), result.artifact);
   assert.equal(result.evidence.publicState.uploads[0].contents, critiqueJsonText);
   assert.deepEqual(result.evidence.publicState.root_state.latest_critique, result.critic);
   assert.deepEqual(agent.calls.map((call) => call.role), ["artist", "critic"]);
@@ -154,34 +169,27 @@ test("failed Artist still gets a fresh Critic and leaves partial workspace chang
       assert.equal(request.sandbox, "read_only");
       assert.equal(await currentWorld.read("partial.txt"), "partial change\n");
       await currentWorld.writeRunFile("cycle-001-critic-result.md", [
-        "verdict: blocked",
+        "```json",
+        JSON.stringify({
+          verdict: "blocked",
+          task_state_markdown: "No independently audited task progress yet.",
+          pending_finding: "Repair the partial change.",
+        }),
+        "```",
         "",
-        "## Scope Reviewed",
+        "## Audit",
         "Inspected the complete workspace diff after the timed-out Artist.",
         "",
-        "## Implementation Review",
         "The partial file does not establish the requested completed behavior.",
         "",
-        "## Checks",
+        "## Verification",
         "- partial workspace inspected",
-        "",
-        "## Evidence",
-        "- None",
-        "",
-        "## Findings",
         "- The requested behavior is incomplete.",
-        "",
-        "## Task State",
-        "Repair the partial change.",
         "",
       ].join("\n"));
       return {
         verdict: "blocked",
-        scope_reviewed: "Inspected the complete workspace diff after the timed-out Artist.",
-        implementation_review: "The partial file does not establish the requested completed behavior.",
-        checks: ["partial workspace inspected"],
-        evidence: [],
-        findings: ["The requested behavior is incomplete."],
+        task_state_markdown: "No independently audited task progress yet.",
         pending_finding: "Repair the partial change.",
       };
     }],
@@ -201,7 +209,23 @@ test("failed Artist still gets a fresh Critic and leaves partial workspace chang
   assert.equal(result.cycle_result, "failed");
   assert.equal(createPullRequestCalls, 0);
   assert.match(await world.status(), /\?\? partial\.txt/u);
-  assert.equal((await linear.readRoot()).status, "todo");
+  assert.equal((await linear.readRoot()).status, "in_review");
+  const state = result.evidence.publicState;
+  const cycle = state.cycles[0];
+  assert.equal(cycle.status, "done");
+  assert.equal(cycle.artist_issue.status, "done");
+  assert.equal(cycle.critic_issue.status, "done");
+  assert.deepEqual(statusTransitions(state), [
+    { issue_id: cycle.id, from: "todo", to: "in_progress" },
+    { issue_id: world.rootId, from: "todo", to: "in_progress" },
+    { issue_id: cycle.artist_issue.id, from: "todo", to: "in_progress" },
+    { issue_id: cycle.artist_issue.id, from: "in_progress", to: "done" },
+    { issue_id: cycle.id, from: "in_progress", to: "in_review" },
+    { issue_id: cycle.critic_issue.id, from: "todo", to: "in_review" },
+    { issue_id: cycle.critic_issue.id, from: "in_review", to: "done" },
+    { issue_id: cycle.id, from: "in_review", to: "done" },
+    { issue_id: world.rootId, from: "in_progress", to: "in_review" },
+  ]);
   assert.deepEqual(agent.calls.map((call) => call.role), ["artist", "critic"]);
 });
 
@@ -224,15 +248,12 @@ test("Critic JSON upload failure is visible without changing the Critic verdict"
     }],
     critic: [async (_request, currentWorld) => {
       await currentWorld.writeRunFile("cycle-001-critic-result.md", [
-        "verdict: accepted", "", "## Scope Reviewed", "Inspected the complete workspace diff.", "",
-        "## Implementation Review", "The requested file is present.", "", "## Checks", "- None", "",
-        "## Evidence", "- Read-only inspection passed", "", "## Findings", "- None", "",
-        "## Task State", "Verified.", "",
+        "```json", JSON.stringify({ verdict: "accepted", task_state_markdown: "Verified." }), "```", "",
+        "## Audit", "Inspected the complete workspace diff.", "",
+        "## Verification", "- Read-only inspection passed", "",
       ].join("\n"));
       return {
-        verdict: "accepted", scope_reviewed: "Inspected the complete workspace diff.",
-        implementation_review: "The requested file is present.", checks: [], evidence: [], findings: [],
-        task_state_markdown: "Verified.",
+        verdict: "accepted", task_state_markdown: "Verified.",
       };
     }],
   });

@@ -16,15 +16,12 @@ export const ROOT_METADATA_SECTION_HEADING = "## Metadata";
 export const ROOT_STATE_SECTION_HEADING = "### Root State";
 export const ROOT_RESULT_SECTION_HEADING = "## Result";
 export const ROOT_DELIVERY_SECTION_HEADING = "## Delivery";
-const LEGACY_ROOT_STATE_SECTION_HEADING = "## Root State";
-const LEGACY_ROOT_RECONCILE_SECTION_HEADING = "## Reconcile";
 const UPDATED_AT_PREFIX = "Updated at: ";
 
 export interface RootDescriptionProjection {
   readonly requirement: MarkdownText;
   readonly state?: RootState | undefined;
   readonly reconcile_report?: MarkdownText | undefined;
-  readonly updated_at?: string | undefined;
 }
 
 function malformed(): never {
@@ -54,19 +51,15 @@ function renderDelivery(state: RootState): string | undefined {
   return ["### Type", "Files", "", "### Location", delivery.workspace_path, "", "### Contents", ...delivery.files.map((file) => `- ${file}`)].join("\n");
 }
 
-function parseMetadata(body: string, structured: boolean): {
+function parseMetadata(body: string): {
   readonly state: RootState;
-  readonly updated_at: string;
   readonly remainder: string;
 } {
   const newline = body.indexOf("\n");
-  if (newline < 0) malformed();
-  const updatedAtLine = body.slice(0, newline);
-  if (!updatedAtLine.startsWith(UPDATED_AT_PREFIX)) malformed();
-  const updated_at = parseUpdatedAt(updatedAtLine.slice(UPDATED_AT_PREFIX.length));
-  const stateBody = body.slice(newline + 1).replace(/^\n/u, "");
-  const stateHeading = structured ? ROOT_STATE_SECTION_HEADING : LEGACY_ROOT_STATE_SECTION_HEADING;
-  const statePrefix = `${stateHeading}\n\n\`\`\`json\n`;
+  const stateBody = body.startsWith(UPDATED_AT_PREFIX)
+    ? (newline < 0 ? "" : body.slice(newline + 1).replace(/^\n/u, ""))
+    : body;
+  const statePrefix = `${ROOT_STATE_SECTION_HEADING}\n\n\`\`\`json\n`;
   if (!stateBody.startsWith(statePrefix)) malformed();
   const closingFence = stateBody.indexOf("\n```", statePrefix.length);
   if (closingFence < 0) malformed();
@@ -79,52 +72,24 @@ function parseMetadata(body: string, structured: boolean): {
     return malformed();
   }
   if (JSON.stringify(state, null, 2) !== json) malformed();
-  return { state, updated_at, remainder: stateBody.slice(closingFence + "\n```".length) };
-}
-
-function parseLegacyManagedBody(lines: readonly string[]): {
-  readonly state: RootState;
-  readonly reconcile_report?: MarkdownText | undefined;
-  readonly updated_at: string;
-} {
-  const rawBody = lines.join("\n").replace(/^\n/u, "").replace(/\n$/u, "");
-  const metadataPrefix = `${ROOT_METADATA_SECTION_HEADING}\n\n`;
-  const structured = rawBody.startsWith(metadataPrefix);
-  const body = structured ? rawBody.slice(metadataPrefix.length) : rawBody;
-  const parsed = parseMetadata(body, structured);
-  const { state, updated_at } = parsed;
-  let { remainder } = parsed;
-  const delivery = renderDelivery(state);
-  if (delivery !== undefined) {
-    const deliveryBlock = `\n\n${ROOT_DELIVERY_SECTION_HEADING}\n\n${delivery}`;
-    if (!remainder.startsWith(deliveryBlock)) malformed();
-    remainder = remainder.slice(deliveryBlock.length);
-  }
-  if (remainder.length === 0) return { state, updated_at };
-  const reportHeading = structured ? ROOT_RESULT_SECTION_HEADING : LEGACY_ROOT_RECONCILE_SECTION_HEADING;
-  const reportPrefix = `\n\n${reportHeading}\n\n`;
-  if (!remainder.startsWith(reportPrefix)) malformed();
-  const report = remainder.slice(reportPrefix.length);
-  if (report.length === 0) malformed();
-  const parsedReport = parseRootReconcileReportMarkdown(report, reconcileKind(report));
-  return { state, reconcile_report: parsedReport, updated_at };
+  return { state, remainder: stateBody.slice(closingFence + "\n```".length) };
 }
 
 function parseManagedBody(lines: readonly string[]): {
   readonly state: RootState;
   readonly reconcile_report?: MarkdownText | undefined;
-  readonly updated_at: string;
 } {
   const rawBody = lines.join("\n").replace(/^\n/u, "").replace(/\n$/u, "");
-  if (rawBody.startsWith(`${ROOT_METADATA_SECTION_HEADING}\n\n`) || rawBody.startsWith(UPDATED_AT_PREFIX)) {
-    return parseLegacyManagedBody(lines);
-  }
+  const metadataPrefix = `${ROOT_METADATA_SECTION_HEADING}\n\n`;
   const metadataMarker = `\n\n${ROOT_METADATA_SECTION_HEADING}\n\n`;
   const metadataIndex = rawBody.lastIndexOf(metadataMarker);
-  if (metadataIndex < 0) malformed();
-  const prefix = rawBody.slice(0, metadataIndex);
-  const metadata = rawBody.slice(metadataIndex + metadataMarker.length);
-  const parsedMetadata = parseMetadata(metadata, true);
+  const metadataStartsBody = rawBody.startsWith(metadataPrefix);
+  if (!metadataStartsBody && metadataIndex < 0) malformed();
+  const prefix = metadataStartsBody ? "" : rawBody.slice(0, metadataIndex);
+  const metadata = metadataStartsBody
+    ? rawBody.slice(metadataPrefix.length)
+    : rawBody.slice(metadataIndex + metadataMarker.length);
+  const parsedMetadata = parseMetadata(metadata);
   if (parsedMetadata.remainder.length > 0) malformed();
   let remainder = prefix;
   let reconcile_report: MarkdownText | undefined;
@@ -149,7 +114,6 @@ function parseManagedBody(lines: readonly string[]): {
   if (remainder.length > 0) malformed();
   return {
     state: parsedMetadata.state,
-    updated_at: parsedMetadata.updated_at,
     ...(reconcile_report === undefined ? {} : { reconcile_report }),
   };
 }
@@ -189,7 +153,6 @@ export function parseRootDescription(value: unknown): RootDescriptionProjection 
   return Object.freeze({
     requirement,
     state: managed.state,
-    updated_at: managed.updated_at,
     ...(managed.reconcile_report === undefined ? {} : { reconcile_report: managed.reconcile_report }),
   });
 }

@@ -65,7 +65,7 @@ listing exposes only the fields required for mechanical cancellation.
 content editor. It accepts only one of these owned writes: replace the suffix
 between `# Symphony Harness: Managed Root` and
 `# Symphony Harness: End Managed Root`, or append one terminal
-Artist/Critic report plus one human-readable local `Updated at:
+Artist/Critic report plus one presentation-only human-readable local `Updated at:
 <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line to the matching role description. It
 must preserve all frozen bytes outside the owned region and is never used for
 Cycle descriptions.
@@ -120,8 +120,8 @@ state machine. Because both canonical active states have provider type
 | activate family | after all IDs are persisted, set Cycle and Root to `In Progress` before Artist starts |
 | start Artist | set Artist to `In Progress` before launching the process |
 | start Critic | set Cycle to `In Review` and Critic to `In Review` before launching the process |
-| append results | append each exact role Markdown once to its own Issue description; write append-only Cycle history/mechanical fields and one JSON outcome; errors show the current message's first 50 characters |
-| attach results | serialize the parsed Critique as `cycle-NNN-critique-result.json`, re-read and validate it, then upload that exact file as `application/json`; record its returned URL or current upload error |
+| append results | append each exact role Markdown once to its own Issue description; write exactly one Cycle creation rationale and one terminal result; errors show the current message's first 50 characters |
+| attach results | serialize the Critique artifact once as `cycle-NNN-critique-result.json`, write and upload the same bytes as `application/json`; record its returned URL or current upload error |
 | finish role or Cycle | append its bounded result, then set Artist, Critic, or Cycle to canonical `Done` |
 | project Root decision | active Cycle -> `In Progress`; `complete`, `needs_human`, or escaped runtime failure -> `In Review`; recorded PR or pushed branch delivery -> `Done` |
 | project Root Reconcile result | place report and Delivery before Metadata; copy `create_cycle` once to Cycle; project trusted result facts; never feed it to Inbox |
@@ -134,7 +134,7 @@ role report to their frozen context. Their frozen titles are
 `[Critic] Cycle NNN` so each role is visibly aligned with its business Cycle.
 Issue status transitions are explicit Linear mutations and are not replaced by
 comments or Root State. Artist/Critic Markdown is what operators see in their
-terminal Issue descriptions; Cycle history/result comments show lifecycle and
+terminal Issue descriptions; the two Cycle comments show creation and terminal
 upload facts; the typed Critique JSON is the only Cycle resource and is the file
 used for progression. The Cycle Result links that resource or exposes its
 current upload error. No second summarizer is inserted. An upload failure is
@@ -151,12 +151,12 @@ Root State is the durable runtime checkpoint and contains only:
 
 - Root workspace path, external run directory, and branch;
 - current phase or `NeedsHuman` reason;
-- current task state and one pending finding;
-- complete `latest_critique` from the newest terminal Critic;
+- current trusted task state;
+- compact `latest_critique` checkpoint from the newest terminal Critic;
 - at most one current Harness warning;
 - Root comment cursor;
 - exact accumulated process token usage when known;
-- final PR URL when created, otherwise the successfully pushed delivery branch.
+- optional structured Delivery.
 
 If Root State is missing for a new Root, initialize it. If it is duplicated or
 malformed, stop as `NeedsHuman`; do not reconstruct it from descendants. If the
@@ -169,7 +169,7 @@ saved workspace is missing, stop rather than creating a conflicting workspace.
 | comment is after saved cursor and lacks Harness marker | new Reconcile input |
 | comment carries Harness marker | operational output, never model input |
 | comment belongs to descendant | display-only, never fetched for Reconcile |
-| Cycle history/result comment | append-only lifecycle and mechanical upload record; never model input |
+| Cycle creation/result comment | exactly two append-only operator records; never model input |
 | selected new comment | cursor remains unchanged until complete Cycle family is recorded |
 | completion decision | perform one final after-cursor read before persisting Root Reconcile Delivery |
 
@@ -183,5 +183,34 @@ saved workspace is missing, stop rather than creating a conflicting workspace.
 | Root already `Done` | after the team workflow-contract check, no Root, descendant, comment, workspace, or Agent mutation |
 | manual edit to frozen child description | v1 does not detect or repair it |
 
-`LINEAR_API_KEY` is read only by the production GraphQL factory. It never enters
-Agent requests, browser responses, logs, fixtures, errors, or final reports.
+## Credential boundary
+
+Symphony acts in Linear only as one built-in application bot, never as a
+personal account and never as an operator-supplied application. The Linear
+OAuth2 application is created once by the Symphony team; its public
+`client_id` is build-time configuration injected into Desktop, and no client
+secret exists anywhere in the product. Authorization is the authorization-code
+flow with PKCE and `actor=app`, scoped to `read`, `write`, `app:assignable`,
+and `app:mentionable`, so every Symphony write is authored by the application.
+Desktop holds one Linear connection per instance; its own candidate polling
+and every Conductor it launches use the same current token.
+
+| Rule | Required behavior | Forbidden behavior |
+|---|---|---|
+| `TM-CRED-001` | use exactly one built-in Linear application whose public `client_id` is injected at build time | operator-supplied applications, custom accounts, or an embedded client secret |
+| `TM-CRED-002` | authorize with the system browser, PKCE, a loopback redirect, and `actor=app` with the fixed scope set | embedded login views, personal API keys, or user-actor writes |
+| `TM-CRED-003` | store OAuth tokens only in one private credentials file (0600) under the Desktop app-data directory | tokens in `state.json`, bindings, logs, diagnostics, IPC payloads, or Linear data |
+| `TM-CRED-004` | refresh the access token inside Desktop on expiry, replaying within the provider grace window on network failure | refresh capability outside Desktop, or silent indefinite retries |
+| `TM-CRED-005` | inject the current access token into each Conductor as `LINEAR_API_KEY` at launch | refresh tokens or credentials-file access in child processes |
+| `TM-CRED-006` | validate on connect by reading the organization and show that real state in Settings | marking the connection healthy from stored values alone |
+| `TM-CRED-007` | treat lost local credentials as a fresh connect; the Linear-side grant persists and re-authorization mints new tokens | repair protocols, token recovery, or Linear-side cleanup after local data loss |
+
+No credential ever enters Agent requests, browser responses, logs, fixtures,
+errors, or final reports. The credentials file follows the same-user threat
+model of local CLI tools: private permissions are the whole defense, and
+rotating the grant in Linear invalidates it. An access token covers one day;
+a Conductor run that outlives it fails visibly and relaunches with a fresh
+token. When the connection is missing or rejected, Desktop surfaces a
+connect-or-reconnect action instead of a restart-only dead end. A manual Conductor launch supplies
+an app-actor token for the same built-in application; personal API keys are
+rejected.

@@ -49,6 +49,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       repositoryPath: "~/Code/acme/symphony",
       baseBranch: "main",
       concurrency: 2,
+      completedWorkspaceRetention: 3,
       reconcile_model: "gpt-5",
       reconcile_reasoning_effort: "medium",
       artist_reasoning_effort: "high",
@@ -65,61 +66,43 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
   ];
   const overview: DesktopOverviewView = {
     bindings,
-    slots: [
+    roots: [
       {
-        slotId: "slot-1",
+        rootId: "root-101",
         bindingId: "project-symphony",
-        root: {
-          rootId: "root-101",
-          identifier: "SYM-101",
-          title: "Persist trusted cycle state",
-          priority: 2,
-          workspaceSummary: "~/Work/SYM-101",
-          runDirectorySummary: "<run>/SYM-101",
-        },
-        processState: "running",
-        recentEvent: "Critic completed",
+        identifier: "SYM-101",
+        title: "Persist trusted cycle state",
+        priority: 2,
+        status: "running",
+        latestEvent: "Critic completed",
         observedAt,
+        actions: unavailableActions(),
       },
       {
-        slotId: "slot-2",
+        rootId: "root-102",
         bindingId: "project-symphony",
-        root: {
-          rootId: "root-102",
-          identifier: "SYM-102",
-          title: "Refresh project routing",
-          priority: 3,
-          workspaceSummary: "~/Work/SYM-102",
-          runDirectorySummary: "<run>/SYM-102",
-        },
-        processState: "queued",
-        recentEvent: "Waiting for an available slot",
+        identifier: "SYM-102",
+        title: "Refresh project routing",
+        priority: 3,
+        status: "waiting",
+        latestEvent: "Waiting for capacity",
+        queuePosition: 1,
         observedAt,
+        actions: unavailableActions(),
       },
       {
-        slotId: "slot-3",
+        rootId: "root-201",
         bindingId: "project-console",
-        root: {
-          rootId: "root-201",
-          identifier: "OPS-201",
-          title: "Tighten operator shortcuts",
-          priority: 1,
-          workspaceSummary: "~/Work/OPS-201",
-          runDirectorySummary: "<run>/OPS-201",
-        },
-        processState: "starting",
-        recentEvent: "Conductor launch requested",
+        identifier: "OPS-201",
+        title: "Tighten operator shortcuts",
+        priority: 1,
+        status: "needs_attention",
+        latestEvent: "Conductor launch failed",
         observedAt,
-      },
-      {
-        slotId: "slot-4",
-        bindingId: "project-console",
-        root: null,
-        processState: "terminal",
-        recentEvent: "Slot is available",
-        observedAt,
+        actions: unavailableActions(),
       },
     ],
+    linear: { status: "connected", organization: "Demo workspace" },
     observedAt,
   };
   return {
@@ -141,10 +124,28 @@ export class MemoryDesktopHost implements DesktopHost {
   }
 
   async execute(command: DesktopCommand): Promise<DesktopCommandResult> {
+    if (command.kind === "list_linear_projects") {
+      const state = this.state;
+      if (state.kind !== "ready" || state.overview.linear.status !== "connected") {
+        return { kind: "rejected", sanitizedReason: "linear_not_connected" };
+      }
+      return {
+        kind: "projects",
+        projects: [
+          ...state.overview.bindings.map((binding) => ({ id: binding.projectId, name: binding.projectId })),
+          { id: "project-new", name: "Unbound demo project" },
+        ],
+      };
+    }
     const result = applyCommand(this.state, command);
     if (result.kind === "rejected") return result;
     this.state = result.state;
     return { kind: "confirmed" };
+  }
+
+  /** Demo stand-in for the native picker so browser dev shows the full UI. */
+  async pickDirectory(): Promise<string | null> {
+    return "~/Code/acme/picked";
   }
 }
 
@@ -167,7 +168,12 @@ export function DesktopRuntime() {
     [host, refresh],
   );
 
-  return <App initialState={state} onCommand={onCommand} />;
+  const onPickDirectory = useMemo(
+    () => (host.pickDirectory ? () => host.pickDirectory!() : undefined),
+    [host],
+  );
+
+  return <App initialState={state} onCommand={onCommand} onPickDirectory={onPickDirectory} />;
 }
 
 function isTauri(): boolean {
@@ -213,7 +219,7 @@ function applyCommand(state: DesktopState, command: DesktopCommand): AppliedComm
       return { kind: "rejected", sanitizedReason: "That binding no longer exists." };
     }
     next.overview.bindings = next.overview.bindings.filter((entry) => entry.id !== command.bindingId);
-    next.overview.slots = next.overview.slots.filter((entry) => entry.bindingId !== command.bindingId);
+    next.overview.roots = next.overview.roots.filter((entry) => entry.bindingId !== command.bindingId);
     next.overview.observedAt = observedAt;
     return { kind: "confirmed", state: next };
   }
@@ -222,22 +228,29 @@ function applyCommand(state: DesktopState, command: DesktopCommand): AppliedComm
     if (!next.overview.bindings.some((entry) => entry.id === command.bindingId)) {
       return { kind: "rejected", sanitizedReason: "That binding no longer exists." };
     }
-    const starting = command.kind === "start_binding";
-    next.overview.slots = next.overview.slots.map((slot) =>
-      slot.bindingId === command.bindingId
-        ? {
-            ...slot,
-            processState: starting ? "running" : "terminal",
-            recentEvent: starting ? "Binding started" : "Binding stopped",
-            observedAt,
-          }
-        : slot,
-    );
     next.overview.observedAt = observedAt;
     return { kind: "confirmed", state: next };
   }
 
-  return { kind: "rejected", sanitizedReason: "Unsupported Desktop command." };
+  if (command.kind === "connect_linear" || command.kind === "disconnect_linear") {
+    return { kind: "rejected", sanitizedReason: "linear_auth_native_only" };
+  }
+
+  if (!("rootId" in command)) {
+    return { kind: "rejected", sanitizedReason: "Unsupported Desktop command." };
+  }
+
+  const root = next.overview.roots.find((entry) => entry.rootId === command.rootId);
+  const action = root?.actions.find((entry) => entry.kind === command.kind);
+  return {
+    kind: "rejected",
+    sanitizedReason: action?.reason ?? `root_${command.kind}_unavailable`,
+  };
+}
+
+function unavailableActions() {
+  return (["open_linear", "open_workspace", "open_delivery", "open_diagnostics", "cleanup_workspace"] as const)
+    .map((kind) => ({ kind, available: false, reason: `root_${kind}_unavailable` }));
 }
 
 function normalizeBinding(input: ProjectBindingDraftView | ProjectBindingView, fallbackId: string): ProjectBindingView {
@@ -248,6 +261,7 @@ function normalizeBinding(input: ProjectBindingDraftView | ProjectBindingView, f
     repositoryPath: input.repositoryPath.trim(),
     baseBranch: input.baseBranch.trim(),
     concurrency: Number(input.concurrency),
+    completedWorkspaceRetention: input.completedWorkspaceRetention ?? null,
     reconcile_agent: "codex",
     reconcile_model: cleanOptional(input.reconcile_model),
     reconcile_reasoning_effort: cleanOptional(input.reconcile_reasoning_effort),
@@ -269,5 +283,9 @@ function validateBinding(value: ProjectBindingView): string | undefined {
   if (!value.projectId || !value.routingLabel) return "Project ID and routing label are required.";
   if (!value.repositoryPath || !value.baseBranch) return "Repository path and base branch are required.";
   if (!Number.isInteger(value.concurrency) || value.concurrency < 1) return "Concurrency must be a positive whole number.";
+  if (value.completedWorkspaceRetention !== null && value.completedWorkspaceRetention !== undefined
+    && (!Number.isInteger(value.completedWorkspaceRetention) || value.completedWorkspaceRetention < 1)) {
+    return "Completed workspace retention must be a positive whole number.";
+  }
   return undefined;
 }

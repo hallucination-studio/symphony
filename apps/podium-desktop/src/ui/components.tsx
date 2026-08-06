@@ -1,7 +1,7 @@
-import type { ReactNode, RefObject } from "react";
+import { useEffect, useState, type ReactNode, type RefObject } from "react";
 
 import { formatObservedAt, labelFromIdentifier } from "./format";
-import type { ConductorProcessState, Page } from "./types";
+import type { CommandHandler, Page, ProjectBindingView, RootActionKind, RootStatus, RootView } from "./types";
 
 function NavIcon({ page }: { page: Page }) {
   const common = {
@@ -119,13 +119,11 @@ export function StatusBadge({
   );
 }
 
-export function ProcessStateBadge({ state }: { state: ConductorProcessState }) {
-  const safeState: ConductorProcessState =
-    state === "queued" || state === "starting" || state === "running" || state === "stopping" || state === "terminal"
-      ? state
-      : "terminal";
-  const tone = safeState === "running" ? "positive" : safeState === "starting" || safeState === "queued" ? "warning" : "neutral";
-  return <StatusBadge label={labelFromIdentifier(safeState)} tone={tone} />;
+export function RootStatusBadge({ status }: { status: RootStatus }) {
+  const tone = status === "running" || status === "completed"
+    ? "positive"
+    : status === "needs_attention" ? "negative" : "neutral";
+  return <StatusBadge label={labelFromIdentifier(status)} tone={tone} />;
 }
 
 export function EmptyState({
@@ -148,6 +146,219 @@ export function EmptyState({
 
 export function StaleNote({ observedAt }: { observedAt: string }) {
   return <p className="stale-note">Last confirmed {formatObservedAt(observedAt)}</p>;
+}
+
+/** Inline command feedback; color is always paired with an icon and text. */
+export function Notice({ tone, children }: { tone: "negative" | "positive"; children: ReactNode }) {
+  return (
+    <p className="notice" data-tone={tone} role={tone === "negative" ? "alert" : "status"}>
+      {tone === "negative" ? (
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
+          <circle cx="8" cy="8" r="6.25" />
+          <path d="M8 4.75v3.5M8 10.75h.01" />
+        </svg>
+      ) : (
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" className="notice-check">
+          <circle cx="8" cy="8" r="6.25" />
+          <path d="M5.25 8.25l1.75 1.75 3.75-3.75" />
+        </svg>
+      )}
+      {children}
+    </p>
+  );
+}
+
+/** Modal surface for editors and confirmations (macOS alert conventions). */
+export function Dialog({
+  labelId,
+  onClose,
+  children,
+}: {
+  labelId: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+  return (
+    <div
+      className="dialog-backdrop"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby={labelId}>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+export function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  pending,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  pending?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Dialog labelId="confirm-dialog-title" onClose={onCancel}>
+      <h2 id="confirm-dialog-title">{title}</h2>
+      <p className="quiet">{body}</p>
+      <div className="button-row">
+        <button className="button" type="button" disabled={pending} onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          className="button destructive"
+          type="button"
+          disabled={pending}
+          aria-busy={pending}
+          autoFocus
+          onClick={onConfirm}
+        >
+          {pending && <span className="button-spinner" aria-hidden="true" />}
+          {confirmLabel}
+        </button>
+      </div>
+    </Dialog>
+  );
+}
+
+/** Shared Project Binding row so Overview, Conductors, and Settings cannot drift. */
+export function BindingRow({
+  binding,
+  trailing,
+}: {
+  binding: ProjectBindingView;
+  trailing?: ReactNode | undefined;
+}) {
+  return (
+    <li>
+      <div className="row-body">
+        <strong>{binding.projectId}</strong>
+        <span className="row-meta">
+          {binding.routingLabel} · {summarizePath(binding.repositoryPath)} · {binding.baseBranch} · Capacity {binding.concurrency}
+        </span>
+      </div>
+      {trailing}
+    </li>
+  );
+}
+
+/** Shared Root row for the operator-facing status surface. */
+export function RootRow({
+  root,
+  bindingLabel,
+  trailing,
+  onCommand,
+}: {
+  root: RootView;
+  bindingLabel?: string | undefined;
+  trailing?: ReactNode | undefined;
+  onCommand: CommandHandler;
+}) {
+  return (
+    <li>
+      <div className="row-body">
+        <strong>{root.identifier} · {root.title}</strong>
+        <span className="row-meta">
+          {bindingLabel ?? "Binding unavailable"} · Priority {root.priority}
+          {root.queuePosition === null || root.queuePosition === undefined ? "" : ` · Queue ${root.queuePosition}`}
+        </span>
+        {root.latestEvent && <span className="row-meta">{root.latestEvent}</span>}
+        <StaleNote observedAt={root.observedAt} />
+      </div>
+      <div className="root-row-trailing">
+        {trailing}
+        <RootActions root={root} onCommand={onCommand} />
+      </div>
+    </li>
+  );
+}
+
+const rootActionLabels: Record<RootActionKind, string> = {
+  open_linear: "Open Linear",
+  open_workspace: "Open workspace",
+  open_delivery: "Open delivery",
+  open_diagnostics: "Open diagnostics",
+  cleanup_workspace: "Clean up workspace",
+};
+
+export function RootActions({ root, onCommand }: { root: RootView; onCommand: CommandHandler }) {
+  const available = root.actions.filter((action) => action.available);
+  const [pending, setPending] = useState<RootActionKind>();
+  const [cleanupRequested, setCleanupRequested] = useState(false);
+  const [error, setError] = useState<string>();
+
+  if (available.length === 0) return null;
+
+  const run = async (kind: RootActionKind) => {
+    if (pending) return;
+    setPending(kind);
+    setError(undefined);
+    try {
+      const result = await onCommand({ kind, rootId: root.rootId });
+      if (result.kind === "rejected") setError(result.sanitizedReason);
+    } catch {
+      setError("The local Desktop action could not be completed.");
+    } finally {
+      setPending(undefined);
+    }
+  };
+
+  return (
+    <>
+      <div className="root-actions" aria-label={`Actions for ${root.identifier}`}>
+        {available.map(({ kind }) => (
+          <button
+            className={`button compact${kind === "cleanup_workspace" ? " destructive" : ""}`}
+            key={kind}
+            type="button"
+            disabled={pending !== undefined}
+            aria-busy={pending === kind}
+            onClick={() => {
+              if (kind === "cleanup_workspace") {
+                setCleanupRequested(true);
+                return;
+              }
+              void run(kind);
+            }}
+          >
+            {pending === kind && <span className="button-spinner" aria-hidden="true" />}
+            {rootActionLabels[kind]}
+          </button>
+        ))}
+      </div>
+      {error && <span className="root-action-error" role="alert">{error}</span>}
+      {cleanupRequested && (
+        <ConfirmDialog
+          title="Clean up this Root workspace?"
+          body="This removes the completed Root worktree. Local diagnostics remain available."
+          confirmLabel="Clean up workspace"
+          pending={pending === "cleanup_workspace"}
+          onCancel={() => setCleanupRequested(false)}
+          onConfirm={() => {
+            setCleanupRequested(false);
+            void run("cleanup_workspace");
+          }}
+        />
+      )}
+    </>
+  );
 }
 
 /** Keep local paths useful without exposing a host-specific absolute path. */

@@ -1,19 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import type { Performer } from "../performer/api/Performer.js";
 import type { PerformerLaunchRequest } from "../contracts/performer.js";
 import { parseRootReconcileRequest } from "../contracts/root.js";
 import { RootReconciler } from "./RootReconciler.js";
 
+const execute = promisify(execFile);
+
 async function fixture() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-reconcile-"));
   const workspace = path.join(directory, "workspace-secret-path");
   const runDirectory = path.join(directory, "run-secret-path");
   await Promise.all([mkdir(workspace), mkdir(runDirectory)]);
+  await execute("git", ["-C", workspace, "init", "-b", "main"]);
   const request = parseRootReconcileRequest({
     phase: "reconcile",
     root: {
@@ -25,7 +30,12 @@ async function fixture() {
     root_state: {
       workspace_path: workspace, run_directory: runDirectory, root_branch: "root/ENG-1",
       current_phase: "idle", task_state_markdown: "The lexer is complete.",
-      pending_finding: "Parser accepts an ambiguous token.", comment_cursor: "comment-0",
+      latest_critique: {
+        verdict: "incomplete", task_state_markdown: "The lexer is complete.",
+        pending_finding: "Parser accepts an ambiguous token.",
+        artifact_url: "https://linear.invalid/upload/critique.json",
+      },
+      comment_cursor: "comment-0",
     },
     new_root_comments: [
       { id: "comment-1", issue_id: "root-id", body: "Preserve error locations.", creator_id: "user-id", created_at: "2026-08-05T01:00:00Z" },
@@ -57,10 +67,11 @@ function performerWith(response: string, requests: PerformerLaunchRequest[]): Pe
   };
 }
 
-function createReconciler(performer: Performer, runDirectory: string) {
+function createReconciler(performer: Performer, runDirectory: string, invocationCwd?: string) {
   return new RootReconciler({
     performer, runDirectory, reconcileAgent: "codex", reconcileModel: "gpt-5.6-luna",
     reconcileReasoningEffort: "max", timeoutMs: 1_000,
+    ...(invocationCwd === undefined ? {} : { invocationCwd }),
   });
 }
 
@@ -84,41 +95,30 @@ const humanReport = [
   "### Next Step", "Wait for an explicit Root comment.",
 ].join("\n");
 
-test("Prepare delegates the exact preferred worktree binding to Root Reconcile", async () => {
+test("Prepare adopts the exact preferred Git root without launching an Agent", async () => {
   const world = await fixture();
-  const preferred = path.join(path.dirname(world.workspace), "preferred-root");
   const launches: PerformerLaunchRequest[] = [];
-  const reconciler = createReconciler(performerWith([
-    "decision: prepared", "", "## Workspace",
-    JSON.stringify({ workspace_path: preferred, run_directory: world.runDirectory, root_branch: "root/ENG-1" }),
-    "", "## Report", "### Summary", "Created the preferred Root worktree.", "", "### Evidence", "The branch is attached.",
-  ].join("\n"), launches), world.runDirectory);
+  const reconciler = createReconciler(performerWith("unused", launches), world.runDirectory, world.workspace);
 
-  const workspace = await reconciler.prepare(world.request.root, preferred);
-  assert.deepEqual(workspace, { workspace_path: preferred, run_directory: world.runDirectory, root_branch: "root/ENG-1" });
-  assert.equal(launches[0]?.sandbox, "danger_full_access");
-  assert.equal(launches[0]?.working_directory, process.cwd());
-  assert.deepEqual(launches[0]?.additional_writable_directories, [path.dirname(preferred)]);
-  assert.match(launches[0]?.prompt ?? "", /Prepare phase/u);
-  assert.equal(launches[0]?.prompt.includes(preferred), true);
+  assert.deepEqual(await reconciler.prepare(world.request.root, world.workspace), {
+    workspace_path: await realpath(world.workspace),
+    run_directory: await realpath(world.runDirectory),
+    root_branch: "main",
+  });
+  assert.deepEqual(launches, []);
 });
 
-test("Prepare without a preferred path lets Root Reconcile create a sibling worktree", async () => {
+test("Prepare without a preferred path adopts the invocation checkout without launching an Agent", async () => {
   const world = await fixture();
-  const prepared = path.join(path.dirname(process.cwd()), "symphony-root-eng-1");
   const launches: PerformerLaunchRequest[] = [];
-  const reconciler = createReconciler(performerWith([
-    "decision: prepared", "", "## Workspace",
-    JSON.stringify({ workspace_path: prepared, run_directory: world.runDirectory, root_branch: "root/ENG-1" }),
-    "", "## Report", "### Summary", "Created a dedicated Root worktree.", "", "### Evidence", "The Root branch is attached.",
-  ].join("\n"), launches), world.runDirectory);
+  const reconciler = createReconciler(performerWith("unused", launches), world.runDirectory, world.workspace);
 
   assert.deepEqual(await reconciler.prepare(world.request.root), {
-    workspace_path: prepared, run_directory: world.runDirectory, root_branch: "root/ENG-1",
+    workspace_path: await realpath(world.workspace),
+    run_directory: await realpath(world.runDirectory),
+    root_branch: "main",
   });
-  assert.deepEqual(launches[0]?.additional_writable_directories, [path.dirname(process.cwd())]);
-  assert.match(launches[0]?.prompt ?? "", /First try to create a dedicated Root worktree/u);
-  assert.match(launches[0]?.prompt ?? "", /Only if worktree creation is unavailable/u);
+  assert.deepEqual(launches, []);
 });
 
 test("returns one Cycle draft from Root-owned inputs without exposing workspace paths", async () => {
@@ -154,18 +154,19 @@ test("returns one Cycle draft from Root-owned inputs without exposing workspace 
   assert.equal(launches[0]?.prompt.includes("decision: needs_human\n\n## Reason"), true);
 });
 
-test("includes the complete latest Critic in the prompt without child DAG content", async () => {
+test("includes only the compact latest Critic checkpoint without child DAG content", async () => {
   const audits = [
     {
       verdict: "accepted",
-      scope_reviewed: "Parser behavior and focused tests.",
-      implementation_review: "Parser behavior is verified.",
-      checks: ["npm test"],
-      evidence: ["Focused test passed."],
-      findings: [],
       task_state_markdown: "Parser behavior is trusted.",
+      pending_finding: "Keep the parser boundary explicit.",
+      artifact_url: "https://linear.invalid/upload/critique-accepted.json",
     },
-    { verdict: "process_error", reason: "critic_start_failed" },
+    {
+      verdict: "process_error",
+      reason: "critic_start_failed",
+      artifact_url: "https://linear.invalid/upload/critique-error.json",
+    },
   ] as const;
 
   for (const latest_critique of audits) {
@@ -186,6 +187,11 @@ test("includes the complete latest Critic in the prompt without child DAG conten
     await reconciler.reconcile(request);
     const prompt = launches[0]?.prompt ?? "";
     assert.equal(prompt.includes(`<<< BEGIN LATEST_CRITIC >>>\n${JSON.stringify(latest_critique, null, 2)}`), true);
+    assert.equal(prompt.includes("scope_reviewed"), false);
+    assert.equal(prompt.includes("implementation_review"), false);
+    assert.equal(prompt.includes('"checks"'), false);
+    assert.equal(prompt.includes('"evidence"'), false);
+    assert.equal(prompt.includes('"findings"'), false);
     assert.equal(prompt.includes("Cycle DAG"), false);
     assert.equal(prompt.includes("## Artist"), false);
     assert.equal(prompt.includes("cycle-child-secret"), false);
@@ -215,6 +221,14 @@ test("parses completion and human decisions without a repair turn", async () => 
     kind: "needs_human", reason: "The requested API boundary is ambiguous.", question: "Which caller owns it?", report: humanReport,
   });
   assert.equal(humanLaunches.length, 1);
+
+  const unknownSection = createReconciler(performerWith(
+    `decision: needs_human\n\n## Reason\nThe boundary is ambiguous.\n\n## Bogus\nIgnored content.\n\n## Report\n${humanReport}\n`,
+    [],
+  ), world.runDirectory);
+  const rejected = (await unknownSection.reconcile(world.request)).decision;
+  assert.equal(rejected.kind, "needs_human");
+  assert.equal(rejected.kind === "needs_human" && rejected.reason, "invalid_root_reconcile_response");
 });
 
 test("omits model and reasoning so Root Reconcile can use local Codex defaults", async () => {
@@ -250,6 +264,16 @@ test("publishes the current process message without a phase prefix or cause trav
   assert.equal(failedOutcome.decision.kind === "needs_human" && failedOutcome.decision.reason, directMessage.slice(0, 50));
   assert.equal(failedOutcome.process?.launch_status, "start_failed");
 
+  const credentialShaped = createReconciler({
+    launch: async () => ({
+      launch_status: "start_failed", duration_ms: 1,
+      sanitized_reason: "api_key=secret-value-that-must-not-escape",
+    }),
+  }, world.runDirectory);
+  const credentialDecision = (await credentialShaped.reconcile(world.request)).decision;
+  assert.equal(credentialDecision.kind, "needs_human");
+  assert.equal(credentialDecision.kind === "needs_human" && credentialDecision.reason, "Process failed");
+
   const thrownMessage = "native reconciliation failure that is longer than fifty characters";
   const thrown = createReconciler({
     launch: async () => {
@@ -265,6 +289,24 @@ test("publishes the current process message without a phase prefix or cause trav
   const malformedDecision = (await malformed.reconcile(world.request)).decision;
   assert.equal(malformedDecision.kind, "needs_human");
   assert.equal(malformedDecision.kind === "needs_human" && malformedDecision.reason, "invalid_root_reconcile_response");
+
+  const invalidUtf8 = createReconciler({
+    async launch(request) {
+      await writeFile(request.final_response_path as string, Buffer.from([0xff]));
+      return {
+        launch_status: "exited", exit_code: 0, duration_ms: 1,
+        final_response_ref: request.final_response_path,
+        diagnostic_jsonl_ref: request.diagnostic_jsonl_path,
+        diagnostic_stderr_ref: request.diagnostic_stderr_path,
+      };
+    },
+  }, world.runDirectory);
+  const invalidUtf8Decision = (await invalidUtf8.reconcile(world.request)).decision;
+  assert.equal(invalidUtf8Decision.kind, "needs_human");
+  assert.equal(
+    invalidUtf8Decision.kind === "needs_human" && invalidUtf8Decision.reason,
+    "invalid_root_reconcile_response",
+  );
 
   const missingDiagnostics = createReconciler({
     launch: async (request) => {

@@ -52,6 +52,7 @@
   --letter-spacing-caps: 0.04em;
 
   /* Spacing scale */
+  --space-hairline: 2px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -68,6 +69,15 @@
   --size-status-dot: 8px;
   --size-titlebar: 52px;
   --size-control-height: 28px;
+  --size-control-compact: 22px;
+  --size-control-quiet: 24px;
+  --size-row-min: 32px;
+  --size-icon-nav: 16px;
+  --size-brand-mark: 20px;
+  --size-checkbox: 14px;
+  --size-spinner: 11px;
+  --size-focus-halo: 3.5px;
+  --size-dialog-max: 480px;
   --size-sidebar: 232px;
   --size-content-column: 840px;
 

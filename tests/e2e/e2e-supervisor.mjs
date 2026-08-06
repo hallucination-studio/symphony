@@ -15,6 +15,7 @@ const DEFAULT_TEST_FILES = Object.freeze([
   path.join(REPOSITORY_ROOT, "tests/e2e/golden-runner.test.mjs"),
 ]);
 export const MAX_E2E_DURATION_MS = 4 * 60_000 + 30_000;
+const GOLDEN_COVERED_BOUNDARIES = new Set(["linear", "codex", "git", "pr"]);
 
 function inheritedEnvironment(environment) {
   return Object.fromEntries([
@@ -61,6 +62,13 @@ function validPath(value) {
 
 function timeoutResult() {
   return Object.freeze({ code: 124, signal: null, reason: "e2e_timeout" });
+}
+
+function suppressCoveredBlockedBoundary(result, goldenResult, diagnosticsRequested) {
+  return goldenResult.status === "passed"
+    && !diagnosticsRequested
+    && result.status === "blocked"
+    && GOLDEN_COVERED_BOUNDARIES.has(result.boundary);
 }
 
 async function runWithDeadline(operation, timeoutMs) {
@@ -153,16 +161,20 @@ export async function runSupervisor({
   if (goldenRun.timedOut) return timeoutResult();
   if (goldenRun.error !== undefined) throw goldenRun.error;
   const goldenResult = goldenRun.value;
+  const diagnosticsRequested = configuration.environment.SYMPHONY_RUN_REAL_BOUNDARIES === "1";
+  const publishedIndividualResults = individualResults.filter((result) => !suppressCoveredBlockedBoundary(
+    result,
+    goldenResult,
+    diagnosticsRequested,
+  ));
   const boundaryResults = Object.freeze([
-    ...individualResults,
+    ...publishedIndividualResults,
     goldenResult,
   ]);
   const boundaryFailed = boundaryResults.some((result) => result.status === "failed");
   const blockedResults = [
     ...(configuration.envBlocked === undefined ? [] : [configuration.envBlocked]),
-    ...individualResults.filter((result) => result.status === "blocked" && !(goldenResult.status === "passed"
-      && result.boundary === "linear"
-      && result.reason === "root_input_missing")),
+    ...publishedIndividualResults.filter((result) => result.status === "blocked"),
     ...(goldenResult.status === "blocked" ? [goldenResult] : []),
   ].map(({ status, boundary, reason }) => ({ status, boundary, reason }));
   return Object.freeze({

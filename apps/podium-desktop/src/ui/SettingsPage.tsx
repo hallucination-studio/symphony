@@ -1,13 +1,17 @@
-import { useEffect, useState, type FormEvent, type RefObject } from "react";
+import { useState, type FormEvent, type RefObject } from "react";
 
-import { EmptyState, PageHeading } from "./components";
+import { BindingRow, ConfirmDialog, Dialog, EmptyState, Notice, PageHeading, StatusBadge } from "./components";
 import type {
   CommandHandler,
+  LinearConnectionView,
+  LinearProjectView,
   ProjectBindingDraftView,
   ProjectBindingView,
 } from "./types";
 
 type BindingFormState = Omit<ProjectBindingView, "id"> & { id?: string };
+type RequiredField = "projectId" | "routingLabel" | "repositoryPath" | "baseBranch" | "concurrency";
+type FieldErrors = Partial<Record<RequiredField, string>>;
 
 const blankBinding = (): BindingFormState => ({
   projectId: "",
@@ -28,47 +32,121 @@ const blankBinding = (): BindingFormState => ({
 
 export function SettingsPage({
   bindings,
+  linear,
   headingRef,
   onCommand,
+  onPickDirectory,
 }: {
   bindings: ProjectBindingView[];
+  linear: LinearConnectionView;
   headingRef: RefObject<HTMLHeadingElement>;
   onCommand: CommandHandler;
+  onPickDirectory?: (() => Promise<string | null>) | undefined;
 }) {
   const [editingId, setEditingId] = useState<string>();
   const [form, setForm] = useState<BindingFormState>();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
-
-  useEffect(() => {
-    if (editingId) {
-      const selected = bindings.find((binding) => binding.id === editingId);
-      if (selected) setForm(toForm(selected));
-    }
-  }, [bindings, editingId]);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [projects, setProjects] = useState<LinearProjectView[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(false);
 
   const beginCreate = () => {
     setEditingId(undefined);
     setForm(blankBinding());
+    setConfirmingDelete(false);
+    setFieldErrors({});
     setError(undefined);
     setMessage(undefined);
+    void loadProjects();
   };
 
+  // The editor works on a snapshot: the Tauri host polls every 2s, and
+  // re-syncing mid-edit would clobber in-progress input.
   const beginEdit = (binding: ProjectBindingView) => {
     setEditingId(binding.id);
     setForm(toForm(binding));
+    setConfirmingDelete(false);
+    setFieldErrors({});
     setError(undefined);
     setMessage(undefined);
+    void loadProjects();
+  };
+
+  const closeEditor = () => {
+    if (pending) return;
+    setForm(undefined);
+    setEditingId(undefined);
+    setConfirmingDelete(false);
+    setFieldErrors({});
+    setError(undefined);
   };
 
   const updateField = <K extends keyof BindingFormState>(field: K, value: BindingFormState[K]) => {
     setForm((current) => (current ? { ...current, [field]: value } : current));
+    setFieldErrors((current) => (field in current ? { ...current, [field]: undefined } : current));
   };
+
+  async function browseRepositoryPath() {
+    if (!onPickDirectory || pending) return;
+    const selected = await onPickDirectory();
+    if (selected) updateField("repositoryPath", selected);
+  }
+
+  async function loadProjects() {
+    if (loadingProjects || linear.status !== "connected") return;
+    setLoadingProjects(true);
+    setError(undefined);
+    try {
+      const result = await onCommand({ kind: "list_linear_projects" });
+      if (result.kind === "projects") {
+        setProjects(result.projects);
+      } else if (result.kind === "rejected") {
+        setError(result.sanitizedReason);
+      }
+    } catch {
+      setError("Linear projects could not be loaded.");
+    } finally {
+      setLoadingProjects(false);
+    }
+  }
+
+  async function connectLinear() {
+    if (pending) return;
+    setPending(true);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      const result = await onCommand({ kind: "connect_linear" });
+      if (result.kind === "rejected") {
+        setError(result.sanitizedReason);
+        return;
+      }
+      setMessage("Linear connected. Select a project to continue.");
+      const projectsResult = await onCommand({ kind: "list_linear_projects" });
+      if (projectsResult.kind === "projects") {
+        setProjects(projectsResult.projects);
+      } else if (projectsResult.kind === "rejected") {
+        setError(projectsResult.sanitizedReason);
+      }
+    } catch {
+      setError("Linear could not be connected.");
+    } finally {
+      setPending(false);
+    }
+  }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!form || pending) return;
+    const errors = validateForm(form);
+    if (form.projectId && !projects.some((project) => project.id === form.projectId)) {
+      errors.projectId = "Choose a project returned by Linear.";
+    }
+    setFieldErrors(errors);
+    if (Object.values(errors).some(Boolean)) return;
     setPending(true);
     setError(undefined);
     setMessage(undefined);
@@ -82,6 +160,8 @@ export function SettingsPage({
         setError(result.sanitizedReason);
       } else {
         setMessage(editingId ? "Binding saved." : "Binding created.");
+        setForm(undefined);
+        setEditingId(undefined);
       }
     } catch {
       setError("The binding could not be saved.");
@@ -91,15 +171,17 @@ export function SettingsPage({
   }
 
   async function removeBinding() {
-    if (!editingId || pending || !window.confirm("Delete this Project Binding? Running Conductors will be stopped.")) return;
+    if (!editingId || pending) return;
     setPending(true);
     setError(undefined);
     const result = await onCommand({ kind: "delete_binding", bindingId: editingId });
     if (result.kind === "rejected") {
+      setConfirmingDelete(false);
       setError(result.sanitizedReason);
     } else {
       setForm(undefined);
       setEditingId(undefined);
+      setConfirmingDelete(false);
       setMessage("Binding deleted.");
     }
     setPending(false);
@@ -113,10 +195,35 @@ export function SettingsPage({
         headingRef={headingRef}
       />
       <div className="page-stack">
+        {message && <Notice tone="positive">{message}</Notice>}
+        <section className="panel" aria-labelledby="settings-linear-heading">
+          <div className="section-heading">
+            <h2 id="settings-linear-heading">Linear connection</h2>
+            <StatusBadge
+              label={linearStatusLabel(linear)}
+              tone={linear.status === "connected" ? "positive" : linear.status === "reconnect_required" ? "negative" : "neutral"}
+            />
+          </div>
+          {linear.status === "connected" ? (
+            <>
+              <p className="quiet">Connected to {linear.organization}. Projects are read from this Linear account.</p>
+              <button className="button" type="button" disabled={pending || loadingProjects} onClick={() => void loadProjects()}>
+                {loadingProjects ? "Loading projects…" : "Refresh projects"}
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="quiet">Connect Linear before choosing a Project Binding.</p>
+              <button className="button primary" type="button" disabled={pending} onClick={() => void connectLinear()}>
+                {pending ? "Connecting…" : linear.status === "reconnect_required" ? "Reconnect Linear" : "Connect Linear"}
+              </button>
+            </>
+          )}
+        </section>
         <section className="panel" aria-labelledby="settings-bindings-heading">
           <div className="section-heading">
             <h2 id="settings-bindings-heading">Project Bindings</h2>
-            <button className="button primary" type="button" onClick={beginCreate}>
+            <button className="button primary" type="button" disabled={linear.status !== "connected" || pending} onClick={beginCreate}>
               New binding
             </button>
           </div>
@@ -125,103 +232,19 @@ export function SettingsPage({
           ) : (
             <ul className="plain-list" aria-label="Configured Project Bindings">
               {bindings.map((binding) => (
-                <li key={binding.id}>
-                  <div>
-                    <strong>{binding.projectId}</strong>
-                    <span>
-                      <span className="mono">{binding.id}</span> · {binding.routingLabel} · {binding.repositoryPath}
-                    </span>
-                  </div>
-                  <button className="button compact" type="button" onClick={() => beginEdit(binding)}>
-                    Edit binding
-                  </button>
-                </li>
+                <BindingRow
+                  key={binding.id}
+                  binding={binding}
+                  trailing={
+                    <button className="button compact" type="button" onClick={() => beginEdit(binding)}>
+                      Edit binding
+                    </button>
+                  }
+                />
               ))}
             </ul>
           )}
         </section>
-
-        {form && (
-          <section className="panel" aria-labelledby="binding-editor-heading">
-            <div className="section-heading">
-              <h2 id="binding-editor-heading">{editingId ? "Edit binding" : "Create binding"}</h2>
-              {editingId && <span className="mono">{editingId}</span>}
-            </div>
-            <form onSubmit={(event) => void save(event)}>
-              <div className="readiness-list">
-                <label>
-                  Project ID
-                  <input
-                    name="projectId"
-                    required
-                    value={form.projectId}
-                    onChange={(event) => updateField("projectId", event.target.value)}
-                  />
-                </label>
-                <label>
-                  Routing label
-                  <input
-                    name="routingLabel"
-                    required
-                    value={form.routingLabel}
-                    onChange={(event) => updateField("routingLabel", event.target.value)}
-                  />
-                </label>
-                <label>
-                  Repository path
-                  <input
-                    name="repositoryPath"
-                    required
-                    value={form.repositoryPath}
-                    onChange={(event) => updateField("repositoryPath", event.target.value)}
-                  />
-                </label>
-                <label>
-                  Base branch
-                  <input
-                    name="baseBranch"
-                    required
-                    value={form.baseBranch}
-                    onChange={(event) => updateField("baseBranch", event.target.value)}
-                  />
-                </label>
-                <label>
-                  Concurrency
-                  <input
-                    name="concurrency"
-                    required
-                    min={1}
-                    step={1}
-                    type="number"
-                    value={form.concurrency}
-                    onChange={(event) => updateField("concurrency", Number(event.target.value))}
-                  />
-                </label>
-              </div>
-
-              <RoleConfigFields role="reconcile" form={form} updateField={updateField} />
-              <RoleConfigFields role="execute" form={form} updateField={updateField} />
-              <RoleConfigFields role="audit" form={form} updateField={updateField} />
-
-              {error && <p role="alert">{error}</p>}
-              {message && <p role="status">{message}</p>}
-              <div className="button-row">
-                <button className="button" type="button" onClick={() => setForm(undefined)}>
-                  Cancel
-                </button>
-                <button className="button primary" type="submit" disabled={pending} aria-busy={pending}>
-                  {pending && <span className="button-spinner" aria-hidden="true" />}
-                  {pending ? "Saving…" : "Save binding"}
-                </button>
-                {editingId && (
-                  <button className="button" type="button" disabled={pending} onClick={() => void removeBinding()}>
-                    Delete binding
-                  </button>
-                )}
-              </div>
-            </form>
-          </section>
-        )}
 
         <section className="panel" aria-labelledby="settings-runtime-heading">
           <div className="section-heading">
@@ -231,7 +254,185 @@ export function SettingsPage({
           <p className="quiet">Each Reconcile, Artist, and Critic role uses Codex. Model and reasoning effort overrides are optional.</p>
         </section>
       </div>
+
+      {form && !confirmingDelete && (
+        <Dialog labelId="binding-editor-heading" onClose={closeEditor}>
+          <div className="section-heading">
+            <h2 id="binding-editor-heading">{editingId ? "Edit binding" : "Create binding"}</h2>
+            {editingId && <span className="mono">{editingId}</span>}
+          </div>
+          <form noValidate onSubmit={(event) => void save(event)}>
+            <ProjectField
+              value={form.projectId}
+              projects={projects}
+              loading={loadingProjects}
+              error={fieldErrors.projectId}
+              autoFocus
+              onChange={(value) => updateField("projectId", value)}
+            />
+            <TextField
+              label="Routing label"
+              name="routingLabel"
+              value={form.routingLabel}
+              placeholder="core"
+              error={fieldErrors.routingLabel}
+              onChange={(value) => updateField("routingLabel", value)}
+            />
+            <div className="field">
+              <label htmlFor="binding-repository-path">Repository path</label>
+              <div className="input-row">
+                <input
+                  id="binding-repository-path"
+                  name="repositoryPath"
+                  value={form.repositoryPath}
+                  placeholder="~/Code/repository"
+                  aria-invalid={fieldErrors.repositoryPath ? true : undefined}
+                  onChange={(event) => updateField("repositoryPath", event.target.value)}
+                />
+                {onPickDirectory && (
+                  <button className="button" type="button" disabled={pending} onClick={() => void browseRepositoryPath()}>
+                    Browse…
+                  </button>
+                )}
+              </div>
+              {fieldErrors.repositoryPath && <span className="field-error">{fieldErrors.repositoryPath}</span>}
+            </div>
+            <TextField
+              label="Base branch"
+              name="baseBranch"
+              value={form.baseBranch}
+              placeholder="main"
+              error={fieldErrors.baseBranch}
+              onChange={(value) => updateField("baseBranch", value)}
+            />
+            <div className="field">
+              <label>
+                Concurrency
+                <input
+                  name="concurrency"
+                  min={1}
+                  step={1}
+                  type="number"
+                  value={form.concurrency}
+                  aria-invalid={fieldErrors.concurrency ? true : undefined}
+                  onChange={(event) => updateField("concurrency", Number(event.target.value))}
+                />
+              </label>
+              {fieldErrors.concurrency && <span className="field-error">{fieldErrors.concurrency}</span>}
+            </div>
+
+            <details open>
+              <summary>Advanced role launch overrides</summary>
+              <RoleConfigFields role="reconcile" form={form} updateField={updateField} />
+              <RoleConfigFields role="artist" form={form} updateField={updateField} />
+              <RoleConfigFields role="critic" form={form} updateField={updateField} />
+            </details>
+
+            {error && <Notice tone="negative">{error}</Notice>}
+            <div className="button-row">
+              {editingId && (
+                <button
+                  className="button destructive destructive-push"
+                  type="button"
+                  disabled={pending}
+                  onClick={() => setConfirmingDelete(true)}
+                >
+                  Delete binding
+                </button>
+              )}
+              <button className="button" type="button" disabled={pending} onClick={closeEditor}>
+                Cancel
+              </button>
+              <button className="button primary" type="submit" disabled={pending} aria-busy={pending}>
+                {pending && <span className="button-spinner" aria-hidden="true" />}
+                {pending ? "Saving…" : "Save binding"}
+              </button>
+            </div>
+          </form>
+        </Dialog>
+      )}
+
+      {form && confirmingDelete && editingId && (
+        <ConfirmDialog
+          title="Delete this Project Binding?"
+          body={`${form.projectId || editingId} will be removed. Running Conductors will be stopped.`}
+          confirmLabel="Delete"
+          pending={pending}
+          onConfirm={() => void removeBinding()}
+          onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
     </>
+  );
+}
+
+function TextField({
+  label,
+  name,
+  value,
+  placeholder,
+  error,
+  autoFocus,
+  onChange,
+}: {
+  label: string;
+  name: string;
+  value: string;
+  placeholder?: string | undefined;
+  error?: string | undefined;
+  autoFocus?: boolean | undefined;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="field">
+      <label>
+        {label}
+        <input
+          name={name}
+          value={value}
+          placeholder={placeholder}
+          aria-invalid={error ? true : undefined}
+          autoFocus={autoFocus}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+      {error && <span className="field-error">{error}</span>}
+    </div>
+  );
+}
+
+function ProjectField({
+  value,
+  projects,
+  loading,
+  error,
+  autoFocus,
+  onChange,
+}: {
+  value: string;
+  projects: LinearProjectView[];
+  loading: boolean;
+  error?: string | undefined;
+  autoFocus?: boolean | undefined;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="field">
+      <label htmlFor="binding-project">Linear Project</label>
+      <select
+        id="binding-project"
+        name="projectId"
+        value={value}
+        autoFocus={autoFocus}
+        disabled={loading || projects.length === 0}
+        aria-invalid={error ? true : undefined}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">{loading ? "Loading projects…" : projects.length === 0 ? "No Linear projects available" : "Choose a project…"}</option>
+        {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+      </select>
+      {error && <span className="field-error">{error}</span>}
+    </div>
   );
 }
 
@@ -240,7 +441,7 @@ function RoleConfigFields({
   form,
   updateField,
 }: {
-  role: "reconcile" | "execute" | "audit";
+  role: "reconcile" | "artist" | "critic";
   form: BindingFormState;
   updateField: <K extends keyof BindingFormState>(field: K, value: BindingFormState[K]) => void;
 }) {
@@ -272,6 +473,26 @@ function RoleConfigFields({
       </label>
     </fieldset>
   );
+}
+
+function validateForm(form: BindingFormState): FieldErrors {
+  const errors: FieldErrors = {};
+  if (!form.projectId.trim()) errors.projectId = "Select a Linear project.";
+  if (!form.routingLabel.trim()) errors.routingLabel = "Routing label is required.";
+  if (!form.repositoryPath.trim()) errors.repositoryPath = "Repository path is required.";
+  if (!form.baseBranch.trim()) errors.baseBranch = "Base branch is required.";
+  if (!Number.isInteger(form.concurrency) || form.concurrency < 1) {
+    errors.concurrency = "Concurrency must be a positive whole number.";
+  }
+  return errors;
+}
+
+function linearStatusLabel(connection: LinearConnectionView): string {
+  switch (connection.status) {
+    case "connected": return "Connected";
+    case "reconnect_required": return "Reconnect required";
+    case "disconnected": return "Not connected";
+  }
 }
 
 function nullable(value: string): string | null {

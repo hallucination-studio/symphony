@@ -107,7 +107,7 @@ test("supervisor fails when an external boundary fails", async () => {
   assert.equal(result.blocked.some((entry) => entry.boundary === "supervisor"), true);
 });
 
-test("a passed golden run covers the independent Linear probe without a preconfigured Root", async (context) => {
+test("a passed golden run suppresses covered blocked probes but preserves unknown boundaries", async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-golden-coverage-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const envPath = path.join(directory, ".env");
@@ -119,13 +119,100 @@ test("a passed golden run covers the independent Linear probe without a preconfi
     runTests: async () => ({ code: 0, signal: null }),
     runBoundaries: async () => [
       { status: "blocked", boundary: "linear", reason: "root_input_missing" },
-      { status: "passed", layer: "real_codex", boundary: "codex" },
-      { status: "passed", layer: "real_git", boundary: "git" },
-      { status: "passed", layer: "real_pr", boundary: "pr" },
+      { status: "blocked", boundary: "codex", reason: "real_boundary_not_enabled" },
+      { status: "blocked", boundary: "git", reason: "real_boundary_not_enabled" },
+      { status: "blocked", boundary: "pr", reason: "real_boundary_not_enabled" },
+      { status: "blocked", boundary: "future_boundary", reason: "diagnostic_not_enabled" },
     ],
     runGolden: async () => ({ status: "passed", layer: "golden", result: { status: "done" } }),
   });
-  assert.equal(result.blocked, undefined);
+  assert.deepEqual(result.boundary_results, [
+    { status: "blocked", boundary: "future_boundary", reason: "diagnostic_not_enabled" },
+    { status: "passed", layer: "golden", result: { status: "done" } },
+  ]);
+  assert.deepEqual(result.blocked, [
+    { status: "blocked", boundary: "future_boundary", reason: "diagnostic_not_enabled" },
+  ]);
+});
+
+test("explicit real-boundary diagnostics retain covered blocked probes after Golden success", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-golden-diagnostics-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envPath = path.join(directory, ".env");
+  await writeFile(envPath, `SYMPHONY_LINEAR_TOKEN=${secret}\n`, { encoding: "utf8", mode: 0o600 });
+  const independent = [
+    { status: "blocked", boundary: "linear", reason: "root_input_missing" },
+    { status: "blocked", boundary: "codex", reason: "real_boundary_not_enabled" },
+    { status: "blocked", boundary: "git", reason: "real_boundary_not_enabled" },
+    { status: "blocked", boundary: "pr", reason: "real_boundary_not_enabled" },
+  ];
+  const result = await runSupervisor({
+    envPath,
+    testFiles: [path.join(directory, "deterministic.test.mjs")],
+    inherited: { SYMPHONY_RUN_REAL_BOUNDARIES: "1" },
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => independent,
+    runGolden: async () => ({ status: "passed", layer: "golden" }),
+  });
+  assert.deepEqual(result.boundary_results, [...independent, { status: "passed", layer: "golden" }]);
+  assert.deepEqual(result.blocked, independent);
+});
+
+test("Golden coverage hides only blocked probes and keeps failed boundary evidence", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-golden-failed-boundary-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envPath = path.join(directory, ".env");
+  await writeFile(envPath, `SYMPHONY_LINEAR_TOKEN=${secret}\n`, { encoding: "utf8", mode: 0o600 });
+  const failedBoundary = {
+    status: "failed", layer: "real_linear", boundary: "linear", reason: "linear_probe_failed",
+  };
+  const unknownBlocked = { status: "blocked", boundary: "future_boundary", reason: "diagnostic_not_enabled" };
+  const result = await runSupervisor({
+    envPath,
+    testFiles: [path.join(directory, "deterministic.test.mjs")],
+    inherited: {},
+    runTests: async () => ({ code: 0, signal: null }),
+    runBoundaries: async () => [
+      failedBoundary,
+      { status: "blocked", boundary: "codex", reason: "real_boundary_not_enabled" },
+      unknownBlocked,
+    ],
+    runGolden: async () => ({ status: "passed", layer: "golden" }),
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.reason, "e2e_boundary_failed");
+  assert.deepEqual(result.boundary_results, [failedBoundary, unknownBlocked, { status: "passed", layer: "golden" }]);
+  assert.deepEqual(result.blocked, [unknownBlocked]);
+});
+
+test("Golden blocked or failed results retain all probes and diagnostic references", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "symphony-e2e-golden-outcome-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envPath = path.join(directory, ".env");
+  await writeFile(envPath, `SYMPHONY_LINEAR_TOKEN=${secret}\n`, { encoding: "utf8", mode: 0o600 });
+  const independent = [
+    { status: "blocked", boundary: "linear", reason: "root_input_missing" },
+    { status: "blocked", boundary: "codex", reason: "real_boundary_not_enabled" },
+  ];
+  const goldenOutcomes = [
+    { status: "blocked", boundary: "golden", reason: "golden_not_enabled" },
+    { status: "failed", layer: "golden", reason: "golden_conductor_failed", diagnostic_ref: "/tmp/golden-diagnostic" },
+  ];
+  for (const goldenResult of goldenOutcomes) {
+    const result = await runSupervisor({
+      envPath,
+      testFiles: [path.join(directory, "deterministic.test.mjs")],
+      inherited: {},
+      runTests: async () => ({ code: 0, signal: null }),
+      runBoundaries: async () => independent,
+      runGolden: async () => goldenResult,
+    });
+    assert.deepEqual(result.boundary_results, [...independent, goldenResult]);
+    assert.deepEqual(result.blocked, goldenResult.status === "blocked"
+      ? [...independent, goldenResult]
+      : independent);
+    if (goldenResult.status === "failed") assert.equal(result.boundary_results.at(-1)?.diagnostic_ref, "/tmp/golden-diagnostic");
+  }
 });
 
 test("supervisor applies one deadline across local, real-boundary, and golden phases", async () => {

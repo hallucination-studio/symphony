@@ -8,10 +8,11 @@ use crate::domain::{ProjectBinding, RootCandidate};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 const LINEAR_GRAPHQL_ENDPOINT: &str = "https://api.linear.app/graphql";
 const ROOT_CANDIDATES_OPERATION: &str = "ListPodiumRootCandidates";
+const PROJECTS_OPERATION: &str = "ListPodiumProjects";
 const ROOT_CANDIDATES_QUERY: &str = r#"
 query ListPodiumRootCandidates($projectId: ID!, $routingLabel: String!, $cursor: String, $first: Int!) {
   issues(
@@ -35,6 +36,14 @@ query ListPodiumRootCandidates($projectId: ID!, $routingLabel: String!, $cursor:
       parent { id }
       labels { nodes { name } }
     }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"#;
+const PROJECTS_QUERY: &str = r#"
+query ListPodiumProjects($cursor: String, $first: Int!) {
+  projects(after: $cursor, first: $first) {
+    nodes { id name }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -164,6 +173,14 @@ pub struct LinearRoot {
     pub created_at: String,
 }
 
+/// The complete provider data exposed by the first-run Project picker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinearProject {
+    pub id: String,
+    pub name: String,
+}
+
 impl fmt::Debug for LinearRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -197,7 +214,7 @@ impl LinearRoot {
 /// Injectable, bounded Linear candidate adapter.
 pub struct LinearCandidateAdapter<T> {
     transport: T,
-    access_token: Arc<str>,
+    access_token: Arc<RwLock<Arc<str>>>,
     endpoint: String,
     page_size: usize,
     max_pages: usize,
@@ -235,11 +252,30 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
         }
         Ok(Self {
             transport,
-            access_token: Arc::<str>::from(token),
+            access_token: Arc::new(RwLock::new(Arc::<str>::from(token))),
             endpoint: LINEAR_GRAPHQL_ENDPOINT.to_owned(),
             page_size,
             max_pages,
         })
+    }
+
+    /// An adapter without a configured token.  Desktop wires this to its
+    /// credential session: `set_access_token` must provide the current
+    /// app-actor token before any query (TM-CRED-005).
+    pub fn deferred(transport: T) -> Self {
+        Self {
+            transport,
+            access_token: Arc::new(RwLock::new(Arc::<str>::from(""))),
+            endpoint: LINEAR_GRAPHQL_ENDPOINT.to_owned(),
+            page_size: DEFAULT_PAGE_SIZE,
+            max_pages: DEFAULT_MAX_PAGES,
+        }
+    }
+
+    pub fn set_access_token(&self, token: &str) {
+        if let Ok(mut current) = self.access_token.write() {
+            *current = Arc::<str>::from(token);
+        }
     }
 
     pub fn from_environment(transport: T) -> Result<Self, LinearError> {
@@ -256,7 +292,7 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
     }
 
     pub fn access_token_is_configured(&self) -> bool {
-        !self.access_token.is_empty()
+        self.access_token.read().map(|token| !token.is_empty()).unwrap_or(false)
     }
 
     /// Query and normalize one binding's top-level Root candidates.
@@ -268,6 +304,10 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
         binding: &ProjectBinding,
     ) -> Result<Vec<LinearRoot>, LinearError> {
         validate_binding(binding)?;
+        let access_token = self.access_token.read().map_err(|_| LinearError::Transport)?.clone();
+        if access_token.is_empty() {
+            return Err(LinearError::MissingApiKey);
+        }
         let mut candidates = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen_ids = HashSet::new();
@@ -285,7 +325,7 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
             };
             let envelope = self
                 .transport
-                .execute(&self.endpoint, &request, &self.access_token)
+                .execute(&self.endpoint, &request, &access_token)
                 .map_err(|_| LinearError::Transport)?;
             let data = parse_envelope(envelope)?;
             let connection = object_field(&data, "issues")?;
@@ -307,6 +347,73 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
 
             if !has_next {
                 return Ok(candidates);
+            }
+            let Some(next) = next_cursor else {
+                return Err(LinearError::InvalidResponse);
+            };
+            if next.is_empty() || cursor.as_deref() == Some(next.as_str()) {
+                return Err(LinearError::InvalidResponse);
+            }
+            if page + 1 == self.max_pages {
+                return Err(LinearError::PaginationLimit);
+            }
+            cursor = Some(next);
+        }
+        Err(LinearError::PaginationLimit)
+    }
+
+    /// List Projects visible to the connected application for Binding setup.
+    /// Provider order is preserved and duplicate IDs are ignored.
+    pub fn list_projects(&self) -> Result<Vec<LinearProject>, LinearError> {
+        let access_token = self.access_token.read().map_err(|_| LinearError::Transport)?.clone();
+        if access_token.is_empty() {
+            return Err(LinearError::MissingApiKey);
+        }
+        let mut projects = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_ids = HashSet::new();
+
+        for page in 0..self.max_pages {
+            let request = GraphqlRequest {
+                operation: PROJECTS_OPERATION,
+                query: PROJECTS_QUERY,
+                variables: json!({ "cursor": cursor, "first": self.page_size }),
+            };
+            let envelope = self
+                .transport
+                .execute(&self.endpoint, &request, &access_token)
+                .map_err(|_| LinearError::Transport)?;
+            let data = parse_envelope(envelope)?;
+            let connection = object_field(&data, "projects")?;
+            let nodes = array_field(connection, "nodes")?;
+            let page_info = object_field(connection, "pageInfo")?;
+            let has_next = bool_field(page_info, "hasNextPage")?;
+            let next_cursor = nullable_string_field(page_info, "endCursor")?;
+
+            for node in nodes {
+                let node = object(node)?;
+                let project = LinearProject {
+                    id: bounded_string(
+                        node.get("id").ok_or(LinearError::InvalidResponse)?,
+                        MAX_IDENTIFIER_LENGTH,
+                    )
+                    .map_err(|_| LinearError::InvalidResponse)?,
+                    name: bounded_string(
+                        node.get("name").ok_or(LinearError::InvalidResponse)?,
+                        MAX_TITLE_LENGTH,
+                    )
+                    .map_err(|_| LinearError::InvalidResponse)?,
+                };
+                if project.id.trim().is_empty() || project.name.trim().is_empty() {
+                    return Err(LinearError::InvalidResponse);
+                }
+                if seen_ids.insert(project.id.clone()) {
+                    projects.push(project);
+                }
+            }
+
+            if !has_next {
+                return Ok(projects);
             }
             let Some(next) = next_cursor else {
                 return Err(LinearError::InvalidResponse);
@@ -674,7 +781,7 @@ impl LinearTransport for ReqwestLinearTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ProjectBinding;
+    use crate::domain::{AgentKind, ProjectBinding};
     use std::sync::{Arc, Mutex};
 
     fn binding() -> ProjectBinding {
@@ -684,13 +791,14 @@ mod tests {
             repository_path: "/repo".into(),
             base_branch: "main".into(),
             concurrency: 1,
-            reconcile_agent: "codex".into(),
+            completed_workspace_retention: None,
+            reconcile_agent: AgentKind::Codex,
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            artist_agent: "codex".into(),
+            artist_agent: AgentKind::Codex,
             artist_model: None,
             artist_reasoning_effort: None,
-            critic_agent: "codex".into(),
+            critic_agent: AgentKind::Codex,
             critic_model: None,
             critic_reasoning_effort: None,
         }
@@ -804,6 +912,53 @@ mod tests {
     }
 
     #[test]
+    fn lists_projects_with_bounded_pagination_and_deduplicates_ids() {
+        let transport = |_endpoint: &str, request: &GraphqlRequest, token: &str| {
+            assert_eq!(request.operation, PROJECTS_OPERATION);
+            assert_eq!(token, "fixture-token");
+            Ok(if request.variables["cursor"].is_null() {
+                json!({ "data": { "projects": {
+                    "nodes": [{ "id": "project-1", "name": "Symphony" }],
+                    "pageInfo": { "hasNextPage": true, "endCursor": "next" }
+                }}})
+            } else {
+                json!({ "data": { "projects": {
+                    "nodes": [
+                        { "id": "project-1", "name": "Duplicate" },
+                        { "id": "project-2", "name": "Console" }
+                    ],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}})
+            })
+        };
+        let adapter =
+            LinearCandidateAdapter::with_limits(transport, "fixture-token", 1, 2).unwrap();
+
+        assert_eq!(
+            adapter.list_projects().unwrap(),
+            vec![
+                LinearProject { id: "project-1".into(), name: "Symphony".into() },
+                LinearProject { id: "project-2".into(), name: "Console".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_project_pages_and_missing_credentials() {
+        let malformed = |_endpoint: &str, _request: &GraphqlRequest, _token: &str| {
+            Ok(json!({ "data": { "projects": {
+                "nodes": [{ "id": "project-1", "name": "" }],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }}}))
+        };
+        let adapter = LinearCandidateAdapter::new(malformed, "fixture-token").unwrap();
+        assert_eq!(adapter.list_projects(), Err(LinearError::InvalidResponse));
+
+        let deferred = LinearCandidateAdapter::deferred(malformed);
+        assert_eq!(deferred.list_projects(), Err(LinearError::MissingApiKey));
+    }
+
+    #[test]
     fn rejects_malformed_root_fields_and_provider_errors() {
         let malformed = |_endpoint: &str, _request: &GraphqlRequest, _token: &str| {
             Ok(page(vec![node("id", "ENG-1", 5, "2024-01-01T00:00:00Z")], false, None))
@@ -835,6 +990,28 @@ mod tests {
         assert_eq!(resolve_access_token::<_, &str, &str>([]), Err(LinearError::MissingApiKey));
         assert!(!format!("{:?}", LinearCandidateAdapter::new(empty_transport, "secret").unwrap())
             .contains("secret"));
+    }
+
+    #[test]
+    fn deferred_adapter_requires_and_rotates_desktop_token() {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_for_transport = Arc::clone(&seen);
+        let transport = move |_endpoint: &str, _request: &GraphqlRequest, token: &str| {
+            seen_for_transport.lock().unwrap().push(token.to_owned());
+            Ok(page(vec![], false, None))
+        };
+        let adapter = LinearCandidateAdapter::deferred(transport);
+
+        assert!(!adapter.access_token_is_configured());
+        assert_eq!(adapter.list_root_candidates(&binding()), Err(LinearError::MissingApiKey));
+
+        adapter.set_access_token("session-token");
+        assert!(adapter.access_token_is_configured());
+        adapter.list_root_candidates(&binding()).unwrap();
+
+        adapter.set_access_token("rotated-token");
+        adapter.list_root_candidates(&binding()).unwrap();
+        assert_eq!(&*seen.lock().unwrap(), &["session-token", "rotated-token"]);
     }
 
     #[test]

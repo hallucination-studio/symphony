@@ -17,16 +17,11 @@ const state = parseRootState({
   root_branch: "symphony/ENG-1",
   current_phase: "idle",
   task_state_markdown: "## Task State\n\nNo trusted progress yet.",
-  pending_finding: "Parser case remains incomplete.",
   latest_critique: {
     verdict: "incomplete",
-    scope_reviewed: "Parser behavior and its focused test.",
-    implementation_review: "The parser case remains incomplete.",
-    checks: ["npm test"],
-    evidence: ["Focused test is red."],
-    findings: ["Ambiguous token is accepted."],
     task_state_markdown: "The parser case remains incomplete.",
     pending_finding: "Reject ambiguous token.",
+    artifact_url: "https://linear.invalid/files/cycle-001-critique-result.json",
   },
   comment_cursor: "comment-1",
 });
@@ -51,7 +46,16 @@ test("Root description keeps the authored requirement outside one strict managed
   assert.equal(parseRootDescription(description).requirement, "The parser must reject ambiguity.");
   assert.deepEqual(parseRootDescription(description).state, state);
   assert.equal(parseRootDescription(description).reconcile_report, report);
-  assert.equal(parseRootDescription(description).updated_at, updatedAt);
+
+  const malformedTimestamp = description.replace(
+    /Updated at:[^\n]+/u,
+    "Updated at: not-a-valid-timestamp",
+  );
+  assert.deepEqual(parseRootDescription(malformedTimestamp).state, state);
+  assert.equal(parseRootDescription(malformedTimestamp).reconcile_report, report);
+  const missingTimestamp = description.replace(/Updated at:[^\n]+\n\n/u, "");
+  assert.deepEqual(parseRootDescription(missingTimestamp).state, state);
+  assert.equal(parseRootDescription(missingTimestamp).reconcile_report, report);
 });
 
 test("Root description parser accepts an uninitialized Root and rejects malformed managed blocks", () => {
@@ -61,11 +65,8 @@ test("Root description parser accepts an uninitialized Root and rejects malforme
 
   const rendered = renderRootDescription("The original requirement.", state, undefined, updatedAt);
   assert.equal(parseRootDescription(rendered).reconcile_report, undefined);
-  const legacy = rendered
-    .replace("## Metadata\n\n", "")
-    .replace("### Root State", "## Root State")
-    .replace("## Result", "## Reconcile");
-  assert.deepEqual(parseRootDescription(legacy), parseRootDescription(rendered));
+  const legacy = rendered.replace("### Root State", "## Root State");
+  assert.throws(() => parseRootDescription(legacy), /linear_root_description_malformed/u);
   assert.throws(
     () => parseRootDescription(`${rendered}\n${ROOT_MANAGED_ROOT_START}`),
     /linear_root_description_malformed/u,

@@ -1,11 +1,16 @@
-import { open, readFile, rename, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, rename, unlink, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  parseCritiqueResult,
+  parseCritiqueArtifact,
+  parseCritiqueCheckpoint,
+  parseCritiqueEnvelope,
   parseCritiqueResultMarkdown,
   parseCycleTerminalResult,
-  type CritiqueResult,
+  type CritiqueArtifact,
+  type CritiqueCheckpoint,
+  type CritiqueEnvelope,
   type CycleSpec,
   type CycleTerminalResult,
 } from "../contracts/cycle.js";
@@ -13,7 +18,11 @@ import type { AgentKind } from "../contracts/identity.js";
 import type { PerformerProcessResult } from "../contracts/performer.js";
 import { parsePerformerProcessResult } from "../contracts/performer.js";
 import type { RootState } from "../contracts/root.js";
-import { parseMarkdownText, type MarkdownText } from "../contracts/validation.js";
+import {
+  containsCredentialMaterial,
+  parseMarkdownText,
+  type MarkdownText,
+} from "../contracts/validation.js";
 import type { LinearIssue, LinearWorkflow } from "../contracts/task-management.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
 import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
@@ -61,7 +70,7 @@ export interface CycleRunOutcome {
   readonly criticIssue: LinearIssue;
   readonly artistProcess: PerformerProcessResult;
   readonly criticProcess: PerformerProcessResult;
-  readonly critique: CritiqueResult;
+  readonly critique: CritiqueCheckpoint;
   readonly terminal: CycleTerminalResult;
 }
 
@@ -130,14 +139,15 @@ async function persistFamily(request: CycleRunRequest, family: { cycle: LinearIs
   }
 }
 
-async function persistAndReloadCriticResult(
+async function persistCriticArtifact(
   file: string,
-  result: CritiqueResult,
-): Promise<CritiqueResult> {
+  artifact: CritiqueArtifact,
+): Promise<Uint8Array> {
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const contents = new TextEncoder().encode(`${JSON.stringify(artifact, null, 2)}\n`);
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(result, null, 2)}\n`, "utf8");
+    await handle.writeFile(contents);
     await handle.sync();
   } finally {
     await handle.close();
@@ -149,13 +159,7 @@ async function persistAndReloadCriticResult(
     throw error;
   }
 
-  let persisted: unknown;
-  try {
-    persisted = JSON.parse((await readFile(file)).toString("utf8")) as unknown;
-  } catch {
-    throw new Error("invalid_critic_result_file");
-  }
-  return parseCritiqueResult(persisted);
+  return contents;
 }
 
 function processFailureReason(result: PerformerProcessResult, responseReason?: string): string {
@@ -198,9 +202,18 @@ function currentErrorMessage(error: unknown, fallback: string): string {
   } catch {
     message = fallback;
   }
-  return (message.length === 0 ? fallback : message)
+  const visible = (message.length === 0 ? fallback : message)
     .slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
     .replace(/[\r\n\0]/gu, " ");
+  return containsCredentialMaterial(visible) ? fallback : visible;
+}
+
+function criticVisibleProcessResult(result: PerformerProcessResult): PerformerProcessResult {
+  if (result.sanitized_reason === undefined) return result;
+  return parsePerformerProcessResult({
+    ...result,
+    sanitized_reason: currentErrorMessage(result.sanitized_reason, "Process failed"),
+  });
 }
 
 interface FinalResponseRead {
@@ -213,13 +226,24 @@ async function readFinalResponse(
   expectedPath: string,
 ): Promise<FinalResponseRead> {
   if (result.final_response_ref !== expectedPath) return { reason: "Final response reference mismatch" };
-  let response: Buffer;
+  let handle: FileHandle;
   try {
-    response = await readFile(expectedPath);
+    handle = await open(expectedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch {
     return { reason: "Final response unavailable" };
   }
-  if (response.byteLength > MAX_FINAL_RESPONSE_BYTES) return { reason: "Final response too large" };
+  let response: Buffer;
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) return { reason: "Final response unavailable" };
+    if (metadata.size > MAX_FINAL_RESPONSE_BYTES) return { reason: "Final response too large" };
+    response = await handle.readFile();
+    if (response.byteLength > MAX_FINAL_RESPONSE_BYTES) return { reason: "Final response too large" };
+  } catch {
+    return { reason: "Final response unavailable" };
+  } finally {
+    await handle.close();
+  }
   try {
     const markdown = new TextDecoder("utf-8", { fatal: true }).decode(response);
     try {
@@ -252,19 +276,22 @@ function appendIssueDescription(
     : appendManagedIssueResult(description, currentLinearDescriptionTimestamp(updatedAt), report);
 }
 
-function processError(result: PerformerProcessResult, fallbackReason?: string): CritiqueResult {
-  const reason = result.sanitized_reason?.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
-    ?? fallbackReason?.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
-    ?? processEventDescription(result);
-  return parseCritiqueResult({
+function processError(result: PerformerProcessResult, fallbackReason?: string): CritiqueEnvelope {
+  const reason = currentErrorMessage(
+    result.sanitized_reason ?? fallbackReason ?? processEventDescription(result),
+    "Process failed",
+  );
+  return parseCritiqueCheckpoint({
     verdict: "process_error",
-    reason: reason.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH),
+    reason,
   });
 }
 
-function terminalResult(criticIssueId: string, critique: CritiqueResult): CycleTerminalResult {
+function terminalResult(criticIssueId: string, critique: CritiqueEnvelope): CycleTerminalResult {
   const result = critique.verdict === "accepted" ? "succeeded" : critique.verdict === "incomplete" ? "rejected" : "failed";
-  const source = critique.verdict === "process_error" ? critique.reason : critique.implementation_review;
+  const source = critique.verdict === "process_error"
+    ? critique.reason
+    : critique.pending_finding ?? critique.task_state_markdown;
   const reason = source.length <= 512 ? source : `${source.slice(0, 499)} [truncated]`;
   return parseCycleTerminalResult({ result, critic_issue_id: criticIssueId, critic_verdict: critique.verdict, reason });
 }
@@ -392,12 +419,17 @@ export class CycleRunner {
       ...(this.options.criticModel === undefined ? {} : { model: this.options.criticModel }),
       ...(this.options.criticReasoningEffort === undefined
         ? {} : { reasoning_effort: this.options.criticReasoningEffort }),
-      prompt: renderCriticPrompt(request.spec, request.rootState, artistProcess), working_directory: request.rootState.workspace_path,
+      prompt: renderCriticPrompt(
+        request.spec,
+        request.rootState,
+        criticVisibleProcessResult(artistProcess),
+      ),
+      working_directory: request.rootState.workspace_path,
       sandbox: "read_only", final_response_path: criticResponsePath,
       diagnostic_jsonl_path: criticDiagnosticJsonlPath, diagnostic_stderr_path: criticDiagnosticStderrPath,
       timeout_ms: this.options.timeoutMs,
     }, signal);
-    let critique: CritiqueResult;
+    let artifact: CritiqueArtifact;
     let criticMarkdown: string | undefined;
     let criticErrorReason: string | undefined;
     let criticResponseReason: string | undefined;
@@ -417,25 +449,37 @@ export class CycleRunner {
         criticProcess.diagnostic_jsonl_ref !== criticDiagnosticJsonlPath
         || criticProcess.diagnostic_stderr_ref !== criticDiagnosticStderrPath
         || criticProcess.sanitized_reason === "diagnostic_capture_failed";
-      critique = processError(criticProcess, diagnosticsMissing ? "diagnostic_capture_failed" : undefined);
-      criticErrorReason = critique.verdict === "process_error" ? critique.reason : criticErrorReason ?? "Critic process failed";
-    } else if (criticMarkdown === undefined) {
-      critique = parseCritiqueResult({
-        verdict: "process_error",
-        reason: criticErrorReason ?? criticResponseReason ?? "Final response unavailable",
+      const envelope = processError(criticProcess, diagnosticsMissing ? "diagnostic_capture_failed" : undefined);
+      criticErrorReason = envelope.verdict === "process_error" ? envelope.reason : "Critic process failed";
+      artifact = parseCritiqueArtifact({
+        envelope,
+        report_markdown: criticProcessErrorComment(criticErrorReason),
       });
-      criticErrorReason = critique.verdict === "process_error"
-        ? critique.reason : criticErrorReason ?? criticResponseReason ?? "Final response unavailable";
+    } else if (criticMarkdown === undefined) {
+      const reason = criticErrorReason ?? criticResponseReason ?? "Final response unavailable";
+      const envelope = parseCritiqueEnvelope({
+        verdict: "process_error",
+        reason,
+      });
+      criticErrorReason = reason;
+      artifact = parseCritiqueArtifact({
+        envelope,
+        report_markdown: criticProcessErrorComment(reason),
+      });
     } else {
       try {
-        critique = parseCritiqueResultMarkdown(criticMarkdown);
+        artifact = parseCritiqueResultMarkdown(criticMarkdown);
       } catch (error) {
         const message = currentErrorMessage(error, "Invalid Critic response");
-        critique = parseCritiqueResult({ verdict: "process_error", reason: message });
-        criticErrorReason = critique.verdict === "process_error" ? critique.reason : message;
+        const envelope = parseCritiqueEnvelope({ verdict: "process_error", reason: message });
+        criticErrorReason = message;
+        artifact = parseCritiqueArtifact({
+          envelope,
+          report_markdown: criticProcessErrorComment(message),
+        });
       }
     }
-    critique = await persistAndReloadCriticResult(critiqueResultPath, critique);
+    const critiqueResultContents = await persistCriticArtifact(critiqueResultPath, artifact);
     const criticUpdatedAt = (this.options.now ?? (() => new Date()))();
     await this.options.gateway.update_issue_description(
       criticIssue.id,
@@ -446,18 +490,23 @@ export class CycleRunner {
       ),
     );
     await this.options.gateway.update_issue_status(criticIssue.id, this.options.workflow.done_status_id);
-    const terminal = terminalResult(criticIssue.id, critique);
+    const terminal = terminalResult(criticIssue.id, artifact.envelope);
     const critiqueResultFilename = path.basename(critiqueResultPath);
     const critiqueResultUpload = await uploadCriticResult(
       this.options.gateway,
       critiqueResultFilename,
-      await readFile(critiqueResultPath),
+      critiqueResultContents,
     );
     await this.options.gateway.create_comment(
       cycle.id,
       cycleResult(terminal, criticIssue, critiqueResultFilename, critiqueResultUpload),
     );
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.done_status_id);
+
+    const critique = parseCritiqueCheckpoint({
+      ...artifact.envelope,
+      ...(critiqueResultUpload.status === "uploaded" ? { artifact_url: critiqueResultUpload.url } : {}),
+    });
 
     return Object.freeze({ cycle, artist, criticIssue, artistProcess, criticProcess, critique, terminal });
   }

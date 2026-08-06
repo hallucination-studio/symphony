@@ -16,9 +16,11 @@ export function renderRootReconcilePrompt(request: RootReconcileRequest): Markdo
   const latestCritic = request.root_state.latest_critique === undefined
     ? undefined
     : renderRuntimeContext("LATEST_CRITIC", json(request.root_state.latest_critique));
-  const pendingFinding = request.root_state.pending_finding === undefined
+  const pendingFinding = request.root_state.latest_critique === undefined
+    || request.root_state.latest_critique.verdict === "process_error"
+    || request.root_state.latest_critique.pending_finding === undefined
     ? undefined
-    : renderRuntimeContext("PENDING_FINDING", request.root_state.pending_finding);
+    : renderRuntimeContext("PENDING_FINDING", request.root_state.latest_critique.pending_finding);
   const harnessFeedback = request.root_state.harness_feedback === undefined
     ? undefined
     : renderRuntimeContext("HARNESS_FEEDBACK", request.root_state.harness_feedback);

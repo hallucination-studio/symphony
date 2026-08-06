@@ -35,10 +35,10 @@ stand in for a status transition.
   user-authored original long-term requirement. It is immutable and is never
   replaced or mixed with generated state.
 - **Root description managed snapshot.** Its required content is the
-  workspace, run directory, branch, task state, complete `latest_critique`, pending
-  finding, Harness feedback, phase, comment cursor, terminal delivery, latest
-  Reconcile report, and local `Updated at`. Harness may replace only this
-  managed suffix; it is the durable checkpoint and never Reconcile input.
+  workspace, run directory, branch, task state, compact `latest_critique`,
+  Harness feedback, phase, comment cursor, terminal delivery, latest Reconcile
+  report, and local `Updated at`. Harness may replace only this managed suffix;
+  it is the durable checkpoint and never Reconcile input.
 
 The Root title and requirement section are the sole original requirement. The
 description may additionally contain exactly one Harness-managed snapshot block:
@@ -65,6 +65,10 @@ Conductor strips the complete block, so generated state cannot become a new
 requirement. The Root State inside this suffix is the sole durable runtime
 checkpoint; V1 does not reconstruct it by parsing the child tree.
 
+`Updated at` is presentation only. Readers preserve and display it but never
+parse it to validate, order, or authorize durable state; Linear `createdAt` and
+the Root State fields own machine semantics.
+
 The managed suffix stores no credential, transcript, revision, digest, or
 process handle. The per-process `max_cycles` guard is not stored there; it is an
 operator launch limit rather than durable Root progress.
@@ -76,7 +80,8 @@ managed suffix. A continue report contains `Why Continue`, `Evidence`, and
 `Verification`, and `Run Metrics` with wall-clock duration and short exact token usage; a human gate contains `Reason`,
 `Question`, and `Next Step`. For `create_cycle`, Conductor also copies the exact
 report once to the new Cycle under `# Symphony Harness: Reconcile`, preserving
-Cycle history without creating Root or role result comments. Raw Git porcelain,
+Cycle history as the creation comment without creating Root or role result
+comments. Raw Git porcelain,
 file contents, transcripts, and estimated token values are forbidden.
 
 ## Cycle family documents
@@ -115,15 +120,18 @@ does not create another report or change its content contract:
 
 | Role | Local file | Required human report | Semantic use |
 |---|---|---|---|
-| Artist | `cycle-NNN-artist-result.md` | `## Summary`, `## File Changes` with `### Created`/`### Updated`/`### Deleted` paths and +/- line counts, and `## Verification` | display-only; never Critic/Root input |
-| Critic | `cycle-NNN-critic-result.md` | `verdict` plus `## Scope Reviewed`, `## Implementation Review`, `## Checks`, `## Evidence`, `## Findings`, and `## Task State` | parsed once into typed `CritiqueResult` |
+| Artist | `cycle-NNN-artist-result.md` | human-readable summary of actual file changes and verification without repeating the Cycle task | display-only; never Critic/Root input |
+| Critic | `cycle-NNN-critic-result.md` | one compact JSON machine envelope followed by a human-readable audit of scope, implementation, evidence, checks, and findings | parse only the machine envelope once |
 
-The parsed Critique is mechanically serialized as
-`cycle-NNN-critique-result.json`, written privately, and read back and validated
-before it is used for Cycle/Root progression. Only this JSON file is uploaded
-for the Cycle with `application/json` content type. The Cycle Result comment has
-only the mapped terminal result, one linked Critic Issue identifier, and one
-visible resource line. It does not repeat the Critic verdict, reason, or evidence:
+The Critic machine envelope contains only `verdict`, required
+`task_state_markdown`, and optional
+`pending_finding`. Conductor combines it with the exact human report into one
+typed Critique artifact, serializes it once as
+`cycle-NNN-critique-result.json`, writes and uploads those same bytes, and uses
+the already validated in-memory envelope for progression. Only this JSON file
+is uploaded for the Cycle with `application/json` content type. The Cycle Result
+comment has only the mapped terminal result, one linked Critic Issue identifier,
+and one visible resource line. It does not repeat the Critic evidence:
 
 ```markdown
 - Critique: [cycle-NNN-critique-result.json](https://linear.example/asset)
@@ -132,8 +140,9 @@ visible resource line. It does not repeat the Critic verdict, reason, or evidenc
 If upload fails, the line is `- Critique: upload failed (<current error's
 first 50 characters>)`; the failure is visible but does not alter the Critic
 verdict or progression. The Cycle never contains role Markdown or a second
-summary. Its append-only history comments record status transitions, Root
-decisions, the terminal result, and this link/error; their event timestamp is
+summary. It receives exactly two Harness comments: the creating Reconcile
+rationale and the terminal Cycle result with this link/error. Intermediate
+progress is visible through Issue statuses, not comments. Comment event time is
 Linear `createdAt`, not a duplicated body field. A missing, unreadable,
 invalid, or non-UTF-8 role result becomes a visible `process_error`; Conductor
 never makes a second summarization or format-repair Agent call.
@@ -141,8 +150,8 @@ never makes a second summarization or format-repair Agent call.
 There is exactly one Artist and one Critic Agent call. Artist output is never
 supplied to Critic or used to calculate Cycle/Root semantics. JSONL and stderr
 remain private local diagnostics in the external run directory; they are never
-uploaded as comments or files. Role descriptions, Cycle history/result comments,
-the single JSON file, and explicit statuses are the operator-visible progression
+uploaded as comments or files. Role descriptions, the two Cycle comments, the
+single JSON file, and explicit statuses are the operator-visible progression
 artifacts.
 
 ## Restart abandonment
@@ -169,7 +178,7 @@ Reconcile context. Their trusted summaries already exist in Root State.
 | Root, user-authored after saved cursor | new input for a future Reconcile |
 | Root comment with a Harness marker | reserved operational output; ignored by Inbox |
 | Root managed description suffix | durable runtime checkpoint and latest report; stripped before Reconcile |
-| Cycle history/result comment | append-only operator history; not Reconcile input |
+| Cycle creation/result comment | exactly two append-only operator records; not Reconcile input |
 | Artist or Critic description terminal report | display-only; not Reconcile input |
 | Artist or Critic comments, any author | display-only |
 

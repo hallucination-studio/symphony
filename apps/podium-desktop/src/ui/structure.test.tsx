@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { expect, test } from "vitest";
 
 import { App } from "../App";
@@ -19,7 +19,9 @@ test("shell keeps the three-page layout structure", () => {
 test("overview keeps grouped panels and assignment lists", () => {
   const { container } = render(<App initialState={createDemoState()} onCommand={confirmed} />);
   expect(container.querySelector(".page-header")).not.toBeNull();
-  expect(container.querySelectorAll(".page-stack > .panel")).toHaveLength(3);
+  for (const name of ["Running", "Waiting", "Needs attention", "Recently completed"]) {
+    expect(screen.getByRole("region", { name })).toBeInTheDocument();
+  }
   expect(container.querySelector(".readiness-list")).not.toBeNull();
   expect(container.querySelector(".plain-list")).not.toBeNull();
   expect(container.querySelector(".status-badge")).not.toBeNull();

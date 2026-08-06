@@ -4,12 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { parseCycleSpec } from "../contracts/cycle.js";
+import { parseCritiqueArtifact, parseCycleSpec } from "../contracts/cycle.js";
 import type { PerformerLaunchRequest, PerformerProcessResult } from "../contracts/performer.js";
 import { parseRootState } from "../contracts/root.js";
 import { parseLinearIssue } from "../contracts/task-management.js";
 import { parseMarkdownText } from "../contracts/validation.js";
-import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
 import { parseManagedIssueDescription } from "../linear/LinearIssueDescription.js";
 import { InMemoryLinearGateway } from "../linear/InMemoryLinearGateway.js";
 import type { LinearGateway } from "../linear/LinearGateway.js";
@@ -43,7 +42,10 @@ async function world() {
   });
   const rootState = parseRootState({
     workspace_path: workspace, run_directory: runDirectory, root_branch: "root/ENG-1",
-    current_phase: "cycle", task_state_markdown: "Lexer complete", pending_finding: "Ambiguity remains",
+    current_phase: "cycle", task_state_markdown: "Lexer complete",
+    latest_critique: {
+      verdict: "incomplete", task_state_markdown: "Lexer complete", pending_finding: "Ambiguity remains",
+    },
   });
   const transitionComment = parseMarkdownText([
     "# Symphony Harness: Reconcile", "", "### Why Continue", "...", "", "### Evidence", "...", "",
@@ -84,29 +86,15 @@ function performer(
 function criticMarkdown(value: unknown): string {
   if (typeof value === "string") return value;
   const result = value as Record<string, unknown>;
-  if (result.verdict === "process_error") {
-    return `verdict: process_error\n\n## Reason\n${String(result.reason)}\n`;
-  }
-  const list = (name: string) => {
-    const entries = result[name] as readonly unknown[] | undefined;
-    return (entries ?? []).length === 0 ? "- None" : (entries ?? []).map((entry) => `- ${String(entry)}`).join("\n");
-  };
-  return [
-    `verdict: ${String(result.verdict)}`,
-    "",
-    "## Scope Reviewed", String(result.scope_reviewed ?? "The complete workspace diff."),
-    "",
-    "## Implementation Review", String(result.implementation_review ?? "The implementation was inspected."),
-    "",
-    "## Checks", list("checks"),
-    "",
-    "## Evidence", list("evidence"),
-    "",
-    "## Findings", list("findings"),
-    "",
-    "## Task State", String(result.task_state_markdown ?? result.implementation_review ?? "No independently audited task progress yet."),
-    "",
-  ].join("\n");
+  const envelope = result.verdict === "process_error"
+    ? { verdict: "process_error", reason: String(result.reason) }
+    : {
+      verdict: String(result.verdict),
+      task_state_markdown: String(result.task_state_markdown ?? "No independently audited task progress yet."),
+      ...(result.pending_finding === undefined ? {} : { pending_finding: String(result.pending_finding) }),
+    };
+  const report = String(result.report_markdown ?? "The Critic independently audited the workspace.");
+  return ["```json", JSON.stringify(envelope), "```", "", report].join("\n");
 }
 
 test("creates exact family and trusts only a fresh Critic", async () => {
@@ -118,8 +106,7 @@ test("creates exact family and trusts only a fresh Critic", async () => {
     diagnostic_stderr_ref: "/external/diagnostics/artist.stderr",
     thread_id: "thread-artist-must-stay-local",
   }, {
-    verdict: "accepted", implementation_review: "Parser behavior is verified", checks: ["npm test"],
-    evidence: ["test passes"], findings: [], task_state_markdown: "Parser ambiguity is rejected",
+    verdict: "accepted", task_state_markdown: "Parser ambiguity is rejected",
   });
   const runner = new CycleRunner({
     gateway: fixture.gateway,
@@ -160,8 +147,9 @@ test("creates exact family and trusts only a fresh Critic", async () => {
   assert.match(launches[0]?.prompt ?? "", /## Summary[\s\S]*## File Changes[\s\S]*## Verification/u);
   assert.match(launches[0]?.prompt ?? "", /Never copy raw porcelain markers such as `\?\?`, `M`, or `D`/u);
   assert.doesNotMatch(launches[0]?.prompt ?? "", /## Objective\n|## Acceptance\n|## Boundaries\n|## Trusted Task State\n/u);
-  assert.match(launches[1]?.prompt ?? "", /first line is `verdict: ` followed by accepted, incomplete, blocked, violation, or process_error/u);
-  assert.match(launches[1]?.prompt ?? "", /## Scope Reviewed[\s\S]*## Implementation Review[\s\S]*## Checks/u);
+  assert.match(launches[1]?.prompt ?? "", /compact machine envelope followed by a free human-readable Markdown audit/u);
+  assert.match(launches[1]?.prompt ?? "", /fenced `json` block containing exactly one single-line JSON object/u);
+  assert.match(launches[1]?.prompt ?? "", /exactly `verdict`, `task_state_markdown`, and optional `pending_finding`/u);
   assert.doesNotMatch(launches[1]?.prompt ?? "", /## Summary\n/u);
   const descendants = await fixture.gateway.list_unfinished_descendants("root-id");
   assert.deepEqual(descendants, []);
@@ -171,7 +159,12 @@ test("creates exact family and trusts only a fresh Critic", async () => {
   assert.equal(cycleRecord.critic_id, outcome.criticIssue.id);
   assert.deepEqual(cycleRecord.consumed_comment_ids, ["comment-1"]);
   const persistedCritic = await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"));
-  assert.deepEqual(JSON.parse(persistedCritic.toString("utf8")), outcome.critique);
+  const persistedArtifact = parseCritiqueArtifact(JSON.parse(persistedCritic.toString("utf8")));
+  assert.deepEqual(persistedArtifact.envelope, {
+    verdict: "accepted", task_state_markdown: "Parser ambiguity is rejected",
+  });
+  assert.equal(persistedArtifact.report_markdown, "The Critic independently audited the workspace.");
+  assert.equal(outcome.critique.artifact_url, "https://linear.invalid/upload/fake-upload-1");
   assert.deepEqual(fixture.gateway.attachments.map(({ filename, content_type, contents }) => ({
     filename, content_type, contents: Buffer.from(contents).toString("utf8"),
   })), [{
@@ -211,11 +204,9 @@ test("projects the Cycle, Artist, and Critic lifecycle statuses visibly", async 
     },
   });
   const rolePerformer = performer([], { launch_status: "exited", exit_code: 0, duration_ms: 1 }, {
-    verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
-    task_state_markdown: "Acceptance is verified",
+    verdict: "accepted", task_state_markdown: "Acceptance is verified",
   });
   const updatedAt = new Date("2026-08-05T01:02:03.000Z");
-  const updatedAtText = currentLinearDescriptionTimestamp(updatedAt);
   let nowCalls = 0;
   const runner = new CycleRunner({
     gateway,
@@ -258,13 +249,11 @@ test("projects the Cycle, Artist, and Critic lifecycle statuses visibly", async 
   const criticProjection = parseManagedIssueDescription(criticDescription);
   assert.equal(artistProjection.metadata.includes("## Role\n\nArtist"), true);
   assert.equal(artistProjection.task.includes("## Objective\n\nReject ambiguity"), true);
-  assert.equal(artistProjection.updated_at, updatedAtText);
   assert.equal(artistProjection.result, "Artist completed; this response is not Critic evidence.");
   assert.equal(criticProjection.metadata.includes("## Role\n\nCritic"), true);
-  assert.equal(criticProjection.updated_at, updatedAtText);
-  assert.equal(criticProjection.result?.startsWith("verdict: accepted"), true);
-  assert.equal(criticProjection.result?.includes("## Scope Reviewed"), true);
-  assert.equal(criticProjection.result?.includes("## Implementation Review"), true);
+  assert.match(criticProjection.result ?? "", /^```json\n\{"verdict":"accepted"/u);
+  assert.equal(criticProjection.result?.includes("The Critic independently audited the workspace."), true);
+  assert.equal(criticProjection.result?.includes("## Scope Reviewed"), false);
   assert.equal(nowCalls, 2);
   assert.equal(comments.some(([issueId]) => issueId === outcome.artist.id), false);
   assert.equal(comments.some(([issueId]) => issueId === outcome.criticIssue.id), false);
@@ -297,7 +286,7 @@ test("caps the Cycle title at a complete word with an ellipsis while naming role
     },
   });
   const rolePerformer = performer([], { launch_status: "exited", exit_code: 0, duration_ms: 1 }, {
-    verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
+    verdict: "accepted", task_state_markdown: "Cycle title accepted",
   });
   const runner = new CycleRunner({
     gateway,
@@ -327,10 +316,7 @@ test("rejects an Critic response too large to persist with Root State", async ()
     launch_status: "exited", exit_code: 0, duration_ms: 1,
   }, {
     verdict: "accepted",
-    implementation_review: "x".repeat(33 * 1024),
-    checks: [],
-    evidence: [],
-    findings: [],
+    task_state_markdown: "x".repeat(33 * 1024),
   });
   const runner = new CycleRunner({
     gateway: fixture.gateway,
@@ -346,7 +332,16 @@ test("rejects an Critic response too large to persist with Root State", async ()
     onFamilyRecorded: async () => undefined,
   });
 
-  assert.deepEqual(outcome.critique, { verdict: "process_error", reason: "Final response too large" });
+  assert.deepEqual(outcome.critique, {
+    verdict: "process_error",
+    reason: "Final response too large",
+    artifact_url: "https://linear.invalid/upload/fake-upload-1",
+  });
+  const persistedArtifact = parseCritiqueArtifact(JSON.parse(
+    await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8"),
+  ));
+  assert.deepEqual(persistedArtifact.envelope, { verdict: "process_error", reason: "Final response too large" });
+  assert.match(persistedArtifact.report_markdown, /## Critic Result/u);
   assert.equal(outcome.terminal.result, "failed");
 });
 
@@ -356,8 +351,8 @@ test("audits residual workspace after Artist start failure", async () => {
   const rolePerformer = performer(launches, {
     launch_status: "start_failed", duration_ms: 1, sanitized_reason: "agent_unavailable",
   }, {
-    verdict: "incomplete", implementation_review: "Required change is absent", checks: [], evidence: ["workspace unchanged"],
-    findings: ["Parser still accepts ambiguity"], pending_finding: "Implement strict ambiguity rejection",
+    verdict: "incomplete", task_state_markdown: "Required change is absent",
+    pending_finding: "Implement strict ambiguity rejection",
   });
   const runner = new CycleRunner({
     gateway: fixture.gateway,
@@ -382,12 +377,48 @@ test("audits residual workspace after Artist start failure", async () => {
   assert.equal(launches[1]?.prompt.includes("agent_unavailable"), true);
 });
 
+test("keeps credential-shaped process reasons out of public role results", async () => {
+  const fixture = await world();
+  const credentialReason = "api_key=secret-value-that-must-not-escape";
+  const failingPerformer: Performer = {
+    launch: async () => ({
+      launch_status: "start_failed",
+      duration_ms: 1,
+      sanitized_reason: credentialReason,
+    }),
+  };
+  const runner = new CycleRunner({
+    gateway: fixture.gateway,
+    artistPerformer: failingPerformer,
+    criticPerformer: failingPerformer,
+    workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
+  });
+
+  const outcome = await runner.run({
+    rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
+    onFamilyRecorded: async () => undefined,
+  });
+
+  const artistDescription = (await fixture.gateway.get_issue(outcome.artist.id)).description;
+  const criticDescription = (await fixture.gateway.get_issue(outcome.criticIssue.id)).description;
+  assert.equal(artistDescription.includes("- Error: Process failed"), true);
+  assert.equal(criticDescription.includes("- Error: Process failed"), true);
+  assert.equal(artistDescription.includes(credentialReason), false);
+  assert.equal(criticDescription.includes(credentialReason), false);
+  assert.deepEqual(outcome.critique, {
+    verdict: "process_error",
+    reason: "Process failed",
+    artifact_url: "https://linear.invalid/upload/fake-upload-1",
+  });
+});
+
 test("audits residual workspace when the Artist adapter rejects", async () => {
   const fixture = await world();
   const launches: PerformerLaunchRequest[] = [];
   const auditOnly = performer(launches, { launch_status: "exited", exit_code: 0, duration_ms: 1 }, {
-    verdict: "accepted", implementation_review: "Residual workspace already satisfies acceptance", checks: [],
-    evidence: ["workspace inspected"], findings: [], task_state_markdown: "Acceptance is verified",
+    verdict: "accepted", task_state_markdown: "Acceptance is verified",
   });
   let calls = 0;
   const rejectingPerformer: Performer = {
@@ -431,7 +462,7 @@ test("fails the Cycle when Critic diagnostics are not durably referenced", async
         };
       }
       await writeFile(request.final_response_path as string, criticMarkdown({
-        verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
+        verdict: "accepted", task_state_markdown: "Acceptance is verified",
       }), "utf8");
       return { launch_status: "exited", exit_code: 0, duration_ms: 1, final_response_ref: request.final_response_path };
     },
@@ -459,8 +490,7 @@ test("fails the Cycle when Critic diagnostics are not durably referenced", async
 test("bounds the mechanical Cycle reason without changing the Critic verdict", async () => {
   const fixture = await world();
   const rolePerformer = performer([], { launch_status: "exited", exit_code: 0, duration_ms: 1 }, {
-    verdict: "accepted", implementation_review: "x".repeat(2_000), checks: [], evidence: [], findings: [],
-    task_state_markdown: "Acceptance is verified",
+    verdict: "accepted", task_state_markdown: "x".repeat(2_000),
   });
   const runner = new CycleRunner({
     gateway: fixture.gateway,
@@ -544,7 +574,13 @@ test("writes explicit bounded role results with the current error message", asyn
   assert.equal(comments.some(([issueId]) => issueId === outcome.criticIssue.id), false);
   if (outcome.critique.verdict !== "process_error") throw new Error("expected critique process error");
   assert.equal(outcome.critique.reason, criticError.message.slice(0, 50));
-  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8")), outcome.critique);
+  const persistedArtifact = parseCritiqueArtifact(JSON.parse(
+    await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8"),
+  ));
+  assert.deepEqual(persistedArtifact.envelope, {
+    verdict: "process_error", reason: criticError.message.slice(0, 50),
+  });
+  assert.match(persistedArtifact.report_markdown, /## Critic Result/u);
 });
 
 test("keeps Artist Markdown mechanical when its final response reference is wrong", async () => {
@@ -572,7 +608,7 @@ test("keeps Artist Markdown mechanical when its final response reference is wron
         };
       }
       const critique = criticMarkdown({
-        verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
+        verdict: "accepted", task_state_markdown: "Acceptance is verified",
       });
       await writeFile(request.final_response_path as string, critique, "utf8");
       return {
@@ -636,13 +672,60 @@ test("turns invalid UTF-8 Critic Markdown into process_error", async () => {
   assert.equal(outcome.terminal.result, "failed");
 });
 
+test("rejects credential-shaped Critic Markdown before public projection", async () => {
+  const fixture = await world();
+  const credentialReason = "api_key=secret-value-that-must-not-escape";
+  const rolePerformer: Performer = {
+    async launch(request) {
+      if (request.sandbox === "workspace_write") {
+        await writeFile(request.final_response_path as string, "Artist completed.\n", "utf8");
+        return {
+          launch_status: "exited", exit_code: 0, duration_ms: 1,
+          final_response_ref: request.final_response_path,
+        };
+      }
+      await writeFile(request.final_response_path as string, criticMarkdown({
+        verdict: "process_error", reason: credentialReason,
+      }), "utf8");
+      return {
+        launch_status: "exited", exit_code: 0, duration_ms: 1,
+        final_response_ref: request.final_response_path,
+        diagnostic_jsonl_ref: request.diagnostic_jsonl_path,
+        diagnostic_stderr_ref: request.diagnostic_stderr_path,
+      };
+    },
+  };
+  const runner = new CycleRunner({
+    gateway: fixture.gateway,
+    artistPerformer: rolePerformer,
+    criticPerformer: rolePerformer,
+    workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
+    artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
+  });
+
+  const outcome = await runner.run({
+    rootId: "root-id", teamId: "team-id", spec: fixture.spec, rootState: fixture.rootState,
+    transitionComment: fixture.transitionComment,
+    onFamilyRecorded: async () => undefined,
+  });
+
+  const criticDescription = (await fixture.gateway.get_issue(outcome.criticIssue.id)).description;
+  const artifactText = await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8");
+  assert.deepEqual(outcome.critique, {
+    verdict: "process_error",
+    reason: "Final response is not safe Markdown",
+    artifact_url: "https://linear.invalid/upload/fake-upload-1",
+  });
+  assert.equal(criticDescription.includes(credentialReason), false);
+  assert.equal(artifactText.includes(credentialReason), false);
+});
+
 test("keeps safe malformed Critic Markdown raw while adding a mechanical process error", async () => {
   const fixture = await world();
   const comments: Array<readonly [string, string]> = [];
   const malformed = [
-    "verdict: accepted", "", "## Scope Reviewed", "Inspected parser source.", "",
-    "## Implementation Review", "The parser rejects ambiguity.", "", "## Checks", "- None",
-    "", "## Evidence", "- None", "", "## Findings", "- None", "",
+    "verdict: accepted", "", "## Audit", "Inspected parser source.", "",
+    "The parser rejects ambiguity.",
   ].join("\n");
   const gateway = new Proxy(fixture.gateway as LinearGateway, {
     get(target, property) {
@@ -693,7 +776,11 @@ test("keeps safe malformed Critic Markdown raw while adding a mechanical process
   ))?.[1] ?? "";
   assert.equal(cycleComment.includes(malformed), false);
   assert.deepEqual(fixture.gateway.attachments.map(({ filename }) => filename), ["cycle-001-critique-result.json"]);
-  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8")), outcome.critique);
+  const persistedArtifact = parseCritiqueArtifact(JSON.parse(
+    await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8"),
+  ));
+  assert.deepEqual(persistedArtifact.envelope, { verdict: "process_error", reason: "invalid_critic_markdown" });
+  assert.match(persistedArtifact.report_markdown, /## Critic Result/u);
 });
 
 test("projects valid final messages even after nonzero Artist and Critic exits", async () => {
@@ -711,7 +798,7 @@ test("projects valid final messages even after nonzero Artist and Critic exits",
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const criticRaw = criticMarkdown({ verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [] });
+  const criticRaw = criticMarkdown({ verdict: "accepted", task_state_markdown: "Acceptance is verified" });
   const rolePerformer: Performer = {
     async launch(request) {
       if (request.sandbox === "workspace_write") {
@@ -777,7 +864,7 @@ test("keeps role reports in Issue descriptions and links the uploaded Critique f
     },
   });
   const rolePerformer = performer([], { launch_status: "exited", exit_code: 0, duration_ms: 1 }, {
-    verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
+    verdict: "accepted", task_state_markdown: "Acceptance is verified",
   });
   const runner = new CycleRunner({
     gateway,
@@ -795,7 +882,7 @@ test("keeps role reports in Issue descriptions and links the uploaded Critique f
   const artistDescription = (await fixture.gateway.get_issue(outcome.artist.id)).description;
   const criticDescription = (await fixture.gateway.get_issue(outcome.criticIssue.id)).description;
   assert.equal(artistDescription.includes("Artist completed; this response is not Critic evidence.\n"), true);
-  assert.equal(criticDescription.includes("verdict: accepted"), true);
+  assert.equal(criticDescription.includes("```json\n{\"verdict\":\"accepted\""), true);
   assert.equal(comments.some(([issueId]) => issueId === outcome.artist.id), false);
   assert.equal(comments.some(([issueId]) => issueId === outcome.criticIssue.id), false);
   const cycleComment = comments.find(([issueId, body]) => (
@@ -807,6 +894,7 @@ test("keeps role reports in Issue descriptions and links the uploaded Critique f
     cycleComment.includes("[cycle-001-critique-result.json](https://linear.invalid/files/cycle-001-critique-result.json)"),
     true,
   );
+  assert.equal(outcome.critique.artifact_url, "https://linear.invalid/files/cycle-001-critique-result.json");
   assert.deepEqual(fixture.gateway.attachments, []);
 });
 
@@ -829,7 +917,7 @@ test("keeps Critique upload failures visible without changing the Cycle verdict"
     },
   });
   const rolePerformer = performer([], { launch_status: "exited", exit_code: 0, duration_ms: 1 }, {
-    verdict: "accepted", implementation_review: "Looks good", checks: [], evidence: [], findings: [],
+    verdict: "accepted", task_state_markdown: "Acceptance is verified",
   });
   const runner = new CycleRunner({
     gateway, artistPerformer: rolePerformer, criticPerformer: rolePerformer,
@@ -848,10 +936,14 @@ test("keeps Critique upload failures visible without changing the Cycle verdict"
     issueId === outcome.cycle.id && body.startsWith("## Cycle Result")
   ))?.[1] ?? "";
   assert.equal(cycleComment.includes("- Critique: upload failed (upload current message that must remain visible to)"), true);
-  assert.deepEqual(
-    JSON.parse(await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8")),
-    outcome.critique,
-  );
+  const persistedArtifact = parseCritiqueArtifact(JSON.parse(
+    await readFile(path.join(fixture.runDirectory, "cycle-001-critique-result.json"), "utf8"),
+  ));
+  assert.deepEqual(persistedArtifact.envelope, {
+    verdict: "accepted", task_state_markdown: "Acceptance is verified",
+  });
+  assert.equal(outcome.critique.artifact_url, undefined);
+  assert.equal(persistedArtifact.report_markdown, "The Critic independently audited the workspace.");
 });
 
 test("starts no Agent when complete family creation is not durably recorded", async () => {

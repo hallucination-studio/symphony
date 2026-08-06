@@ -11,7 +11,6 @@ export interface ManagedIssueDescription {
   readonly task: MarkdownText;
   readonly metadata: MarkdownText;
   readonly result?: MarkdownText | undefined;
-  readonly updated_at?: string | undefined;
 }
 
 function malformed(): never {
@@ -51,15 +50,11 @@ export function parseManagedIssueDescription(value: unknown): ManagedIssueDescri
 
   const terminal = source.slice(resultIndex + resultMarker.length);
   const newline = terminal.indexOf("\n");
-  if (newline < 0 || !terminal.startsWith(UPDATED_AT_PREFIX)) malformed();
-  let updated_at: string;
-  try {
-    updated_at = parseLinearDescriptionTimestamp(terminal.slice(UPDATED_AT_PREFIX.length, newline));
-  } catch {
-    return malformed();
-  }
-  const result = markdown(terminal.slice(newline).replace(/^\n+/u, ""));
-  return Object.freeze({ task, metadata, result, updated_at });
+  const resultSource = terminal.startsWith(UPDATED_AT_PREFIX)
+    ? (newline < 0 ? "" : terminal.slice(newline + 1).replace(/^\n+/u, ""))
+    : terminal;
+  const result = markdown(resultSource);
+  return Object.freeze({ task, metadata, result });
 }
 
 export function appendManagedIssueResult(

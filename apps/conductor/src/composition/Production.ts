@@ -13,6 +13,7 @@ export async function createProductionRootRun(
   const reconciler = new RootReconciler({
     performer: startup.reconcilePerformer,
     runDirectory: startup.request.run_directory,
+    invocationCwd: process.cwd(),
     reconcileAgent: startup.request.reconcile_agent,
     ...(startup.request.reconcile_model === undefined ? {} : { reconcileModel: startup.request.reconcile_model }),
     ...(startup.request.reconcile_reasoning_effort === undefined
