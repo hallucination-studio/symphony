@@ -1,13 +1,16 @@
 import { useState, type RefObject } from "react";
 
 import { BindingRow, EmptyState, Notice, PageHeading, RootRow, RootStatusBadge } from "./components";
-import type { CommandHandler, DesktopCommand, ProjectBindingView, RootView } from "./types";
+import { LinearGuidance } from "./OverviewPage";
+import type { CommandHandler, DesktopCommand, LinearConnectionView, ProjectBindingView, RootView } from "./types";
 
-export function ConductorsPage({ bindings, roots, headingRef, onCommand }: {
+export function ConductorsPage({ bindings, roots, linear, headingRef, onCommand, onOpenSettings }: {
   bindings: ProjectBindingView[];
   roots: RootView[];
+  linear: LinearConnectionView;
   headingRef: RefObject<HTMLHeadingElement>;
   onCommand: CommandHandler;
+  onOpenSettings?: (() => void) | undefined;
 }) {
   const [pendingAction, setPendingAction] = useState<string>();
   const [commandError, setCommandError] = useState<string>();
@@ -25,6 +28,7 @@ export function ConductorsPage({ bindings, roots, headingRef, onCommand }: {
     <>
       <PageHeading title="Conductors" description="Start and stop Project Bindings; inspect current Roots." headingRef={headingRef} />
       <div className="page-stack">
+        <LinearGuidance linear={linear} onOpenSettings={onOpenSettings} />
         {commandError && <Notice tone="negative">{commandError}</Notice>}
         <section className="panel" aria-labelledby="binding-controls-heading">
           <div className="section-heading"><h2 id="binding-controls-heading">Project Bindings</h2><span>{bindings.length} configured</span></div>

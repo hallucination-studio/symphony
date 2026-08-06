@@ -168,6 +168,42 @@ mod tests {
     }
 
     #[test]
+    fn replied_needs_human_root_uses_ordinary_linear_ordering() {
+        // Linear discovery normalizes a replied top-level Needs Human Root to
+        // the same candidate shape; scheduling must not assign it a special rank.
+        let replied_needs_human = root("needs-human-replied", 2, "2024-01-02T00:00:00Z");
+        let actions = schedule(
+            &binding(5),
+            &[
+                replied_needs_human,
+                root("todo-urgent", 1, "2024-01-03T00:00:00Z"),
+                root("todo-high-early", 2, "2024-01-01T00:00:00Z"),
+                root("todo-high-tie", 2, "2024-01-02T00:00:00Z"),
+                root("todo-normal", 3, "2024-01-01T00:00:00Z"),
+            ],
+            &[],
+        );
+
+        let ids: Vec<_> = actions
+            .into_iter()
+            .filter_map(|action| match action {
+                ScheduleAction::Start { candidate } => Some(candidate.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "todo-urgent",
+                "todo-high-early",
+                "needs-human-replied",
+                "todo-high-tie",
+                "todo-normal",
+            ]
+        );
+    }
+
+    #[test]
     fn higher_priority_waiting_root_does_not_preempt_running_root() {
         let current = [CurrentAssignment { root_id: "low".into(), priority: 2 }];
         let actions = schedule(&binding(1), &[root("urgent", 1, "2024-01-01")], &current);

@@ -1,6 +1,6 @@
 # End-to-End Testing
 
-The E2E suite proves the V1 Root workflow through three observable layers:
+The E2E suite proves the Root workflow through three observable layers:
 `local`, `boundary`, and `golden`. It does not recreate retired workflow
 machinery or provide a second operator control plane.
 
@@ -130,6 +130,10 @@ inspect private JSONL/stderr bytes.
 The deterministic scenario additionally proves continue and completion Root
 reports, token accumulation across Reconcile/Artist/Critic, and `Unknown` when
 any invocation lacks valid usage rather than estimating a total.
+It also proves the Root-only `Needs Human` gate: one question comment contains
+concrete options, an unanswered Root is idle, and a later Root reply is consumed
+as one accepted (`white_check_mark`) or rejected (`x`) batch without reading
+descendant comments.
 
 The visible Issue tree uses the frozen title contract: `[Cycle NNN]` followed by
 an objective within the 80-character Cycle title limit, then exactly
