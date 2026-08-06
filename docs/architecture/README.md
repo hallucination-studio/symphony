@@ -112,7 +112,8 @@ references. This evidence is never supplied to Critic or Root Reconcile, never
 uploaded to Linear, and never treated as workflow authority. The caller owns
 retention; golden E2E failures archive evidence before cleaning their owned
 local/branch resources, preserve the Linear Root tree for inspection, and report
-only `diagnostic_ref`. Only a visibly verified successful fixture is archived.
+only `diagnostic_ref`. Golden fixtures retain their Linear tree, workspace,
+run directory, PR, and branch after every terminal outcome for inspection.
 
 ## Podium Desktop V2 boundary
 

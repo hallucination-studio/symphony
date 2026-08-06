@@ -150,9 +150,9 @@ per-role connection overrides are injected directly without an Agent catalog.
 Conductor owns Root Reconcile, Cycle execution, Critic judgment, Root
 State promotion, and terminal delivery. There is no cross-machine lease, SQLite
 store, daemon IPC, or Web surface. `Needs Human` is a Root-only visible state.
-Podium discovers a reply after the latest question comment and submits that Root
-to the unchanged ordinary queue; it adds no recovery priority, label, answer UI,
-or Resume path.
+Podium discovers an unprocessed direct reply in the active Human Action thread
+and submits that Root to the unchanged ordinary queue. It adds no recovery
+priority, label, answer UI, or Resume path.
 
 ## Verification layers
 
@@ -166,8 +166,54 @@ The reusable test surface has three named layers:
 
 Golden does not publish redundant blocked boundary records for capabilities it
 has already exercised successfully. Fixtures own only the Linear/remote/temp
-resources they create; Root-created workspaces follow the explicit Podium or
-manual cleanup policy rather than being silently removed by the fixture.
+resources they create. Every run retains its Root Issue tree, workspace, run
+directory, delivery PR, and branch for inspection. Cleanup is an explicit
+manual action outside the E2E command; the fixture never archives, closes, or
+deletes these resources automatically after success, failure, or timeout.
+
+The scenario suite has six isolated cases. Each owns a distinct Root Issue,
+workspace, run directory, assertions, and retained resources:
+
+1. `single-cycle`
+2. `multi-cycle`
+3. `single-cycle-human-action`
+4. `cycle-human-action-cycle`
+5. `human-action-rejected-supplement`
+6. `human-action-unanswered`
+
+The deterministic layer and enabled Golden coverage run all six. When Golden
+is disabled, the supervisor still enumerates every configured scenario and
+reports each one as blocked. `npm run test:e2e` without `--scenario` starts all
+configured scenarios concurrently with one direct `Promise.all`;
+`--scenario <name>` starts only that scenario for debugging. Every behavior
+change is accepted against the default all-scenario command.
+
+Every scenario has its own five-minute timeout. The complete all-scenario run
+has one six-minute timeout. A scenario creates its own Root Issue and may add
+only the user comments required by that scenario. Those Issue and Comment
+writes are the complete E2E input surface: the fixture must not invoke an
+internal workflow operation, mutate internal state, or coordinate execution.
+Assertions read the resulting Linear Issue tree and other user-visible
+delivery boundaries as a black box. Each scenario result is reported when it
+terminates, preserving the complete current error message and its private
+`diagnostic_ref`; the final aggregate is reported after every selected
+scenario terminates or the suite timeout fires.
+
+The E2E supervisor must remain a bounded parallel launcher, not a scheduler.
+The following are explicitly out of scope and must not be implemented in the
+E2E harness:
+
+- a queue, worker pool, concurrency limit, semaphore, or staged launch;
+- priority, claim, preemption, fairness, or capacity-aware dispatch;
+- retry, backoff, transient-error classification, or automatic rerun;
+- per-phase or shared-budget timeout allocation beyond one timeout per
+  scenario and one timeout for the complete run;
+- direct Conductor, Root Reconcile, Cycle, Artist, or Critic scheduling;
+- fixtures that advance workflow state through internal APIs, hidden state,
+  or implementation-specific hooks instead of Root Issue creation and user
+  comments;
+- white-box acceptance based on internal call order, process structure, or
+  private state rather than the externally visible result.
 
 ## Completion gates
 
@@ -178,7 +224,7 @@ manual cleanup policy rather than being silently removed by the fixture.
 | implementation | focused tests, Conductor tests, lint, typecheck, and build pass |
 | real boundaries | Linear, Agent CLI, Git workspace, push, and PR tests prove actual permissions and ordering |
 | end to end | fake Linear plus temporary Git remote proves Rejected repair Cycle, Succeeded Cycle, final Inbox check, and PR creation |
-| diagnostics and failures | unknown failures retain causal local evidence, publish the current message's first 50 characters plus optional `diagnostic_ref`, and archive golden evidence before local cleanup |
-| golden fixture cleanup | failed Linear trees remain visible; Issue trees are archived only after visible success |
+| diagnostics and failures | unknown failures retain causal local evidence, publish the complete current error message plus optional `diagnostic_ref`, and preserve the fixture resources unchanged |
+| golden fixture retention | every Linear tree, workspace, run directory, PR, and branch remains available after the command exits |
 | workspace lifecycle | completed Podium workspaces expose explicit cleanup; an optional retention limit removes only older completed workspaces |
 | repository | full test suite, secret scan, scoped diff review, and human review pass |

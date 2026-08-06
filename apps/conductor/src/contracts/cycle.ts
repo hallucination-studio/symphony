@@ -11,6 +11,7 @@ import {
 import {
   asRecord,
   freezeObject,
+  parseArray,
   parseBoundedString,
   parseMarkdownText,
   parseOptional,
@@ -19,6 +20,7 @@ import {
   type MarkdownText,
   type UnknownRecord,
 } from "./validation.js";
+import { parseArchitectureDecision, type ArchitectureDecision } from "./architecture.js";
 
 export interface CycleSpec {
   readonly cycle_number: number;
@@ -26,6 +28,7 @@ export interface CycleSpec {
   readonly acceptance: MarkdownText;
   readonly boundaries: MarkdownText;
   readonly consumed_comment_ids: readonly CommentId[];
+  readonly architecture_decisions: readonly ArchitectureDecision[];
 }
 
 export type CritiqueEnvelope =
@@ -83,6 +86,7 @@ export function parseCycleSpec(value: unknown): CycleSpec {
     "acceptance",
     "boundaries",
     "consumed_comment_ids",
+    "architecture_decisions",
   ]);
   const comments = parseStringArray(record.consumed_comment_ids, parseCommentId);
   return freezeObject({
@@ -91,6 +95,7 @@ export function parseCycleSpec(value: unknown): CycleSpec {
     acceptance: parseMarkdownText(record.acceptance, "invalid_cycle_acceptance"),
     boundaries: parseMarkdownText(record.boundaries, "invalid_cycle_boundaries"),
     consumed_comment_ids: comments,
+    architecture_decisions: parseArray(record.architecture_decisions, parseArchitectureDecision),
   });
 }
 

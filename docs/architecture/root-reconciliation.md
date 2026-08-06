@@ -31,11 +31,12 @@ model-authored report.
 ## Reconcile phase
 
 Reconcile receives only the Root requirement, trusted Root State, the compact
-latest Critique checkpoint, optional Harness feedback, new
-Root comments after the cursor, and a mechanical file/line summary. It never
-reads the Cycle DAG, child descriptions/comments, Artist prose, or raw
-transcripts. Critic remains the sole semantic authority for implementation
-quality even though the process has workspace access for its other phases.
+latest Critique checkpoint, optional Harness feedback, ordinary Root Inbox
+comments after the cursor, the exact direct-reply batch for a pending Human
+Action (when present), and a mechanical file/line summary. It never reads the
+Cycle DAG, child descriptions/comments, Artist prose, or raw transcripts.
+Critic remains the sole semantic authority for implementation quality even
+though the process has workspace access for its other phases.
 
 Its nonterminal decision is closed:
 
@@ -47,15 +48,58 @@ needs_human { reason, questions[1..n], reply_disposition?, report }
 Each question contains two to four concrete mutually exclusive options. Every
 option has a stable key, a human label, and the consequence of choosing it.
 Free-form-only questions, inferred yes/no choices, and missing options are
-invalid. When Reconcile receives a reply batch while Root is `Needs Human`, it
+invalid. When Reconcile receives a direct-reply batch while Root is `Needs Human`, it
 must classify the whole batch as `accepted` or `rejected`; partial acceptance is
 not a contract. Rejection includes a concrete reason and can only lead to a new
 `needs_human` decision. Acceptance may create a Cycle, complete, or expose a
 new independent question.
 
-One Cycle contains exactly one Artist and one Critic. All new Root comments are
-consumed as one batch only after the complete family is durably recorded.
-During an active Cycle, retain newer comments as pending for the next Reconcile.
+### Human Action thread
+
+`needs_human` creates exactly one pending Human Action thread for the Root. The
+thread is a Root Harness question comment plus its native direct-reply thread;
+it is not a child Issue, a second status machine, a repository document, or a
+free-form chat channel. The request comment carries the validated question and
+two to four options. Root State stores the pending `human_action` record until
+one complete reply batch is classified.
+
+Only a direct reply to the exact request comment answers the Human Action. A
+normal top-level Root comment remains ordinary Inbox input and never answers,
+accepts, rejects, or closes the pending Human Action. It is passed to a later
+Reconcile as ordinary Root input; it cannot supply `reply_disposition` and it
+does not advance the Human Action cursor. A reply batch is consumed as one
+whole batch, receives one accepted or rejected disposition, and receives the
+matching visible reaction receipt before its source IDs are advanced.
+
+The first fresh Reconcile that sees an accepted direct-reply batch returns one
+or more structured decision drafts alongside its next semantic decision. A
+rejected batch returns no decision draft and keeps any supplemental questions
+inside the existing thread. No model output may choose the record ID, timestamp,
+or source IDs.
+
+```text
+architecture_decisions[1..n] {
+  title,
+  decision,
+  rationale,
+  consequences[]
+}
+```
+
+Conductor appends the accepted decision to `RootState.architecture_decisions`
+and writes the exact resulting array into the next immutable `CycleSpec` when
+`next` is `create_cycle`. That Cycle receives a snapshot, not a live reference:
+later Human Action answers are visible only to later Reconcile and later Cycles;
+Artist and Critic cannot edit or reinterpret an earlier snapshot. An accepted
+answer may therefore change the next Cycle's boundaries or acceptance, but it
+cannot rewrite a completed Cycle's contract.
+
+One Cycle contains exactly one Artist and one Critic. Ordinary Root Inbox
+comments are consumed as one batch only after the complete family is durably
+recorded. During an active Cycle, retain newer comments as pending for the next
+Reconcile; ordinary comments remain Inbox input, while a Human Action
+direct-reply batch remains scoped to its request thread and is never folded
+into ordinary Inbox input.
 
 Root State keeps Task State as compact progress promoted only from an accepted
 Critic. Conductor parses the compact machine envelope in the Critic Markdown
@@ -96,8 +140,33 @@ to, or recreating the branch from a remote base.
 
 Root State persists the prepared workspace binding, phase, compact trusted task
 state, compact latest Critique checkpoint, one Harness warning, comment cursor,
-exact token counters when available, and optional structured Delivery. The full
+exact token counters when available, optional pending `human_action`, the
+append-only `architecture_decisions[]` record set, and optional structured
+Delivery. `architecture_decisions[]` is required at the wire boundary and may
+be empty; a missing field is invalid under this hard-cut contract. The full
 Critique remains in its local/uploaded artifact rather than the Root checkpoint.
+
+Each accepted architecture decision is a mechanical record, not a repository
+ADR file:
+
+```text
+ArchitectureDecision {
+  id: ADR-NNN,                      # assigned monotonically by Conductor
+  title,
+  decision,
+  rationale,
+  consequences[],
+  source_action_comment_id,
+  source_reply_ids[],
+  decided_at: YYYY-MM-DD HH:mm:ss GMT+/-HH:MM
+}
+```
+
+`id` is allocated from the current Root State sequence and never comes from the
+Agent or the human. `decided_at` is the Conductor runtime's local clock value
+and is presentation-only; it is not parsed for ordering. Source fields preserve
+the action comment and complete ordered direct-reply batch. The record is
+durable Root State only; this design creates no repository ADR file.
 
 The Harness-managed Root description contains one replaceable metadata block,
 latest validated Reconcile report, local-offset update time, and, after
@@ -125,5 +194,5 @@ projected.
 |---|---|---|
 | workspace | Prepare binding, final delivery, and mechanical reporting | using self-inspection to overrule Critic quality judgment |
 | Linear | none directly | GraphQL, child-tree reads, Issue mutation, or comment rendering |
-| context | Root requirement, trusted Critic/Root State, new Root comments | child DAG, Artist output, raw diagnostics, hidden workflow state |
+| context | Root State, ordinary Inbox, and direct Human replies | child DAG, role output, diagnostics, hidden state, or top-level fake replies |
 | delivery | required PR, branch, files fallback order | skipping available remote delivery; automatic merge, destructive cleanup, or invented locations |

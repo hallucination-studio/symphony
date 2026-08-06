@@ -2,7 +2,7 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | small injectable Linear Gateway, GraphQL implementation, Issue projection, Root State, and Root comment cursor | semantic routing, full-tree reconstruction, Agent context, or generic capabilities |
+| target proposal | Linear Gateway, Issue projection, Root State, Human Action replies, and receipts | semantic routing, tree reconstruction, Agent context, or generic capabilities |
 
 `LinearGateway` is the only Linear boundary. There is no generic Task Manager,
 MCP schema, caller capability, mutation basis, resource revision, or provider
@@ -27,7 +27,7 @@ prompts, and arbitrary provider payloads are never uploaded.
 |---|---|---|
 | Gateway protocol and GraphQL implementation | typed calls, response validation, timeouts, secret redaction | workflow decisions or Markdown policy |
 | projector/templates | create Cycle family, append terminal reports/history, update descriptions, statuses, Root snapshot, and Root State | direct HTTP or Agent invocation |
-| Inbox helper | read comments after Root State cursor and filter Harness markers | active-Cycle injection or old-comment replay |
+| Inbox helper | read top-level comments after the Root cursor and direct Human Action replies after the episode cursor | active-Cycle injection, flat-reply compatibility, or old-comment replay |
 
 Only `LinearGateway` is an architectural interface. Projection, templates, and
 Inbox filtering are private functions and may share files; they must not become
@@ -41,15 +41,29 @@ LinearGateway {
   list_team_states(team_id) -> LinearWorkflowState[]
   create_team_state(team_id, name, type) -> LinearWorkflowState
   list_root_comments_after(root_id, cursor?) -> LinearComment[]
+  list_comment_replies_after(comment_id, cursor?) -> LinearComment[]
   list_unfinished_descendants(root_id) -> { id, status }[]
   create_issue(request) -> LinearIssue
   update_issue_status(issue_id, status_id) -> void
   update_issue_description(issue_id, body) -> void
   create_comment(issue_id, body) -> LinearComment
-  create_comment_reaction(comment_id, emoji) -> LinearReaction
+  create_comment_reply(comment_id, body) -> LinearComment
+  create_comment_reaction(reply_id, emoji) -> LinearReaction
   upload_file(filename, content_type: "application/json", contents: Uint8Array) -> LinearUploadedFile
 }
 ```
+
+`LinearComment` is normalized as `{ id, issue_id, parent_id, body,
+creator_id, created_at }`. `parent_id` is `null` for a top-level comment and
+must equal the Human Action comment ID for a direct thread reply. The reply
+listing operation returns only direct replies for that parent and validates the
+cursor, issue, parent, timestamp, and duplicate IDs before returning. A nested
+reply or a reply to a non-Human-Action comment is an invalid provider response;
+there is no flattening fallback. `LinearReaction` is normalized as
+`{ id, reply_id, emoji }`, with the closed emoji set `white_check_mark | x`.
+`create_comment` remains available for Harness-owned top-level records such as
+the Human Action opener and Cycle comments; a user answer always uses
+`create_comment_reply`.
 
 | Contract | Constraint |
 |---|---|
@@ -59,8 +73,17 @@ LinearGateway {
 | tests | pure in-memory fake, no credentials or network |
 | orchestration | depends only on Gateway, never concrete GraphQL or SDK objects |
 
+| Rule | Scope | Required behavior | Forbidden behavior |
+|---|---|---|---|
+| `TM-COMMENT-001` | Human Action parent | create one top-level action with `create_comment`; preserve its `parent_id = null` and exact marker | create a second top-level question for one open episode |
+| `TM-COMMENT-002` | Human Action reply | use `list_comment_replies_after` and `create_comment_reply` with the action comment ID as parent | flatten replies into Root comments or expose a generic reply capability |
+| `TM-COMMENT-003` | reply receipt | react to each classified reply with `white_check_mark` or `x` | react to the action opener or infer state from user reactions |
+| `TM-COMMENT-004` | projection failure | validate issue/parent/cursor/timestamp/duplicate IDs and stop on a failed reply or reaction write | guess, retry indefinitely, or silently accept an unknown write outcome |
+
 There is intentionally no `readRootFamily` operation. Unfinished descendant
-listing exposes only the fields required for mechanical cancellation.
+listing exposes only the fields required for mechanical cancellation. Reply
+listing is limited to one Human Action parent and one saved cursor; it is not a
+generic thread or comment-search capability.
 
 `update_issue_description` is a constrained projection operation, not a general
 content editor. It accepts only one of these owned writes: replace the suffix
@@ -68,8 +91,11 @@ between `# Symphony Harness: Managed Root` and
 `# Symphony Harness: End Managed Root`, or append one terminal
 Artist/Critic report plus one presentation-only human-readable local `Updated at:
 <YYYY-MM-DD HH:mm:ss GMT+/-HH:MM>` line to the matching role description. It
-must preserve all frozen bytes outside the owned region and is never used for
-Cycle descriptions.
+may also replace the Harness-owned `# Architecture Decisions` section with the
+mechanical rendering of Root State's accepted `ArchitectureDecision[]`. It must
+preserve all frozen bytes outside those owned regions and is never used for Cycle
+descriptions. Human Action replies and reactions use their dedicated Gateway
+operations; `update_issue_description` never appends a flat Root answer.
 
 ## Canonical status discovery
 
@@ -126,6 +152,9 @@ state machine. Because both canonical active states have provider type
 | finish role or Cycle | append its bounded result, then set Artist, Critic, or Cycle to canonical `Done` |
 | project Root decision | active Cycle -> `In Progress`; `complete` or escaped runtime failure -> `In Review`; structured `needs_human` -> `Needs Human`; recorded Delivery -> `Done` |
 | project Root Reconcile result | place report and Delivery before Metadata; copy `create_cycle` once to Cycle; project trusted result facts; never feed it to Inbox |
+| open Human Action | create exactly one top-level `# Symphony Harness: Human Action` comment for the independent decision episode |
+| process Human Action replies | list direct replies after the episode cursor; react to every reply, then accept the batch or create one same-thread follow-up reply |
+| project Architecture Decisions | render accepted structured `ArchitectureDecision` fields from Root State under `# Architecture Decisions`; never treat the rendering as authority |
 | update Root State | replace only the canonical Harness-managed Root description suffix |
 
 Cycle title/description is never updated after creation. Artist and Critic
@@ -152,6 +181,8 @@ Root State is the durable runtime checkpoint and contains only:
 
 - Root workspace path, external run directory, and branch;
 - current phase or `NeedsHuman` reason;
+- active Human Action episode ID and its saved direct-reply cursor when waiting;
+- accepted structured `ArchitectureDecision[]` records;
 - current trusted task state;
 - compact `latest_critique` checkpoint from the newest terminal Critic;
 - at most one current Harness warning;
@@ -167,20 +198,33 @@ the saved workspace is missing, stop rather than creating a conflicting one.
 
 | Fact | Behavior |
 |---|---|
-| comment is after saved cursor and lacks Harness marker | new Reconcile input |
-| comment carries Harness marker | operational output, never model input |
+| top-level comment is after the Root cursor and lacks a Harness marker | new Reconcile input only when Root is not waiting on a Human Action episode |
+| top-level `# Symphony Harness: Human Action` comment | one independent decision episode; exactly one per open episode; never flat Inbox input |
+| direct reply after the episode cursor | one Human Action batch; pass the complete batch to fresh Reconcile |
+| nested reply or top-level Root comment while an episode is open | unsupported flat input; ignore and expose the episode's thread boundary |
+| Harness follow-up reply | one rejection question in the original thread; never a new episode or Inbox input |
 | comment belongs to descendant | display-only, never fetched for Reconcile |
 | Cycle creation/result comment | exactly two append-only operator records; never model input |
 | selected new comment | cursor remains unchanged until its Reconcile action and receipt are durably projected |
 | completion decision | perform one final after-cursor read before persisting Root Reconcile Delivery |
-| accepted `Needs Human` reply batch | add `white_check_mark` reaction to every batch comment before committing its cursor |
-| rejected `Needs Human` reply batch | add `x` reaction to every batch comment, commit its cursor, and create one new Harness question comment with the rejection reason |
+| accepted Human Action reply batch | add `white_check_mark` reaction to every reply, persist the accepted decision, then commit its episode cursor |
+| rejected Human Action reply batch | add `x` reaction to every reply, commit only after the same-thread follow-up reply is durable, and keep the episode open |
+
+Podium's candidate adapter reads only open Human Action threads and their direct
+replies after the saved episode cursor. One unprocessed reply is enough to make
+the Root an ordinary candidate; priority, creation time, and ID ordering remain
+unchanged. Podium does not read reply bodies for meaning, create a reply or
+reaction, update Root State or Architecture Decisions, render a question, or
+offer a Resume action. Conductor owns all reply consumption and decision
+projection.
 
 ## Failure policy
 
 | Condition | Behavior |
 |---|---|
 | any provider failure | expose and stop; no alternate task mode or provider fallback |
+| malformed Human Action parent/reply or cursor | expose and stop; do not flatten or replay the reply |
+| flat Root reply during an open Human Action episode | ignore as unsupported input; do not enqueue, react, or migrate it into the thread |
 | partial family | start no Agent; next process cancels unfinished pieces |
 | unknown write outcome | stop; do not guess, duplicate, or read back into a recovery protocol |
 | Root already `Done` | after the team workflow-contract check, no Root, descendant, comment, workspace, or Agent mutation |

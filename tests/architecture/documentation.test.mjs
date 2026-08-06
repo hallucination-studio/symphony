@@ -359,7 +359,7 @@ test("V2 Podium Desktop keeps local scheduling outside Conductor", async () => {
   assert.match(contracts, /ProjectBinding/);
   assert.match(contracts, /routing_label/);
   assert.match(conductor, /one `--linear-root`, one preferred `--workspace`, and one `--dir`/);
-  assert.match(conductor, /let a later new Root reply make it an ordinary candidate/);
+  assert.match(conductor, /let an unprocessed Human Action thread reply make it an ordinary candidate/);
   assert.match(workflow, /use the ordinary queue; add no rank, label, priority mutation, or Resume command/);
 });
 

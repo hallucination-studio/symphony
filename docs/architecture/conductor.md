@@ -79,7 +79,7 @@ Conductor to discover a Project, select another Root, or manage a fleet.
 | `CO-PODIUM-001` | accept one bound Root, optional preferred workspace, and run directory; bind Prepare's result for the process lifetime | discover, claim, or adopt another Root after Prepare |
 | `CO-PODIUM-002` | accept independent Reconcile, Artist, and Critic role launch values | inherit Reconcile settings from Artist or share role credentials |
 | `CO-PODIUM-003` | let an explicit Podium stop command terminate the process tree only at the external process boundary | implement priority, queue, automatic preemption, or PID persistence inside Conductor |
-| `CO-PODIUM-004` | release a `Needs Human` run; let a later new Root reply make it an ordinary candidate | add Resume commands, special priority, labels, or question rendering to Podium |
+| `CO-PODIUM-004` | release a `Needs Human` run; let an unprocessed Human Action thread reply make it an ordinary candidate | add Resume commands, special priority, labels, or question rendering to Podium |
 
 ## Startup rebuild
 

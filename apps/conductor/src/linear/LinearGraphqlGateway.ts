@@ -6,10 +6,17 @@ import type {
   LinearCreateWorkflowStateRequest,
   LinearGateway,
   LinearIssue,
+  LinearReaction,
+  LinearReactionEmoji,
   LinearUnfinishedDescendant,
   LinearWorkflowState,
 } from "./LinearGateway.js";
-import { parseLinearComment, parseLinearIssue } from "../contracts/task-management.js";
+import {
+  LINEAR_REACTION_EMOJIS,
+  parseLinearComment,
+  parseLinearIssue,
+  parseLinearReaction,
+} from "../contracts/task-management.js";
 
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
 const PAGE_SIZE = 50;
@@ -46,6 +53,10 @@ function identifier(value: unknown): string {
   const parsed = boundedString(value, 256);
   if (/[\r\n]/u.test(parsed)) throw new Error("invalid");
   return parsed;
+}
+
+function nullableIdentifier(value: unknown): string | null {
+  return value === null ? null : identifier(value);
 }
 
 function nestedId(value: unknown): string {
@@ -162,19 +173,43 @@ function normalizedStatus(type: string): LinearIssue["status"] {
   }
 }
 
-function comment(value: unknown, expectedIssueId?: string): LinearComment {
+function comment(
+  value: unknown,
+  expectedIssueId?: string,
+  expectedParentId?: string | null,
+): LinearComment {
   const raw = record(value);
   const issueId = raw.issue === undefined
     ? expectedIssueId
     : nestedId(raw.issue);
   if (issueId === undefined) throw new Error("invalid");
+  if (expectedIssueId !== undefined && issueId !== expectedIssueId) throw new Error("invalid");
+  if (!Object.hasOwn(raw, "parentId")) throw new Error("invalid");
+  const parentId = nullableIdentifier(raw.parentId);
+  if (expectedParentId !== undefined && parentId !== expectedParentId) throw new Error("invalid");
   return parseLinearComment({
     id: identifier(raw.id),
     issue_id: issueId,
+    parent_id: parentId,
     body: boundedString(raw.body, 100_000),
     creator_id: nestedId(raw.user),
     created_at: timestamp(raw.createdAt),
   });
+}
+
+function reaction(
+  value: unknown,
+  replyId: string,
+  requestedEmoji: LinearReactionEmoji,
+): LinearReaction {
+  const raw = record(value);
+  const parsed = parseLinearReaction({
+    id: identifier(raw.id),
+    reply_id: replyId,
+    emoji: raw.emoji,
+  });
+  if (parsed.emoji !== requestedEmoji) throw new Error("invalid");
+  return parsed;
 }
 
 function connection(value: unknown): {
@@ -199,8 +234,10 @@ function safeResource(value: string): string {
   return /^[A-Za-z0-9:_-]{1,128}$/u.test(value) ? value : "invalid-resource";
 }
 
-function validateLocal(value: string, max: number): void {
-  if (value.length === 0 || value.length > max || value.includes("\0")) throw new Error("linear_invalid_request");
+function validateLocal(value: unknown, max: number): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > max || value.includes("\0")) {
+    throw new Error("linear_invalid_request");
+  }
 }
 
 function providerError(value: unknown): Error {
@@ -223,7 +260,12 @@ function operationDocument(operation: string): string {
     }`,
     ListIssueComments: `query ListIssueComments($issueRef: String!, $cursor: String, $first: Int!) {
       issue(id: $issueRef) { comments(after: $cursor, first: $first) {
-        nodes { id body createdAt user { id } } pageInfo { hasNextPage endCursor }
+        nodes { id body createdAt issue { id } parentId user { id } } pageInfo { hasNextPage endCursor }
+      } }
+    }`,
+    ListCommentReplies: `query ListCommentReplies($commentId: String!, $cursor: String, $first: Int!) {
+      comment(id: $commentId) { issue { id } children(after: $cursor, first: $first) {
+        nodes { id body createdAt issue { id } parentId user { id } } pageInfo { hasNextPage endCursor }
       } }
     }`,
     ListIssueChildren: `query ListIssueChildren($issueRef: String!, $cursor: String, $first: Int!) {
@@ -243,7 +285,13 @@ function operationDocument(operation: string): string {
       issueUpdate(id: $issueId, input: $input) { success }
     }`,
     CreateComment: `mutation CreateComment($input: CommentCreateInput!) {
-      commentCreate(input: $input) { success comment { id body createdAt issue { id } user { id } } }
+      commentCreate(input: $input) { success comment { id body createdAt issue { id } parentId user { id } } }
+    }`,
+    CreateCommentReply: `mutation CreateCommentReply($input: CommentCreateInput!) {
+      commentCreate(input: $input) { success comment { id body createdAt issue { id } parentId user { id } } }
+    }`,
+    ReactionCreate: `mutation ReactionCreate($input: ReactionCreateInput!) {
+      reactionCreate(input: $input) { success reaction { id emoji } }
     }`,
     FileUpload: `mutation FileUpload($contentType: String!, $filename: String!, $size: Int!) {
       fileUpload(contentType: $contentType, filename: $filename, size: $size) {
@@ -329,6 +377,15 @@ export class LinearGraphqlGateway implements LinearGateway {
     return Object.freeze(comments.slice(cursorIndex + 1));
   }
 
+  async list_comment_replies_after(commentId: string, cursor?: string): Promise<readonly LinearComment[]> {
+    validateLocal(commentId, 256);
+    const comments = await this.#listCommentReplies(commentId);
+    if (cursor === undefined) return comments;
+    const cursorIndex = comments.findIndex((entry) => entry.id === cursor);
+    if (cursorIndex < 0) throw new Error("linear_comment_cursor_not_found");
+    return Object.freeze(comments.slice(cursorIndex + 1));
+  }
+
   async list_unfinished_descendants(rootId: string): Promise<readonly LinearUnfinishedDescendant[]> {
     const unfinished: LinearUnfinishedDescendant[] = [];
     const pending = [rootId];
@@ -405,6 +462,7 @@ export class LinearGraphqlGateway implements LinearGateway {
   }
 
   async create_comment(issueId: string, body: string): Promise<LinearComment> {
+    validateLocal(issueId, 256);
     validateLocal(body, 100_000);
     const data = await this.#request("CreateComment", "create_comment", issueId, {
       input: { issueId, body },
@@ -414,7 +472,49 @@ export class LinearGraphqlGateway implements LinearGateway {
     );
     if (payload.success !== true) throw new Error(`linear_create_comment_failed:${safeResource(issueId)}`);
     return this.#parse(
-      "create_comment", issueId, () => comment(payload.comment, issueId), payload.comment,
+      "create_comment", issueId, () => comment(payload.comment, issueId, null), payload.comment,
+    );
+  }
+
+  async create_comment_reply(issueId: string, commentId: string, body: string): Promise<LinearComment> {
+    validateLocal(issueId, 256);
+    validateLocal(commentId, 256);
+    validateLocal(body, 100_000);
+    const data = await this.#request("CreateCommentReply", "create_comment_reply", commentId, {
+      input: { issueId, parentId: commentId, body },
+    });
+    const payload = this.#parse(
+      "create_comment_reply", commentId,
+      () => record(data.commentCreate), data.commentCreate,
+    );
+    if (payload.success !== true) throw new Error(`linear_create_comment_reply_failed:${safeResource(commentId)}`);
+    return this.#parse(
+      "create_comment_reply", commentId,
+      () => comment(payload.comment, issueId, commentId), payload.comment,
+    );
+  }
+
+  async create_comment_reaction(
+    replyId: string,
+    emoji: LinearReactionEmoji,
+  ): Promise<LinearReaction> {
+    validateLocal(replyId, 256);
+    if (!(LINEAR_REACTION_EMOJIS as readonly string[]).includes(emoji)) {
+      throw new Error("linear_comment_reaction_emoji_invalid");
+    }
+    const data = await this.#request("ReactionCreate", "create_comment_reaction", replyId, {
+      input: { commentId: replyId, emoji },
+    });
+    const payload = this.#parse(
+      "create_comment_reaction", replyId,
+      () => record(data.reactionCreate), data.reactionCreate,
+    );
+    if (payload.success !== true) {
+      throw new Error(`linear_create_comment_reaction_failed:${safeResource(replyId)}`);
+    }
+    return this.#parse(
+      "create_comment_reaction", replyId,
+      () => reaction(payload.reaction, replyId, emoji), payload.reaction,
     );
   }
 
@@ -446,6 +546,7 @@ export class LinearGraphqlGateway implements LinearGateway {
 
   async #listComments(issueId: string): Promise<readonly LinearComment[]> {
     const comments: LinearComment[] = [];
+    const seenIds = new Set<string>();
     let cursor: string | null = null;
     for (let page = 0; page < MAX_PAGES; page += 1) {
       const data = await this.#request("ListIssueComments", "list_root_comments_after", issueId, {
@@ -457,12 +558,17 @@ export class LinearGraphqlGateway implements LinearGateway {
         () => connection(record(data.issue).comments),
         data.issue,
       );
-      comments.push(...this.#parse(
+      const pageComments = this.#parse(
         "list_root_comments_after",
         issueId,
         () => parsed.nodes.map((entry) => comment(entry, issueId)),
         parsed.nodes,
-      ));
+      );
+      for (const entry of pageComments) {
+        if (seenIds.has(entry.id)) throw this.#invalid("list_root_comments_after", issueId);
+        seenIds.add(entry.id);
+        if (entry.parent_id === null) comments.push(entry);
+      }
       if (!parsed.hasNextPage) {
         return Object.freeze(comments.sort(
           (left, right) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id),
@@ -471,6 +577,53 @@ export class LinearGraphqlGateway implements LinearGateway {
       cursor = this.#nextCursor("list_root_comments_after", issueId, cursor, parsed.endCursor);
     }
     throw this.#invalid("list_root_comments_after", issueId);
+  }
+
+  async #listCommentReplies(commentId: string): Promise<readonly LinearComment[]> {
+    const comments: LinearComment[] = [];
+    const seenIds = new Set<string>();
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const data = await this.#request("ListCommentReplies", "list_comment_replies_after", commentId, {
+        commentId, cursor, first: PAGE_SIZE,
+      });
+      const parent = this.#parse(
+        "list_comment_replies_after",
+        commentId,
+        () => record(data.comment),
+        data.comment,
+      );
+      const expectedIssueId = this.#parse(
+        "list_comment_replies_after",
+        commentId,
+        () => nestedId(parent.issue),
+        parent.issue,
+      );
+      const parsed = this.#parse(
+        "list_comment_replies_after",
+        commentId,
+        () => connection(parent.children),
+        parent.children,
+      );
+      const pageComments = this.#parse(
+        "list_comment_replies_after",
+        commentId,
+        () => parsed.nodes.map((entry) => comment(entry, expectedIssueId, commentId)),
+        parsed.nodes,
+      );
+      for (const entry of pageComments) {
+        if (seenIds.has(entry.id)) throw this.#invalid("list_comment_replies_after", commentId);
+        seenIds.add(entry.id);
+        comments.push(entry);
+      }
+      if (!parsed.hasNextPage) {
+        return Object.freeze(comments.sort(
+          (left, right) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id),
+        ));
+      }
+      cursor = this.#nextCursor("list_comment_replies_after", commentId, cursor, parsed.endCursor);
+    }
+    throw this.#invalid("list_comment_replies_after", commentId);
   }
 
   #parseMutationIssue(operation: string, resource: string, value: unknown): LinearIssue {
