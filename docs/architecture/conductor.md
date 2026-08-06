@@ -36,7 +36,7 @@ lh-harness run \
 | Root input | Root title and immutable requirement section are the only task; the managed snapshot is stripped and no separate task input is accepted |
 | `--workspace` | optional preferred path; deterministic Root Reconcile Prepare creates/adopts it |
 | `--dir` | existing writable run directory outside the workspace |
-| resolved Root | resolve the Root team and five canonical workflow statuses by exact name and expected type |
+| resolved Root | resolve the Root team's six canonical Root statuses by exact name and expected type |
 | `--reconcile-agent codex` | closed Reconcile role adapter; omission defaults to `codex` |
 | `--artist-agent codex` | closed Artist role adapter; omission defaults to `codex` |
 | `--critic-agent codex` | closed Critic role adapter; omission defaults to `codex` |
@@ -79,7 +79,7 @@ Conductor to discover a Project, select another Root, or manage a fleet.
 | `CO-PODIUM-001` | accept one bound Root, optional preferred workspace, and run directory; bind Prepare's result for the process lifetime | discover, claim, or adopt another Root after Prepare |
 | `CO-PODIUM-002` | accept independent Reconcile, Artist, and Critic role launch values | inherit Reconcile settings from Artist or share role credentials |
 | `CO-PODIUM-003` | let an explicit Podium stop command terminate the process tree only at the external process boundary | implement priority, queue, automatic preemption, or PID persistence inside Conductor |
-| `CO-PODIUM-004` | retain V1 `NeedsHuman` terminal behavior inside Root workflow | add Podium scheduling, UI, or E2E behavior for `NeedsHuman` this round |
+| `CO-PODIUM-004` | release a `Needs Human` run; let a later new Root reply make it an ordinary candidate | add Resume commands, special priority, labels, or question rendering to Podium |
 
 ## Startup rebuild
 
@@ -95,18 +95,17 @@ Startup performs this fixed sequence:
 
 ```text
 resolve Root
--> resolve or create the five canonical Linear statuses by exact name and type
+-> resolve or create the six canonical Linear statuses by exact name and type
 -> Root Done? exit without Root-owned mutation
   -> resolve Root State
   -> validate/project the exact Root managed snapshot block with a local RFC3339 timestamp
 -> Root State absent? run deterministic Prepare with the optional preferred path and persist its binding
--> delivering without structured Delivery? set NeedsHuman, project Root In Review, and stop
+-> delivering without structured Delivery? expose failure, project Root In Review, and stop
 -> otherwise validate the saved binding and supplied run directory
 -> list unfinished descendant Issue IDs and statuses
 -> change every unfinished descendant to canonical Canceled
 -> update Root State phase to idle and add Harness feedback that the retained
    workspace may contain unreviewed partial modifications
--> normalize a nonterminal Root to canonical Todo before fresh Reconcile
 -> run fresh Root Reconcile
 ```
 
@@ -120,8 +119,8 @@ resolver conflict, not a terminal Root, and cannot bypass startup validation.
 | `CO-START-002` | if Root State exists, require its workspace, run directory, and branch to match the invocation inputs when supplied | adopt or create replacement directories |
 | `CO-START-003` | list only unfinished descendant identity/status for cancellation | parse or model old child descriptions, comments, or results |
 | `CO-START-004` | set every unfinished Cycle, Artist, and Critic to canonical `Canceled` before Reconcile | resume, complete, review, or synthesize results for them |
-| `CO-START-005` | if saved workspace/run directory is missing or invalid, set `NeedsHuman`, project Root `In Review`, and stop | reconstruct from Git hashes, patches, children, or logs |
-| `CO-START-006` | if phase is `delivering` without structured Delivery, set `NeedsHuman`, project Root `In Review`, and stop before other startup actions | retry, inspect provider state, or adopt a branch/PR |
+| `CO-START-005` | if saved workspace/run directory is missing or invalid, expose a runtime failure with Root `In Review` | invent a human question, reconstruct from Git hashes, patches, children, or logs |
+| `CO-START-006` | if phase is `delivering` without structured Delivery, expose a runtime failure with Root `In Review` before other startup actions | invent a human question, retry, inspect provider state, or adopt a branch/PR |
 | `CO-START-007` | after the team workflow-contract check, if Root is `Done`, exit before workspace, descendant, or Root State mutation | reopen Root or alter terminal descendants |
 
 This is abandonment followed by fresh reasoning, not execution recovery. The
@@ -140,7 +139,7 @@ flowchart TD
   Artist --> Critic[Fresh read-only Critic]
   Critic --> Close[Close Cycle and update Root State]
   Close --> Reconcile
-  Decision -->|NeedsHuman| Stop[Update Root State and Root In Review]
+  Decision -->|Needs Human| Stop[Create one Root question comment and set Root Needs Human]
   Decision -->|Complete| Inbox[Final Root comment read]
   Inbox -->|new input| Reconcile
   Inbox -->|empty| PR[Commit, push, create PR]
@@ -232,12 +231,11 @@ Neither report repeats the Cycle description. There is one Artist and one
 Critic Agent call per Cycle. A missing or invalid final file becomes a process
 error; Conductor never starts a second summarization or format-repair call.
 
-Root status is a mechanical projection around the semantic decision: startup
-gates normalize a nonterminal Root to `Todo` before the first fresh Reconcile;
-a durable Cycle family sets Root to `In Progress`; a complete Critique is
-written to `RootState.latest_critique` and sets Root to `In Review` for the next
-Reconcile; and a later `complete`, `needs_human`, or escaped runtime failure
-remains `In Review`. A recorded PR or pushed branch delivery sets it to `Done`.
+Root status is a mechanical projection around the semantic decision. A new Root
+begins in `Todo`; startup does not normalize a resumed Root. A durable Cycle
+family sets Root to `In Progress`; a complete Critique sets Root to `In Review`;
+a structured `needs_human` sets it to `Needs Human`; and an escaped runtime
+failure remains `In Review`. A recorded Delivery sets it to `Done`.
 Root
 Reconcile never calls Linear or chooses a status ID. A status mutation failure is
 a provider failure and stops the run; Conductor never silently falls back to a
@@ -321,9 +319,10 @@ persists, and projects it before Root `Done`; it never retries or repeats Git.
 | Observation | Action |
 |---|---|
 | signal or deadline | cancel live process, record bounded state where possible, stop |
-| this process reaches its maximum Cycle count, or a human question is required | set Root State `NeedsHuman`, project Root `In Review`, and stop |
+| Root Reconcile returns concrete human questions | create one Root question comment, set Root State and Root `Needs Human`, and stop |
+| this process reaches its maximum Cycle count | expose a runtime failure with Root `In Review`; do not invent a human question |
 | Linear failure | preserve run-directory evidence and stop |
-| missing saved workspace or run directory | set `NeedsHuman`, project Root `In Review`, and stop; do not rebuild it |
+| missing saved workspace or run directory | expose a runtime failure with Root `In Review`; do not rebuild it |
 | commit or push failure | record failed step, leave Root `In Review` and workspace intact, stop |
 | PR unavailable after push | record delivered branch, set Root `Done`, stop successfully |
 | escaped runtime failure | show the current error message's first 50 characters, set Root `In Review`, preserve private diagnostics, fail process |
