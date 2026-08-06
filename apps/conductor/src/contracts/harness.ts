@@ -19,12 +19,12 @@ export interface HarnessRunRequest {
   readonly reconcile_agent: AgentKind;
   readonly reconcile_model?: string;
   readonly reconcile_reasoning_effort?: string;
-  readonly execute_agent: AgentKind;
-  readonly execute_model?: string;
-  readonly execute_reasoning_effort?: string;
-  readonly audit_agent: AgentKind;
-  readonly audit_model?: string;
-  readonly audit_reasoning_effort?: string;
+  readonly artist_agent: AgentKind;
+  readonly artist_model?: string;
+  readonly artist_reasoning_effort?: string;
+  readonly critic_agent: AgentKind;
+  readonly critic_model?: string;
+  readonly critic_reasoning_effort?: string;
   readonly max_cycles: number;
 }
 
@@ -39,8 +39,8 @@ export function parseHarnessRunRequest(value: unknown): HarnessRunRequest {
     ...requiredKeys,
     "workspace_path",
     "reconcile_agent", "reconcile_model", "reconcile_reasoning_effort",
-    "execute_agent", "execute_model", "execute_reasoning_effort",
-    "audit_agent", "audit_model", "audit_reasoning_effort",
+    "artist_agent", "artist_model", "artist_reasoning_effort",
+    "critic_agent", "critic_model", "critic_reasoning_effort",
   ]);
   if (requiredKeys.some((key) => !Object.hasOwn(record, key))
     || Object.keys(record).some((key) => !allowedKeys.has(key))) {
@@ -51,10 +51,10 @@ export function parseHarnessRunRequest(value: unknown): HarnessRunRequest {
   );
   const reconcileModel = optional("reconcile_model", 256);
   const reconcileReasoningEffort = optional("reconcile_reasoning_effort", 64);
-  const executeModel = optional("execute_model", 256);
-  const executeReasoningEffort = optional("execute_reasoning_effort", 64);
-  const auditModel = optional("audit_model", 256);
-  const auditReasoningEffort = optional("audit_reasoning_effort", 64);
+  const artistModel = optional("artist_model", 256);
+  const artistReasoningEffort = optional("artist_reasoning_effort", 64);
+  const criticModel = optional("critic_model", 256);
+  const criticReasoningEffort = optional("critic_reasoning_effort", 64);
   return freezeObject({
     linear_root: parseRootIssueId(record.linear_root),
     ...(record.workspace_path === undefined ? {} : { workspace_path: parseAbsolutePath(record.workspace_path, "invalid_workspace_path") }),
@@ -62,12 +62,12 @@ export function parseHarnessRunRequest(value: unknown): HarnessRunRequest {
     reconcile_agent: parseAgentKind(record.reconcile_agent === undefined ? "codex" : record.reconcile_agent),
     ...(reconcileModel === undefined ? {} : { reconcile_model: reconcileModel }),
     ...(reconcileReasoningEffort === undefined ? {} : { reconcile_reasoning_effort: reconcileReasoningEffort }),
-    execute_agent: parseAgentKind(record.execute_agent === undefined ? "codex" : record.execute_agent),
-    ...(executeModel === undefined ? {} : { execute_model: executeModel }),
-    ...(executeReasoningEffort === undefined ? {} : { execute_reasoning_effort: executeReasoningEffort }),
-    audit_agent: parseAgentKind(record.audit_agent === undefined ? "codex" : record.audit_agent),
-    ...(auditModel === undefined ? {} : { audit_model: auditModel }),
-    ...(auditReasoningEffort === undefined ? {} : { audit_reasoning_effort: auditReasoningEffort }),
+    artist_agent: parseAgentKind(record.artist_agent === undefined ? "codex" : record.artist_agent),
+    ...(artistModel === undefined ? {} : { artist_model: artistModel }),
+    ...(artistReasoningEffort === undefined ? {} : { artist_reasoning_effort: artistReasoningEffort }),
+    critic_agent: parseAgentKind(record.critic_agent === undefined ? "codex" : record.critic_agent),
+    ...(criticModel === undefined ? {} : { critic_model: criticModel }),
+    ...(criticReasoningEffort === undefined ? {} : { critic_reasoning_effort: criticReasoningEffort }),
     max_cycles: parsePositiveInteger(record.max_cycles, "invalid_max_cycles"),
   });
 }

@@ -7,12 +7,12 @@ const OPTION_KEYS = Object.freeze({
   "--reconcile-agent": "reconcile_agent",
   "--reconcile-model": "reconcile_model",
   "--reconcile-reasoning-effort": "reconcile_reasoning_effort",
-  "--execute-agent": "execute_agent",
-  "--execute-model": "execute_model",
-  "--execute-reasoning-effort": "execute_reasoning_effort",
-  "--audit-agent": "audit_agent",
-  "--audit-model": "audit_model",
-  "--audit-reasoning-effort": "audit_reasoning_effort",
+  "--artist-agent": "artist_agent",
+  "--artist-model": "artist_model",
+  "--artist-reasoning-effort": "artist_reasoning_effort",
+  "--critic-agent": "critic_agent",
+  "--critic-model": "critic_model",
+  "--critic-reasoning-effort": "critic_reasoning_effort",
   "--max-cycles": "max_cycles",
 } as const);
 
@@ -41,14 +41,14 @@ export function parseCliArguments(arguments_: readonly string[]): HarnessRunRequ
     ...(values.has("reconcile_model") ? { reconcile_model: values.get("reconcile_model") } : {}),
     ...(values.has("reconcile_reasoning_effort")
       ? { reconcile_reasoning_effort: values.get("reconcile_reasoning_effort") } : {}),
-    ...(values.has("execute_agent") ? { execute_agent: values.get("execute_agent") } : {}),
-    ...(values.has("execute_model") ? { execute_model: values.get("execute_model") } : {}),
-    ...(values.has("execute_reasoning_effort")
-      ? { execute_reasoning_effort: values.get("execute_reasoning_effort") } : {}),
-    ...(values.has("audit_agent") ? { audit_agent: values.get("audit_agent") } : {}),
-    ...(values.has("audit_model") ? { audit_model: values.get("audit_model") } : {}),
-    ...(values.has("audit_reasoning_effort")
-      ? { audit_reasoning_effort: values.get("audit_reasoning_effort") } : {}),
+    ...(values.has("artist_agent") ? { artist_agent: values.get("artist_agent") } : {}),
+    ...(values.has("artist_model") ? { artist_model: values.get("artist_model") } : {}),
+    ...(values.has("artist_reasoning_effort")
+      ? { artist_reasoning_effort: values.get("artist_reasoning_effort") } : {}),
+    ...(values.has("critic_agent") ? { critic_agent: values.get("critic_agent") } : {}),
+    ...(values.has("critic_model") ? { critic_model: values.get("critic_model") } : {}),
+    ...(values.has("critic_reasoning_effort")
+      ? { critic_reasoning_effort: values.get("critic_reasoning_effort") } : {}),
     max_cycles: maximumCycles,
   });
 }

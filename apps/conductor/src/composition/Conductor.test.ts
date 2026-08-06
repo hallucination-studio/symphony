@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import type { AuditRunResult } from "../contracts/cycle.js";
+import type { CritiqueResult } from "../contracts/cycle.js";
 import type { PerformerLaunchRequest } from "../contracts/performer.js";
 import type { RootReconcileDecision, RootReconcileRequest } from "../contracts/root.js";
 import { parseRootState } from "../contracts/root.js";
@@ -57,14 +57,14 @@ function scriptedReconciler(decisions: readonly RootReconcileDecision[], request
   };
 }
 
-function scriptedPerformer(audits: readonly AuditRunResult[], launches: PerformerLaunchRequest[]): Performer {
+function scriptedPerformer(audits: readonly CritiqueResult[], launches: PerformerLaunchRequest[]): Performer {
   let auditIndex = 0;
   return {
     async launch(request) {
       launches.push(request);
       if (request.sandbox === "workspace_write") {
         if (request.final_response_path === undefined) throw new Error("unexpected_execute");
-        await writeFile(request.final_response_path, "## Executor Result\n\nImplementation complete.\n", "utf8");
+        await writeFile(request.final_response_path, "## Artist Result\n\nImplementation complete.\n", "utf8");
         return {
           launch_status: "exited", exit_code: 0, duration_ms: 2,
           final_response_ref: request.final_response_path,
@@ -72,24 +72,24 @@ function scriptedPerformer(audits: readonly AuditRunResult[], launches: Performe
           diagnostic_stderr_ref: request.diagnostic_stderr_path,
         };
       }
-      const audit = audits[auditIndex++];
-      if (audit === undefined || request.final_response_path === undefined) throw new Error("unexpected_audit");
-      const markdown = audit.verdict === "process_error"
-        ? `verdict: process_error\n\n## Reason\n${audit.reason}\n`
+      const critique = audits[auditIndex++];
+      if (critique === undefined || request.final_response_path === undefined) throw new Error("unexpected_audit");
+      const markdown = critique.verdict === "process_error"
+        ? `verdict: process_error\n\n## Reason\n${critique.reason}\n`
         : [
-          `verdict: ${audit.verdict}`,
+          `verdict: ${critique.verdict}`,
           "",
-          "## Scope Audited", audit.scope_audited,
+          "## Scope Reviewed", critique.scope_reviewed,
           "",
-          "## Implementation Review", audit.implementation_review,
+          "## Implementation Review", critique.implementation_review,
           "",
-          "## Checks", ...(audit.checks.length === 0 ? ["- None"] : audit.checks.map((entry) => `- ${entry}`)),
+          "## Checks", ...(critique.checks.length === 0 ? ["- None"] : critique.checks.map((entry) => `- ${entry}`)),
           "",
-          "## Evidence", ...(audit.evidence.length === 0 ? ["- None"] : audit.evidence.map((entry) => `- ${entry}`)),
+          "## Evidence", ...(critique.evidence.length === 0 ? ["- None"] : critique.evidence.map((entry) => `- ${entry}`)),
           "",
-          "## Findings", ...(audit.findings.length === 0 ? ["- None"] : audit.findings.map((entry) => `- ${entry}`)),
+          "## Findings", ...(critique.findings.length === 0 ? ["- None"] : critique.findings.map((entry) => `- ${entry}`)),
           "",
-          "## Task State", audit.task_state_markdown,
+          "## Task State", critique.task_state_markdown,
           "",
         ].join("\n");
       await writeFile(request.final_response_path, markdown, "utf8");
@@ -136,7 +136,7 @@ const complete = (summary: string): RootReconcileDecision => ({
     "### Overview", summary, "",
     "### File Changes", "#### Created", "- None", "", "#### Updated", "- None", "", "#### Deleted", "- None", "",
     "### Line Changes", "+0 / -0 lines", "",
-    "### Verification", "The latest Audit provides the trusted evidence.", "",
+    "### Verification", "The latest Critic provides the trusted evidence.", "",
     "### Token Usage", "Total tokens: Unknown",
   ].join("\n") as never,
 });
@@ -150,7 +150,7 @@ const needsHuman = (reason: string): RootReconcileDecision => ({
   ].join("\n") as never,
 });
 
-test("runs rejected repair then accepted Cycle and publishes only trusted Audit state", async () => {
+test("runs rejected repair then accepted Cycle and publishes only trusted Critic state", async () => {
   const world = await scenario();
   const reconcileRequests: RootReconcileRequest[] = [];
   const launches: PerformerLaunchRequest[] = [];
@@ -172,12 +172,12 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
   };
   const rolePerformer = scriptedPerformer([
     {
-      verdict: "incomplete", scope_audited: "Parser behavior", implementation_review: "Ambiguity remains",
+      verdict: "incomplete", scope_reviewed: "Parser behavior", implementation_review: "Ambiguity remains",
       checks: [], evidence: ["test fails"], findings: ["ambiguous token accepted"],
       task_state_markdown: "Ambiguity remains", pending_finding: "Reject ambiguous token",
     } as never,
     {
-      verdict: "accepted", scope_audited: "Parser behavior", implementation_review: "Strict behavior verified",
+      verdict: "accepted", scope_reviewed: "Parser behavior", implementation_review: "Strict behavior verified",
       checks: ["npm test"], evidence: ["test passes"], findings: [],
       task_state_markdown: "Strict parser behavior is verified",
     } as never,
@@ -191,9 +191,9 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
     },
   };
   const runner = new CycleRunner({
-    gateway: world.gateway, executePerformer: performer, auditPerformer: performer,
+    gateway: world.gateway, artistPerformer: performer, criticPerformer: performer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
+    artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const conductor = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
@@ -211,18 +211,18 @@ test("runs rejected repair then accepted Cycle and publishes only trusted Audit 
   assert.equal(state.delivery?.kind, "branch");
   assert.equal(reconcileRequests[1]?.root_state.pending_finding, "ambiguous token accepted");
   assert.deepEqual(rootStatusesAtReconcile, ["todo-id", "review-id", "review-id"]);
-  assert.deepEqual(reconcileRequests[1]?.root_state.latest_audit, {
+  assert.deepEqual(reconcileRequests[1]?.root_state.latest_critique, {
     verdict: "incomplete",
-    scope_audited: "Parser behavior",
+    scope_reviewed: "Parser behavior",
     implementation_review: "Ambiguity remains",
     checks: [],
     evidence: ["test fails"],
     findings: ["ambiguous token accepted"],
     task_state_markdown: "Ambiguity remains",
   });
-  assert.deepEqual(state.latest_audit, {
+  assert.deepEqual(state.latest_critique, {
     verdict: "accepted",
-    scope_audited: "Parser behavior",
+    scope_reviewed: "Parser behavior",
     implementation_review: "Strict behavior verified",
     checks: ["npm test"],
     evidence: ["test passes"],
@@ -280,16 +280,16 @@ test("final Inbox input cancels completion and enters the next frozen Cycle", as
   };
   const launches: PerformerLaunchRequest[] = [];
   const rolePerformer = scriptedPerformer([{
-    verdict: "accepted", scope_audited: "Late Root input", implementation_review: "Late input applied",
+    verdict: "accepted", scope_reviewed: "Late Root input", implementation_review: "Late input applied",
     checks: [], evidence: [], findings: [],
     task_state_markdown: "Late input is verified",
   } as never], launches);
   const runner = new CycleRunner({
     gateway: world.gateway,
-    executePerformer: rolePerformer,
-    auditPerformer: rolePerformer,
+    artistPerformer: rolePerformer,
+    criticPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
+    artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const conductor = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" }, reconciler, cycleRunner: runner,
@@ -305,9 +305,9 @@ test("NeedsHuman resumes only after explicit new Root input", async () => {
   const world = await scenario();
   const rolePerformer = scriptedPerformer([], []);
   const runner = new CycleRunner({
-    gateway: world.gateway, executePerformer: rolePerformer, auditPerformer: rolePerformer,
+    gateway: world.gateway, artistPerformer: rolePerformer, criticPerformer: rolePerformer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
+    artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const stopped = new Conductor({
     gateway: world.gateway, workflow: { team_id: "team-id", todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
@@ -477,7 +477,7 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
         };
       }
       await writeFile(request.final_response_path, [
-        "verdict: accepted", "", "## Scope Audited", "The complete worktree diff.", "",
+        "verdict: accepted", "", "## Scope Reviewed", "The complete worktree diff.", "",
         "## Implementation Review", "The three intended file operations are correct.", "",
         "## Checks", "- git diff", "", "## Evidence", "- Created, updated, and deleted paths inspected.", "",
         "## Findings", "- None", "", "## Task State", "The file change set is verified.", "",
@@ -492,9 +492,9 @@ test("comments every Reconcile decision with semantic whole-worktree changes and
     },
   };
   const cycleRunner = new CycleRunner({
-    gateway: world.gateway, executePerformer: performer, auditPerformer: performer,
+    gateway: world.gateway, artistPerformer: performer, criticPerformer: performer,
     workflow: { todo_status_id: "todo-id", in_progress_status_id: "active-id", in_review_status_id: "review-id", done_status_id: "completed-id", canceled_status_id: "canceled-id" },
-    executeAgent: "codex", auditAgent: "codex", timeoutMs: 1_000,
+    artistAgent: "codex", criticAgent: "codex", timeoutMs: 1_000,
   });
   const conductor = new Conductor({
     gateway: world.gateway,

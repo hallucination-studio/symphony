@@ -20,10 +20,10 @@ const DEFAULT_CONDUCTOR_EXECUTABLE: &str = "conductor";
 const ROLE_ENVIRONMENT_KEYS: [(&str, &str); 6] = [
     ("SYMPHONY_RECONCILE_CODEX_API_KEY", "RECONCILE"),
     ("SYMPHONY_RECONCILE_CODEX_BASE_URL", "RECONCILE"),
-    ("SYMPHONY_EXECUTE_CODEX_API_KEY", "EXECUTE"),
-    ("SYMPHONY_EXECUTE_CODEX_BASE_URL", "EXECUTE"),
-    ("SYMPHONY_AUDIT_CODEX_API_KEY", "AUDIT"),
-    ("SYMPHONY_AUDIT_CODEX_BASE_URL", "AUDIT"),
+    ("SYMPHONY_ARTIST_CODEX_API_KEY", "ARTIST"),
+    ("SYMPHONY_ARTIST_CODEX_BASE_URL", "ARTIST"),
+    ("SYMPHONY_CRITIC_CODEX_API_KEY", "CRITIC"),
+    ("SYMPHONY_CRITIC_CODEX_BASE_URL", "CRITIC"),
 ];
 
 /// The complete input needed to launch one Root-bound Conductor.
@@ -450,14 +450,14 @@ mod tests {
             args.iter().map(|value| value.to_string_lossy().into_owned()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["--reconcile-agent", "codex"]));
-        assert!(args.windows(2).any(|pair| pair == ["--execute-agent", "codex"]));
-        assert!(args.windows(2).any(|pair| pair == ["--audit-agent", "codex"]));
+        assert!(args.windows(2).any(|pair| pair == ["--artist-agent", "codex"]));
+        assert!(args.windows(2).any(|pair| pair == ["--critic-agent", "codex"]));
         assert!(args.windows(2).any(|pair| pair == ["--reconcile-model", "reconcile-model"]));
         assert!(args.windows(2).any(|pair| pair == ["--reconcile-reasoning-effort", "low"]));
-        assert!(args.windows(2).any(|pair| pair == ["--execute-reasoning-effort", "high"]));
-        assert!(!args.iter().any(|value| value == "--execute-model"));
-        assert!(!args.iter().any(|value| value == "--audit-model"));
-        assert!(!args.iter().any(|value| value == "--audit-reasoning-effort"));
+        assert!(args.windows(2).any(|pair| pair == ["--artist-reasoning-effort", "high"]));
+        assert!(!args.iter().any(|value| value == "--artist-model"));
+        assert!(!args.iter().any(|value| value == "--critic-model"));
+        assert!(!args.iter().any(|value| value == "--critic-reasoning-effort"));
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
         let mut file = File::create(&script).expect("script should be writable");
         writeln!(
             file,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \"$SYMPHONY_RECONCILE_CODEX_API_KEY\" \"$SYMPHONY_RECONCILE_CODEX_BASE_URL\" \"$SYMPHONY_EXECUTE_CODEX_API_KEY\" \"$SYMPHONY_EXECUTE_CODEX_BASE_URL\" \"$SYMPHONY_AUDIT_CODEX_API_KEY\" \"$SYMPHONY_AUDIT_CODEX_BASE_URL\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_BASE_URL-unset}}\" > '{}'\nprintf '%s\\n' '{{\"event\":\"conductor_stopped\",\"status\":\"done\"}}'",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \"$SYMPHONY_RECONCILE_CODEX_API_KEY\" \"$SYMPHONY_RECONCILE_CODEX_BASE_URL\" \"$SYMPHONY_ARTIST_CODEX_API_KEY\" \"$SYMPHONY_ARTIST_CODEX_BASE_URL\" \"$SYMPHONY_CRITIC_CODEX_API_KEY\" \"$SYMPHONY_CRITIC_CODEX_BASE_URL\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_BASE_URL-unset}}\" > '{}'\nprintf '%s\\n' '{{\"event\":\"conductor_stopped\",\"status\":\"done\"}}'",
             argv_file.display(),
             environment_file.display(),
         )
@@ -548,10 +548,10 @@ mod tests {
         let environment = [
             ("SYMPHONY_RECONCILE_CODEX_API_KEY", "reconcile-secret"),
             ("SYMPHONY_RECONCILE_CODEX_BASE_URL", "https://reconcile.invalid"),
-            ("SYMPHONY_EXECUTE_CODEX_API_KEY", "execute-secret"),
-            ("SYMPHONY_EXECUTE_CODEX_BASE_URL", "https://execute.invalid"),
-            ("SYMPHONY_AUDIT_CODEX_API_KEY", "audit-secret"),
-            ("SYMPHONY_AUDIT_CODEX_BASE_URL", "https://audit.invalid"),
+            ("SYMPHONY_ARTIST_CODEX_API_KEY", "execute-secret"),
+            ("SYMPHONY_ARTIST_CODEX_BASE_URL", "https://execute.invalid"),
+            ("SYMPHONY_CRITIC_CODEX_API_KEY", "audit-secret"),
+            ("SYMPHONY_CRITIC_CODEX_BASE_URL", "https://audit.invalid"),
             ("CODEX_API_KEY", "generic-secret-must-not-cross"),
             ("CODEX_BASE_URL", "https://generic.invalid"),
         ];
@@ -571,8 +571,8 @@ mod tests {
         let argv = fs::read_to_string(&argv_file).expect("argv fixture should write output");
         assert!(argv.contains("--linear-root\nENG-123\n"));
         assert!(argv.contains("--reconcile-model\nreconcile-model\n"));
-        assert!(!argv.contains("--execute-model\n"));
-        assert!(argv.contains("--audit-agent\ncodex\n"));
+        assert!(!argv.contains("--artist-model\n"));
+        assert!(argv.contains("--critic-agent\ncodex\n"));
 
         let child_environment =
             fs::read_to_string(&environment_file).expect("environment should be written");

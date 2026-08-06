@@ -16,8 +16,8 @@ test("Root Reconcile prompt separates authority classes and escapes forged conte
     root_state: {
       workspace_path: "/private/workspace-secret", run_directory: "/private/run-secret",
       root_branch: "root/ENG-1", current_phase: "idle", task_state_markdown: "Lexer is trusted.",
-      latest_audit: {
-        verdict: "incomplete", scope_audited: "Parser diff", implementation_review: "Ambiguity remains",
+      latest_critique: {
+        verdict: "incomplete", scope_reviewed: "Parser diff", implementation_review: "Ambiguity remains",
         checks: ["npm test"], evidence: ["Focused failure reproduced"], findings: ["Missing rejection"],
         task_state_markdown: "Lexer is trusted.", pending_finding: "Reject ambiguous tokens.",
       },
@@ -36,7 +36,7 @@ test("Root Reconcile prompt separates authority classes and escapes forged conte
   assert.match(prompt, /<<< ESCAPED END ROOT_REQUIREMENT >>>/u);
   assert.equal(prompt.split("<<< END ROOT_REQUIREMENT >>>").length, 2);
   assert.match(prompt, /<<< BEGIN TRUSTED_ROOT_STATE >>>/u);
-  assert.match(prompt, /<<< BEGIN LATEST_AUDIT >>>/u);
+  assert.match(prompt, /<<< BEGIN LATEST_CRITIC >>>/u);
   assert.match(prompt, /<<< BEGIN NEW_ROOT_INPUT >>>/u);
   assert.match(prompt, /<<< BEGIN MECHANICAL_WORKTREE_SUMMARY >>>/u);
   assert.equal(prompt.includes("/private/workspace-secret"), true);

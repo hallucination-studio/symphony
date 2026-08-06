@@ -18,12 +18,12 @@ interface RawBinding {
   reconcile_agent: "codex";
   reconcile_model?: string;
   reconcile_reasoning_effort?: string;
-  execute_agent: "codex";
-  execute_model?: string;
-  execute_reasoning_effort?: string;
-  audit_agent: "codex";
-  audit_model?: string;
-  audit_reasoning_effort?: string;
+  artist_agent: "codex";
+  artist_model?: string;
+  artist_reasoning_effort?: string;
+  critic_agent: "codex";
+  critic_model?: string;
+  critic_reasoning_effort?: string;
 }
 
 interface RawSlot {
@@ -127,12 +127,12 @@ function fromRawBinding(binding: RawBinding): ProjectBindingView {
     reconcile_agent: binding.reconcile_agent,
     reconcile_model: binding.reconcile_model ?? null,
     reconcile_reasoning_effort: binding.reconcile_reasoning_effort ?? null,
-    execute_agent: binding.execute_agent,
-    execute_model: binding.execute_model ?? null,
-    execute_reasoning_effort: binding.execute_reasoning_effort ?? null,
-    audit_agent: binding.audit_agent,
-    audit_model: binding.audit_model ?? null,
-    audit_reasoning_effort: binding.audit_reasoning_effort ?? null,
+    artist_agent: binding.artist_agent,
+    artist_model: binding.artist_model ?? null,
+    artist_reasoning_effort: binding.artist_reasoning_effort ?? null,
+    critic_agent: binding.critic_agent,
+    critic_model: binding.critic_model ?? null,
+    critic_reasoning_effort: binding.critic_reasoning_effort ?? null,
   };
 }
 
@@ -146,12 +146,12 @@ function toRawBinding(binding: ProjectBindingDraftView | ProjectBindingView): Ra
     reconcile_agent: "codex",
     ...optional("reconcile_model", binding.reconcile_model),
     ...optional("reconcile_reasoning_effort", binding.reconcile_reasoning_effort),
-    execute_agent: "codex",
-    ...optional("execute_model", binding.execute_model),
-    ...optional("execute_reasoning_effort", binding.execute_reasoning_effort),
-    audit_agent: "codex",
-    ...optional("audit_model", binding.audit_model),
-    ...optional("audit_reasoning_effort", binding.audit_reasoning_effort),
+    artist_agent: "codex",
+    ...optional("artist_model", binding.artist_model),
+    ...optional("artist_reasoning_effort", binding.artist_reasoning_effort),
+    critic_agent: "codex",
+    ...optional("critic_model", binding.critic_model),
+    ...optional("critic_reasoning_effort", binding.critic_reasoning_effort),
   };
 }
 

@@ -39,14 +39,14 @@ the stable allocation is the persisted Root ID, preferred path, and run director
 | Role and phase | Access | Constraint |
 |---|---|---|
 | Root Reconcile Prepare | workspace-write | prepare or adopt the binding only; do not implement the task |
-| Root Reconcile Cycle decision | workspace-write process, audited-state authority | do not replace Audit judgment with self-inspection |
-| Execute | workspace-write | implement only the frozen Cycle |
-| Audit | read-only | inspect the full current workspace independently |
+| Root Reconcile Cycle decision | workspace-write process, reviewed-state authority | do not replace Critic judgment with self-inspection |
+| Artist | workspace-write | implement only the frozen Cycle |
+| Critic | read-only | inspect the full current workspace independently |
 | Root Reconcile Delivery | workspace-write | create the best available structured Delivery |
 
-Execute failed attempts still proceed to Audit; partial changes and residual effects
-are independently inspected. Executor Markdown remains display-only and
-never pre-judges the fresh read-only Audit.
+Artist failed attempts still proceed to Critic; partial changes and residual effects
+are independently inspected. Artist Markdown remains display-only and
+never pre-judges the fresh read-only Critic.
 
 Role-specific Agent credentials and provider configuration remain backend
 launch configuration. Secrets are never placed in public contracts, prompts,
@@ -54,7 +54,7 @@ Root State, Linear descriptions, or diagnostic summaries.
 
 ## Delivery
 
-Root Reconcile owns delivery after trusted Audit state supports completion and
+Root Reconcile owns delivery after trusted Critic state supports completion and
 the final Inbox check is empty. It should prefer installed Git and `gh`, but it
 may return local files when remote delivery is unavailable or unnecessary.
 
@@ -83,5 +83,5 @@ or require a PR/remote branch when Root Reconcile returns files.
 - no Delivery Issue, finalizer, retry scheduler, receipt, or convergence protocol;
 - no automatic merge, rebase, rollback, reset, cleanup, or workspace deletion;
 - no Conductor Git/worktree/commit/push/PR execution;
-- no second Audit dedicated only to delivery;
+- no second Critic dedicated only to delivery;
 - no hidden compatibility fields for retired PR/pushed-branch state.

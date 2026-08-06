@@ -18,12 +18,12 @@ const roleDefaults = {
   reconcile_agent: "codex" as const,
   reconcile_model: null,
   reconcile_reasoning_effort: null,
-  execute_agent: "codex" as const,
-  execute_model: null,
-  execute_reasoning_effort: null,
-  audit_agent: "codex" as const,
-  audit_model: null,
-  audit_reasoning_effort: null,
+  artist_agent: "codex" as const,
+  artist_model: null,
+  artist_reasoning_effort: null,
+  critic_agent: "codex" as const,
+  critic_model: null,
+  critic_reasoning_effort: null,
 };
 
 function binding(overrides: Partial<ProjectBindingView>): ProjectBindingView {
@@ -51,7 +51,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       concurrency: 2,
       reconcile_model: "gpt-5",
       reconcile_reasoning_effort: "medium",
-      execute_reasoning_effort: "high",
+      artist_reasoning_effort: "high",
     }),
     binding({
       id: "project-console",
@@ -60,7 +60,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
       repositoryPath: "~/Code/acme/console",
       baseBranch: "trunk",
       concurrency: 1,
-      audit_model: "gpt-5-codex",
+      critic_model: "gpt-5-codex",
     }),
   ];
   const overview: DesktopOverviewView = {
@@ -78,7 +78,7 @@ export function createDemoState(): Extract<DesktopState, { kind: "ready" }> {
           runDirectorySummary: "<run>/SYM-101",
         },
         processState: "running",
-        recentEvent: "Audit completed",
+        recentEvent: "Critic completed",
         observedAt,
       },
       {
@@ -251,12 +251,12 @@ function normalizeBinding(input: ProjectBindingDraftView | ProjectBindingView, f
     reconcile_agent: "codex",
     reconcile_model: cleanOptional(input.reconcile_model),
     reconcile_reasoning_effort: cleanOptional(input.reconcile_reasoning_effort),
-    execute_agent: "codex",
-    execute_model: cleanOptional(input.execute_model),
-    execute_reasoning_effort: cleanOptional(input.execute_reasoning_effort),
-    audit_agent: "codex",
-    audit_model: cleanOptional(input.audit_model),
-    audit_reasoning_effort: cleanOptional(input.audit_reasoning_effort),
+    artist_agent: "codex",
+    artist_model: cleanOptional(input.artist_model),
+    artist_reasoning_effort: cleanOptional(input.artist_reasoning_effort),
+    critic_agent: "codex",
+    critic_model: cleanOptional(input.critic_model),
+    critic_reasoning_effort: cleanOptional(input.critic_reasoning_effort),
   };
 }
 

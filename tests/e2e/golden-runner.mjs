@@ -46,21 +46,21 @@ export function resolveGoldenRoleConfiguration(environment = {}) {
       ...(environment.SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT === undefined
         ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT }),
     }),
-    execute: Object.freeze({
-      ...(environment.SYMPHONY_GOLDEN_EXECUTE_AGENT === undefined
-        ? {} : { agent: environment.SYMPHONY_GOLDEN_EXECUTE_AGENT }),
-      ...(environment.SYMPHONY_GOLDEN_EXECUTE_MODEL === undefined
-        ? {} : { model: environment.SYMPHONY_GOLDEN_EXECUTE_MODEL }),
-      ...(environment.SYMPHONY_GOLDEN_EXECUTE_REASONING_EFFORT === undefined
-        ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_EXECUTE_REASONING_EFFORT }),
+    artist: Object.freeze({
+      ...(environment.SYMPHONY_GOLDEN_ARTIST_AGENT === undefined
+        ? {} : { agent: environment.SYMPHONY_GOLDEN_ARTIST_AGENT }),
+      ...(environment.SYMPHONY_GOLDEN_ARTIST_MODEL === undefined
+        ? {} : { model: environment.SYMPHONY_GOLDEN_ARTIST_MODEL }),
+      ...(environment.SYMPHONY_GOLDEN_ARTIST_REASONING_EFFORT === undefined
+        ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_ARTIST_REASONING_EFFORT }),
     }),
-    audit: Object.freeze({
-      ...(environment.SYMPHONY_GOLDEN_AUDIT_AGENT === undefined
-        ? {} : { agent: environment.SYMPHONY_GOLDEN_AUDIT_AGENT }),
-      ...(environment.SYMPHONY_GOLDEN_AUDIT_MODEL === undefined
-        ? {} : { model: environment.SYMPHONY_GOLDEN_AUDIT_MODEL }),
-      ...(environment.SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT === undefined
-        ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT }),
+    critic: Object.freeze({
+      ...(environment.SYMPHONY_GOLDEN_CRITIC_AGENT === undefined
+        ? {} : { agent: environment.SYMPHONY_GOLDEN_CRITIC_AGENT }),
+      ...(environment.SYMPHONY_GOLDEN_CRITIC_MODEL === undefined
+        ? {} : { model: environment.SYMPHONY_GOLDEN_CRITIC_MODEL }),
+      ...(environment.SYMPHONY_GOLDEN_CRITIC_REASONING_EFFORT === undefined
+        ? {} : { reasoning_effort: environment.SYMPHONY_GOLDEN_CRITIC_REASONING_EFFORT }),
     }),
   });
 }
@@ -69,8 +69,8 @@ const GOLDEN_ENVIRONMENT_KEYS = Object.freeze([
   "PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL",
   "LINEAR_API_KEY",
   "SYMPHONY_RECONCILE_CODEX_API_KEY", "SYMPHONY_RECONCILE_CODEX_BASE_URL",
-  "SYMPHONY_EXECUTE_CODEX_API_KEY", "SYMPHONY_EXECUTE_CODEX_BASE_URL",
-  "SYMPHONY_AUDIT_CODEX_API_KEY", "SYMPHONY_AUDIT_CODEX_BASE_URL",
+  "SYMPHONY_ARTIST_CODEX_API_KEY", "SYMPHONY_ARTIST_CODEX_BASE_URL",
+  "SYMPHONY_CRITIC_CODEX_API_KEY", "SYMPHONY_CRITIC_CODEX_BASE_URL",
   "GH_TOKEN", "GITHUB_TOKEN",
 ]);
 
@@ -121,23 +121,23 @@ export function resolveGoldenLaunchArguments({
   if (configuration.reconcile.reasoning_effort !== undefined) {
     args.push("--reconcile-reasoning-effort", configuration.reconcile.reasoning_effort);
   }
-  if (configuration.execute.agent !== undefined) {
-    args.push("--execute-agent", configuration.execute.agent);
+  if (configuration.artist.agent !== undefined) {
+    args.push("--artist-agent", configuration.artist.agent);
   }
-  if (configuration.execute.model !== undefined) {
-    args.push("--execute-model", configuration.execute.model);
+  if (configuration.artist.model !== undefined) {
+    args.push("--artist-model", configuration.artist.model);
   }
-  if (configuration.execute.reasoning_effort !== undefined) {
-    args.push("--execute-reasoning-effort", configuration.execute.reasoning_effort);
+  if (configuration.artist.reasoning_effort !== undefined) {
+    args.push("--artist-reasoning-effort", configuration.artist.reasoning_effort);
   }
-  if (configuration.audit.agent !== undefined) {
-    args.push("--audit-agent", configuration.audit.agent);
+  if (configuration.critic.agent !== undefined) {
+    args.push("--critic-agent", configuration.critic.agent);
   }
-  if (configuration.audit.model !== undefined) {
-    args.push("--audit-model", configuration.audit.model);
+  if (configuration.critic.model !== undefined) {
+    args.push("--critic-model", configuration.critic.model);
   }
-  if (configuration.audit.reasoning_effort !== undefined) {
-    args.push("--audit-reasoning-effort", configuration.audit.reasoning_effort);
+  if (configuration.critic.reasoning_effort !== undefined) {
+    args.push("--critic-reasoning-effort", configuration.critic.reasoning_effort);
   }
   return Object.freeze(args);
 }

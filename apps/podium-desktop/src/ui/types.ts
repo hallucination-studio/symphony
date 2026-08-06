@@ -26,12 +26,12 @@ export interface ProjectBindingView {
   reconcile_agent: "codex";
   reconcile_model?: string | null;
   reconcile_reasoning_effort?: string | null;
-  execute_agent: "codex";
-  execute_model?: string | null;
-  execute_reasoning_effort?: string | null;
-  audit_agent: "codex";
-  audit_model?: string | null;
-  audit_reasoning_effort?: string | null;
+  artist_agent: "codex";
+  artist_model?: string | null;
+  artist_reasoning_effort?: string | null;
+  critic_agent: "codex";
+  critic_model?: string | null;
+  critic_reasoning_effort?: string | null;
 }
 
 export type ProjectBindingDraftView = Omit<ProjectBindingView, "id"> & { id?: string };

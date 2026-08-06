@@ -82,7 +82,7 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
       data: { issueCreate: { success: true, issue: {
         id: "execute-id",
         identifier: "ENG-4",
-        title: "Execute",
+        title: "Artist",
         description: "Frozen execute",
         url: "https://linear.app/acme/issue/ENG-4/execute",
         state: { id: "state-todo", type: "unstarted" },
@@ -115,7 +115,7 @@ test("GraphQL gateway implements normalized discovery, projection, and descendan
   assert.equal((await gateway.create_issue({
     team_id: "team-id",
     parent_id: "cycle-id",
-    title: "Execute",
+    title: "Artist",
     description: "Frozen execute",
     status_id: "state-todo",
   })).id, "execute-id");

@@ -7,7 +7,7 @@
 Performer is deliberately a thin command-line wrapper. It receives a complete
 launch request, starts exactly one fresh Agent process, always captures process
 facts, and captures one bounded final Markdown response only when requested. It
-does not know what a Root, Cycle, Execute, Audit, or successful task means.
+does not know what a Root, Cycle, Artist, Critic, or successful task means.
 
 ## Launch contract
 
@@ -56,12 +56,12 @@ PerformerProcessResult {
 
 The caller owns prompt construction, semantic parsing, and validation. Root
 Reconciler supplies a final-response path for its own decision parser. Cycle
-Runner supplies `cycle-NNN-executor-result.md` and
-`cycle-NNN-audit-result.md` paths and asks both roles to finish with Markdown.
-The Execute Markdown is captured only for exact terminal description projection and is
-untrusted; it is not parsed or supplied to Audit. The Audit Markdown is parsed
+Runner supplies `cycle-NNN-artist-result.md` and
+`cycle-NNN-critic-result.md` paths and asks both roles to finish with Markdown.
+The Artist Markdown is captured only for exact terminal description projection and is
+untrusted; it is not parsed or supplied to Critic. The Critic Markdown is parsed
 once by Cycle Runner as the sole semantic result, then serialized and re-read
-as the private `cycle-NNN-audit-result.json` progression file. A missing,
+as the private `cycle-NNN-critique-result.json` progression file. A missing,
 unreadable, or invalid response is a process error; Performer never starts a
 second summarization or format-repair process. A zero exit code is only a
 process fact; it is never a Cycle success decision. Raw Agent streams are a
@@ -80,7 +80,7 @@ role process. They are not part of `PerformerLaunchRequest`,
 `HarnessRunRequest`, or any Linear projection. An omitted model or reasoning
 override is left to the user's local Codex configuration and authentication.
 The caller supplies the role's own agent, model, and reasoning values; Reconcile
-does not inherit Execute settings. API keys and base URLs are resolved by the
+does not inherit Artist settings. API keys and base URLs are resolved by the
 Conductor backend environment and never enter this request.
 
 ## Private diagnostic evidence
@@ -94,7 +94,7 @@ usage facts described above. Unknown or malformed JSONL is retained unchanged;
 only recognized usage fields are interpreted, and never as workflow input.
 
 Diagnostic references and `thread_id` are local-only implementation values.
-They are never supplied to the Audit prompt, Root Reconcile, or Linear
+They are never supplied to the Critic prompt, Root Reconcile, or Linear
 descriptions/comments,
 and are not used for routing, trust, restart, or publication. The caller owns
 retention and deletion of the external run directory; Performer does not upload
@@ -108,44 +108,44 @@ prefix and does not traverse `cause`.
 %% source-rules: PF-SESSION-001 PF-SESSION-002 PF-SESSION-003 PF-PERM-001 PF-PERM-002
 flowchart LR
   RR[Root Reconciler] -->|no-workspace launch request| P1[Fresh process]
-  CR[Cycle Runner] -->|workspace-write Execute request| P2[Fresh process]
-  CR -->|read-only Audit request| P3[Fresh process]
+  CR[Cycle Runner] -->|workspace-write Artist request| P2[Fresh process]
+  CR -->|read-only Critic request| P3[Fresh process]
 ```
 
 | Rule | Caller role | Session | Workspace sandbox | Excluded context |
 |---|---|---|---|---|
-| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the independent Reconcile role configuration | no workspace mount or tools | workspace facts and Execute/Audit transcripts |
-| `PF-SESSION-002` | Execute | one fresh process per Cycle | workspace-write | Reconcile transcript, prior Cycle transcripts, and Audit history |
-| `PF-SESSION-003` | Audit | a distinct fresh process after Execute terminates | read-only | Execute transcript, hidden state, and prior Audit history |
+| `PF-SESSION-001` | Root Reconcile | fresh process for each decision using the independent Reconcile role configuration | no workspace mount or tools | workspace facts and Artist/Critic transcripts |
+| `PF-SESSION-002` | Artist | one fresh process per Cycle | workspace-write | Reconcile transcript, prior Cycle transcripts, and Critic history |
+| `PF-SESSION-003` | Critic | a distinct fresh process after Artist terminates | read-only | Artist transcript, hidden state, and prior Critic history |
 | `PF-PERM-001` | every process | only the configured workspace and role sandbox | supplied by the caller, not inferred by Performer | Linear capability |
 | `PF-PERM-002` | every process | no secrets by default | explicit allowlist only when the frozen task boundary requires it | `.env*`, keychains, tokens, credential stores |
 
 Performer does not enforce workflow order. Conductor and Cycle Runner ensure that
-Audit starts only after Execute is terminal and that a failed Execute still gets
-an Audit attempt.
+Critic starts only after Artist is terminal and that a failed Artist still gets
+an Critic attempt.
 
 ## Boundary ownership
 
 | Concern | Owner |
 |---|---|
 | Reconcile prompt and decision schema | dedicated Root Reconcile Prompt module and Root Reconciler |
-| Execute prompt | dedicated Execute Prompt module called by Cycle Runner |
-| Audit prompt | dedicated Audit Prompt module called by Cycle Runner |
+| Artist prompt | dedicated Artist Prompt module called by Cycle Runner |
+| Critic prompt | dedicated Critic Prompt module called by Cycle Runner |
 | Cycle result interpretation | Cycle Runner |
-| trusted Root State promotion | Conductor's fixed `accepted`-Audit update |
-| Linear Issue, exact role-description/Root-description/Cycle-comment projections, and typed Audit JSON file projection | private rendering helpers behind Linear Gateway calls |
+| trusted Root State promotion | Conductor's fixed `accepted`-Critic update |
+| Linear Issue, exact role-description/Root-description/Cycle-comment projections, and typed Critique JSON file projection | private rendering helpers behind Linear Gateway calls |
 | raw process start, stop, bounded final response, exit code, duration, and provider token facts | Performer |
 
 Each role selects one thin CLI adapter through its own `*_agent` value and
 defaults to `codex`. V1's closed `AgentKind` contains only `codex`; a future
 value may add another thin adapter without changing Root Reconciler or Cycle
-Runner. Reconcile, Execute, and Audit retain independent startup credentials,
+Runner. Reconcile, Artist, and Critic retain independent startup credentials,
 base URLs, model values, and reasoning-effort values. There is no dynamic
 per-Cycle routing, plugin discovery, registry, compatibility alias, or
 cross-role transcript.
 
 Performer never constructs, truncates, repairs, or interprets a prompt. Root
-Reconcile, Execute, and Audit each have a dedicated role Prompt module. Root
+Reconcile, Artist, and Critic each have a dedicated role Prompt module. Root
 Reconciler and Cycle Runner supply those modules' bounded inputs and remain the
 only callers that launch the resulting prompts.
 
@@ -154,7 +154,7 @@ streams may be retained only as the private local diagnostic evidence described
 above; no caller may treat them as a required role result, and they are never
 uploaded to Linear or used for routing, trust, restart, or publication.
 
-The Executor's human-readable report uses `## Summary`, `## File Changes` with
+The Artist's human-readable report uses `## Summary`, `## File Changes` with
 `### Created`, `### Updated`, and `### Deleted`, and `## Verification`. Git
 porcelain markers such as `??`, `M`, or `D` are intermediate facts only and
 must be translated to those semantic sections; they must never appear

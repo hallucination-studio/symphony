@@ -34,7 +34,7 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
     }, {
       id: "audit-id",
       identifier: "ENG-3",
-      title: "Audit",
+      title: "Critic",
       description: "Frozen audit",
       url: "https://linear.app/acme/issue/ENG-3/audit",
       status: "todo",
@@ -75,7 +75,7 @@ test("in-memory gateway implements the complete normalized Linear boundary", asy
   const execute = await gateway.create_issue({
     team_id: "team-id",
     parent_id: "cycle-id",
-    title: "Execute",
+    title: "Artist",
     description: "Frozen execute",
     status_id: "state-todo",
   });

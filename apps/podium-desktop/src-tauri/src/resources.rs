@@ -203,12 +203,12 @@ pub fn allocate_root_allocation(
         reconcile_agent: "codex".into(),
         reconcile_model: None,
         reconcile_reasoning_effort: None,
-        execute_agent: "codex".into(),
-        execute_model: None,
-        execute_reasoning_effort: None,
-        audit_agent: "codex".into(),
-        audit_model: None,
-        audit_reasoning_effort: None,
+        artist_agent: "codex".into(),
+        artist_model: None,
+        artist_reasoning_effort: None,
+        critic_agent: "codex".into(),
+        critic_model: None,
+        critic_reasoning_effort: None,
     };
     // Keep this helper's public input focused on repository/base/root while
     // using the same validation and Git path as ProjectBinding callers.
@@ -444,12 +444,12 @@ mod tests {
             reconcile_agent: "codex".into(),
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            execute_agent: "codex".into(),
-            execute_model: None,
-            execute_reasoning_effort: None,
-            audit_agent: "codex".into(),
-            audit_model: None,
-            audit_reasoning_effort: None,
+            artist_agent: "codex".into(),
+            artist_model: None,
+            artist_reasoning_effort: None,
+            critic_agent: "codex".into(),
+            critic_model: None,
+            critic_reasoning_effort: None,
         }
     }
 

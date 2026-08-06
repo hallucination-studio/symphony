@@ -2,10 +2,10 @@ import { open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  parseAuditRunResult,
-  parseAuditRunResultMarkdown,
+  parseCritiqueResult,
+  parseCritiqueResultMarkdown,
   parseCycleTerminalResult,
-  type AuditRunResult,
+  type CritiqueResult,
   type CycleSpec,
   type CycleTerminalResult,
 } from "../contracts/cycle.js";
@@ -19,8 +19,8 @@ import type { LinearGateway } from "../linear/LinearGateway.js";
 import { currentLinearDescriptionTimestamp } from "../linear/LinearDescriptionTimestamp.js";
 import { appendManagedIssueResult, renderManagedIssueDescription } from "../linear/LinearIssueDescription.js";
 import type { Performer } from "../performer/api/Performer.js";
-import { renderAuditPrompt } from "./prompts/AuditPrompt.js";
-import { renderExecutePrompt } from "./prompts/ExecutePrompt.js";
+import { renderCriticPrompt } from "./prompts/CriticPrompt.js";
+import { renderArtistPrompt } from "./prompts/ArtistPrompt.js";
 
 const MAX_FINAL_RESPONSE_BYTES = 32 * 1024;
 const MAX_ISSUE_TITLE_LENGTH = 80;
@@ -33,15 +33,15 @@ export type CycleWorkflow = Pick<
 
 export interface CycleRunnerOptions {
   readonly gateway: LinearGateway;
-  readonly executePerformer: Performer;
-  readonly auditPerformer: Performer;
+  readonly artistPerformer: Performer;
+  readonly criticPerformer: Performer;
   readonly workflow: CycleWorkflow;
-  readonly executeAgent: AgentKind;
-  readonly executeModel?: string;
-  readonly executeReasoningEffort?: string;
-  readonly auditAgent: AgentKind;
-  readonly auditModel?: string;
-  readonly auditReasoningEffort?: string;
+  readonly artistAgent: AgentKind;
+  readonly artistModel?: string;
+  readonly artistReasoningEffort?: string;
+  readonly criticAgent: AgentKind;
+  readonly criticModel?: string;
+  readonly criticReasoningEffort?: string;
   readonly timeoutMs: number;
   readonly now?: () => Date;
 }
@@ -57,11 +57,11 @@ export interface CycleRunRequest {
 
 export interface CycleRunOutcome {
   readonly cycle: LinearIssue;
-  readonly execute: LinearIssue;
-  readonly auditIssue: LinearIssue;
-  readonly executeProcess: PerformerProcessResult;
-  readonly auditProcess: PerformerProcessResult;
-  readonly audit: AuditRunResult;
+  readonly artist: LinearIssue;
+  readonly criticIssue: LinearIssue;
+  readonly artistProcess: PerformerProcessResult;
+  readonly criticProcess: PerformerProcessResult;
+  readonly critique: CritiqueResult;
   readonly terminal: CycleTerminalResult;
 }
 
@@ -82,34 +82,34 @@ function cycleDescription(spec: CycleSpec): string {
   });
 }
 
-function executeDescription(spec: CycleSpec): string {
+function artistDescription(spec: CycleSpec): string {
   return renderManagedIssueDescription({
     task: [
       "## Objective", spec.objective, "## Acceptance", spec.acceptance, "## Boundaries", spec.boundaries,
     ].join("\n\n"),
     metadata: [
-      "## Role", "Execute", "## Access", "workspace-write; do not commit, push, or create a pull request.",
+      "## Role", "Artist", "## Access", "workspace-write; do not commit, push, or create a pull request.",
     ].join("\n\n"),
   });
 }
 
-function auditDescription(spec: CycleSpec): string {
+function criticDescription(spec: CycleSpec): string {
   return renderManagedIssueDescription({
     task: ["## Acceptance", spec.acceptance, "## Boundaries", spec.boundaries].join("\n\n"),
     metadata: [
-      "## Role", "Audit", "## Access", "read-only; inspect the complete real workspace diff independently.",
+      "## Role", "Critic", "## Access", "read-only; inspect the complete real workspace diff independently.",
     ].join("\n\n"),
   });
 }
 
-async function persistFamily(request: CycleRunRequest, family: { cycle: LinearIssue; execute: LinearIssue; audit: LinearIssue }): Promise<void> {
+async function persistFamily(request: CycleRunRequest, family: { cycle: LinearIssue; artist: LinearIssue; critic: LinearIssue }): Promise<void> {
   const file = path.join(request.rootState.run_directory, `cycle-${String(request.spec.cycle_number).padStart(3, "0")}.json`);
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const record = {
     cycle_number: request.spec.cycle_number,
     cycle_id: family.cycle.id,
-    execute_id: family.execute.id,
-    audit_id: family.audit.id,
+    artist_id: family.artist.id,
+    critic_id: family.critic.id,
     consumed_comment_ids: request.spec.consumed_comment_ids,
   };
   const handle = await open(temporary, "wx", 0o600);
@@ -125,10 +125,10 @@ async function persistFamily(request: CycleRunRequest, family: { cycle: LinearIs
   }
 }
 
-async function persistAndReloadAuditResult(
+async function persistAndReloadCriticResult(
   file: string,
-  result: AuditRunResult,
-): Promise<AuditRunResult> {
+  result: CritiqueResult,
+): Promise<CritiqueResult> {
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
@@ -148,9 +148,9 @@ async function persistAndReloadAuditResult(
   try {
     persisted = JSON.parse((await readFile(file)).toString("utf8")) as unknown;
   } catch {
-    throw new Error("invalid_audit_result_file");
+    throw new Error("invalid_critic_result_file");
   }
-  return parseAuditRunResult(persisted);
+  return parseCritiqueResult(persisted);
 }
 
 function processFailureReason(result: PerformerProcessResult, responseReason?: string): string {
@@ -167,10 +167,10 @@ function processFailureReason(result: PerformerProcessResult, responseReason?: s
   }
 }
 
-function executorFailureComment(result: PerformerProcessResult, responseReason?: string): string {
+function artistFailureComment(result: PerformerProcessResult, responseReason?: string): string {
   const reason = currentErrorMessage(processFailureReason(result, responseReason), "Process failed");
   return [
-    "## Executor Result",
+    "## Artist Result",
     "- Result: failure",
     `- Error: ${reason}`,
   ].join("\n");
@@ -228,9 +228,9 @@ async function readFinalResponse(
   }
 }
 
-function auditProcessErrorComment(reason: string): string {
+function criticProcessErrorComment(reason: string): string {
   return [
-    "## Audit Result",
+    "## Critic Result",
     "- Verdict: process_error",
     `- Error: ${reason.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)}`,
   ].join("\n");
@@ -247,21 +247,21 @@ function appendIssueDescription(
     : appendManagedIssueResult(description, currentLinearDescriptionTimestamp(updatedAt), report);
 }
 
-function processError(result: PerformerProcessResult, fallbackReason?: string): AuditRunResult {
+function processError(result: PerformerProcessResult, fallbackReason?: string): CritiqueResult {
   const reason = result.sanitized_reason?.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
     ?? fallbackReason?.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH)
     ?? processEventDescription(result);
-  return parseAuditRunResult({
+  return parseCritiqueResult({
     verdict: "process_error",
     reason: reason.slice(0, MAX_VISIBLE_ERROR_MESSAGE_LENGTH),
   });
 }
 
-function terminalResult(auditIssueId: string, audit: AuditRunResult): CycleTerminalResult {
-  const result = audit.verdict === "accepted" ? "succeeded" : audit.verdict === "incomplete" ? "rejected" : "failed";
-  const source = audit.verdict === "process_error" ? audit.reason : audit.implementation_review;
+function terminalResult(criticIssueId: string, critique: CritiqueResult): CycleTerminalResult {
+  const result = critique.verdict === "accepted" ? "succeeded" : critique.verdict === "incomplete" ? "rejected" : "failed";
+  const source = critique.verdict === "process_error" ? critique.reason : critique.implementation_review;
   const reason = source.length <= 512 ? source : `${source.slice(0, 499)} [truncated]`;
-  return parseCycleTerminalResult({ result, audit_issue_id: auditIssueId, audit_verdict: audit.verdict, reason });
+  return parseCycleTerminalResult({ result, critic_issue_id: criticIssueId, critic_verdict: critique.verdict, reason });
 }
 
 async function launchSafely(
@@ -284,15 +284,15 @@ async function launchSafely(
   }
 }
 
-type AuditResultUpload =
+type CriticResultUpload =
   | { readonly status: "uploaded"; readonly url: string }
   | { readonly status: "failed"; readonly reason: string };
 
-async function uploadAuditResult(
+async function uploadCriticResult(
   gateway: LinearGateway,
   filename: string,
   contents: Uint8Array,
-): Promise<AuditResultUpload> {
+): Promise<CriticResultUpload> {
   try {
     const uploaded = await gateway.upload_file(filename, "application/json", contents);
     return { status: "uploaded", url: uploaded.url };
@@ -301,16 +301,16 @@ async function uploadAuditResult(
   }
 }
 
-function cycleResult(result: CycleTerminalResult, filename: string, upload: AuditResultUpload): string {
+function cycleResult(result: CycleTerminalResult, filename: string, upload: CriticResultUpload): string {
   return [
     "## Cycle Result",
     `- Result: ${result.result}`,
-    `- Audit Issue: ${result.audit_issue_id}`,
-    `- Audit verdict: ${result.audit_verdict}`,
+    `- Critic Issue: ${result.critic_issue_id}`,
+    `- Critic verdict: ${result.critic_verdict}`,
     `- Reason: ${result.reason}`,
     upload.status === "uploaded"
-      ? `- Audit result: [${filename}](${upload.url})`
-      : `- Audit result: upload failed (${upload.reason})`,
+      ? `- Critique: [${filename}](${upload.url})`
+      : `- Critique: upload failed (${upload.reason})`,
   ].join("\n");
 }
 
@@ -323,134 +323,134 @@ export class CycleRunner {
       title: issueTitle(`[Cycle ${String(request.spec.cycle_number).padStart(3, "0")}]`, request.spec.objective),
       description: cycleDescription(request.spec), status_id: this.options.workflow.todo_status_id,
     });
-    const execute = await this.options.gateway.create_issue({
+    const artist = await this.options.gateway.create_issue({
       team_id: request.teamId, parent_id: cycle.id,
-      title: `[Executor] Cycle ${String(request.spec.cycle_number).padStart(3, "0")}`,
-      description: executeDescription(request.spec), status_id: this.options.workflow.todo_status_id,
+      title: `[Artist] Cycle ${String(request.spec.cycle_number).padStart(3, "0")}`,
+      description: artistDescription(request.spec), status_id: this.options.workflow.todo_status_id,
     });
-    const auditIssue = await this.options.gateway.create_issue({
+    const criticIssue = await this.options.gateway.create_issue({
       team_id: request.teamId, parent_id: cycle.id,
-      title: `[Audit] Cycle ${String(request.spec.cycle_number).padStart(3, "0")}`,
-      description: auditDescription(request.spec), status_id: this.options.workflow.todo_status_id,
+      title: `[Critic] Cycle ${String(request.spec.cycle_number).padStart(3, "0")}`,
+      description: criticDescription(request.spec), status_id: this.options.workflow.todo_status_id,
     });
-    await persistFamily(request, { cycle, execute, audit: auditIssue });
+    await persistFamily(request, { cycle, artist, critic: criticIssue });
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.in_progress_status_id);
     await this.options.gateway.create_comment(cycle.id, request.transitionComment);
     await request.onFamilyRecorded();
 
-    await this.options.gateway.update_issue_status(execute.id, this.options.workflow.in_progress_status_id);
+    await this.options.gateway.update_issue_status(artist.id, this.options.workflow.in_progress_status_id);
     const cyclePrefix = `cycle-${String(request.spec.cycle_number).padStart(3, "0")}`;
-    const executeResponsePath = path.join(request.rootState.run_directory, `${cyclePrefix}-executor-result.md`);
-    const executeDiagnosticJsonlPath = path.join(request.rootState.run_directory, `${cyclePrefix}-execute.jsonl`);
-    const executeDiagnosticStderrPath = path.join(request.rootState.run_directory, `${cyclePrefix}-execute.stderr`);
-    const executeProcess = await launchSafely(this.options.executePerformer, {
-      agent: this.options.executeAgent,
-      ...(this.options.executeModel === undefined ? {} : { model: this.options.executeModel }),
-      ...(this.options.executeReasoningEffort === undefined
-        ? {} : { reasoning_effort: this.options.executeReasoningEffort }),
-      prompt: renderExecutePrompt(request.spec, request.rootState), working_directory: request.rootState.workspace_path,
-      sandbox: "workspace_write", final_response_path: executeResponsePath,
-      diagnostic_jsonl_path: executeDiagnosticJsonlPath,
-      diagnostic_stderr_path: executeDiagnosticStderrPath, timeout_ms: this.options.timeoutMs,
+    const artistResponsePath = path.join(request.rootState.run_directory, `${cyclePrefix}-artist-result.md`);
+    const artistDiagnosticJsonlPath = path.join(request.rootState.run_directory, `${cyclePrefix}-artist.jsonl`);
+    const artistDiagnosticStderrPath = path.join(request.rootState.run_directory, `${cyclePrefix}-artist.stderr`);
+    const artistProcess = await launchSafely(this.options.artistPerformer, {
+      agent: this.options.artistAgent,
+      ...(this.options.artistModel === undefined ? {} : { model: this.options.artistModel }),
+      ...(this.options.artistReasoningEffort === undefined
+        ? {} : { reasoning_effort: this.options.artistReasoningEffort }),
+      prompt: renderArtistPrompt(request.spec, request.rootState), working_directory: request.rootState.workspace_path,
+      sandbox: "workspace_write", final_response_path: artistResponsePath,
+      diagnostic_jsonl_path: artistDiagnosticJsonlPath,
+      diagnostic_stderr_path: artistDiagnosticStderrPath, timeout_ms: this.options.timeoutMs,
     }, signal);
-    let executorMarkdown: string | undefined;
-    let executorResponseReason: string | undefined;
-    if (executeProcess.final_response_ref !== undefined
-      || (executeProcess.launch_status === "exited" && executeProcess.exit_code === 0)) {
-      const response = await readFinalResponse(executeProcess, executeResponsePath);
-      executorMarkdown = response.markdown;
-      executorResponseReason = response.reason;
+    let artistMarkdown: string | undefined;
+    let artistResponseReason: string | undefined;
+    if (artistProcess.final_response_ref !== undefined
+      || (artistProcess.launch_status === "exited" && artistProcess.exit_code === 0)) {
+      const response = await readFinalResponse(artistProcess, artistResponsePath);
+      artistMarkdown = response.markdown;
+      artistResponseReason = response.reason;
     }
-    const executorFailure = executorMarkdown === undefined
-      || executeProcess.launch_status !== "exited"
-      || executeProcess.exit_code !== 0
-      ? executorFailureComment(executeProcess, executorResponseReason)
+    const artistFailure = artistMarkdown === undefined
+      || artistProcess.launch_status !== "exited"
+      || artistProcess.exit_code !== 0
+      ? artistFailureComment(artistProcess, artistResponseReason)
       : undefined;
-    const executorUpdatedAt = (this.options.now ?? (() => new Date()))();
+    const artistUpdatedAt = (this.options.now ?? (() => new Date()))();
     await this.options.gateway.update_issue_description(
-      execute.id,
-      appendIssueDescription(execute.description, executorUpdatedAt, [executorMarkdown, executorFailure]),
+      artist.id,
+      appendIssueDescription(artist.description, artistUpdatedAt, [artistMarkdown, artistFailure]),
     );
-    await this.options.gateway.update_issue_status(execute.id, this.options.workflow.done_status_id);
+    await this.options.gateway.update_issue_status(artist.id, this.options.workflow.done_status_id);
 
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.in_review_status_id);
-    await this.options.gateway.update_issue_status(auditIssue.id, this.options.workflow.in_review_status_id);
-    const auditResponsePath = path.join(request.rootState.run_directory, `${cyclePrefix}-audit-result.md`);
-    const auditResultPath = path.join(request.rootState.run_directory, `${cyclePrefix}-audit-result.json`);
-    const auditDiagnosticJsonlPath = path.join(request.rootState.run_directory, `${cyclePrefix}-audit.jsonl`);
-    const auditDiagnosticStderrPath = path.join(request.rootState.run_directory, `${cyclePrefix}-audit.stderr`);
-    const auditProcess = await launchSafely(this.options.auditPerformer, {
-      agent: this.options.auditAgent,
-      ...(this.options.auditModel === undefined ? {} : { model: this.options.auditModel }),
-      ...(this.options.auditReasoningEffort === undefined
-        ? {} : { reasoning_effort: this.options.auditReasoningEffort }),
-      prompt: renderAuditPrompt(request.spec, request.rootState, executeProcess), working_directory: request.rootState.workspace_path,
-      sandbox: "read_only", final_response_path: auditResponsePath,
-      diagnostic_jsonl_path: auditDiagnosticJsonlPath, diagnostic_stderr_path: auditDiagnosticStderrPath,
+    await this.options.gateway.update_issue_status(criticIssue.id, this.options.workflow.in_review_status_id);
+    const criticResponsePath = path.join(request.rootState.run_directory, `${cyclePrefix}-critic-result.md`);
+    const critiqueResultPath = path.join(request.rootState.run_directory, `${cyclePrefix}-critique-result.json`);
+    const criticDiagnosticJsonlPath = path.join(request.rootState.run_directory, `${cyclePrefix}-critic.jsonl`);
+    const criticDiagnosticStderrPath = path.join(request.rootState.run_directory, `${cyclePrefix}-critic.stderr`);
+    const criticProcess = await launchSafely(this.options.criticPerformer, {
+      agent: this.options.criticAgent,
+      ...(this.options.criticModel === undefined ? {} : { model: this.options.criticModel }),
+      ...(this.options.criticReasoningEffort === undefined
+        ? {} : { reasoning_effort: this.options.criticReasoningEffort }),
+      prompt: renderCriticPrompt(request.spec, request.rootState, artistProcess), working_directory: request.rootState.workspace_path,
+      sandbox: "read_only", final_response_path: criticResponsePath,
+      diagnostic_jsonl_path: criticDiagnosticJsonlPath, diagnostic_stderr_path: criticDiagnosticStderrPath,
       timeout_ms: this.options.timeoutMs,
     }, signal);
-    let audit: AuditRunResult;
-    let auditMarkdown: string | undefined;
-    let auditErrorReason: string | undefined;
-    let auditResponseReason: string | undefined;
-    const auditProcessSucceeded =
-      auditProcess.launch_status === "exited"
-      && auditProcess.exit_code === 0
-      && auditProcess.diagnostic_jsonl_ref === auditDiagnosticJsonlPath
-      && auditProcess.diagnostic_stderr_ref === auditDiagnosticStderrPath
-      && auditProcess.sanitized_reason !== "diagnostic_capture_failed";
-    if (auditProcess.final_response_ref !== undefined || auditProcessSucceeded) {
-      const response = await readFinalResponse(auditProcess, auditResponsePath);
-      auditMarkdown = response.markdown;
-      auditResponseReason = response.reason;
+    let critique: CritiqueResult;
+    let criticMarkdown: string | undefined;
+    let criticErrorReason: string | undefined;
+    let criticResponseReason: string | undefined;
+    const criticProcessSucceeded =
+      criticProcess.launch_status === "exited"
+      && criticProcess.exit_code === 0
+      && criticProcess.diagnostic_jsonl_ref === criticDiagnosticJsonlPath
+      && criticProcess.diagnostic_stderr_ref === criticDiagnosticStderrPath
+      && criticProcess.sanitized_reason !== "diagnostic_capture_failed";
+    if (criticProcess.final_response_ref !== undefined || criticProcessSucceeded) {
+      const response = await readFinalResponse(criticProcess, criticResponsePath);
+      criticMarkdown = response.markdown;
+      criticResponseReason = response.reason;
     }
-    if (!auditProcessSucceeded) {
+    if (!criticProcessSucceeded) {
       const diagnosticsMissing =
-        auditProcess.diagnostic_jsonl_ref !== auditDiagnosticJsonlPath
-        || auditProcess.diagnostic_stderr_ref !== auditDiagnosticStderrPath
-        || auditProcess.sanitized_reason === "diagnostic_capture_failed";
-      audit = processError(auditProcess, diagnosticsMissing ? "diagnostic_capture_failed" : undefined);
-      auditErrorReason = audit.verdict === "process_error" ? audit.reason : auditErrorReason ?? "Audit process failed";
-    } else if (auditMarkdown === undefined) {
-      audit = parseAuditRunResult({
+        criticProcess.diagnostic_jsonl_ref !== criticDiagnosticJsonlPath
+        || criticProcess.diagnostic_stderr_ref !== criticDiagnosticStderrPath
+        || criticProcess.sanitized_reason === "diagnostic_capture_failed";
+      critique = processError(criticProcess, diagnosticsMissing ? "diagnostic_capture_failed" : undefined);
+      criticErrorReason = critique.verdict === "process_error" ? critique.reason : criticErrorReason ?? "Critic process failed";
+    } else if (criticMarkdown === undefined) {
+      critique = parseCritiqueResult({
         verdict: "process_error",
-        reason: auditErrorReason ?? auditResponseReason ?? "Final response unavailable",
+        reason: criticErrorReason ?? criticResponseReason ?? "Final response unavailable",
       });
-      auditErrorReason = audit.verdict === "process_error"
-        ? audit.reason : auditErrorReason ?? auditResponseReason ?? "Final response unavailable";
+      criticErrorReason = critique.verdict === "process_error"
+        ? critique.reason : criticErrorReason ?? criticResponseReason ?? "Final response unavailable";
     } else {
       try {
-        audit = parseAuditRunResultMarkdown(auditMarkdown);
+        critique = parseCritiqueResultMarkdown(criticMarkdown);
       } catch (error) {
-        const message = currentErrorMessage(error, "Invalid Audit response");
-        audit = parseAuditRunResult({ verdict: "process_error", reason: message });
-        auditErrorReason = audit.verdict === "process_error" ? audit.reason : message;
+        const message = currentErrorMessage(error, "Invalid Critic response");
+        critique = parseCritiqueResult({ verdict: "process_error", reason: message });
+        criticErrorReason = critique.verdict === "process_error" ? critique.reason : message;
       }
     }
-    audit = await persistAndReloadAuditResult(auditResultPath, audit);
-    const auditUpdatedAt = (this.options.now ?? (() => new Date()))();
+    critique = await persistAndReloadCriticResult(critiqueResultPath, critique);
+    const criticUpdatedAt = (this.options.now ?? (() => new Date()))();
     await this.options.gateway.update_issue_description(
-      auditIssue.id,
+      criticIssue.id,
       appendIssueDescription(
-        auditIssue.description,
-        auditUpdatedAt,
-        [auditMarkdown, auditErrorReason === undefined ? undefined : auditProcessErrorComment(auditErrorReason)],
+        criticIssue.description,
+        criticUpdatedAt,
+        [criticMarkdown, criticErrorReason === undefined ? undefined : criticProcessErrorComment(criticErrorReason)],
       ),
     );
-    await this.options.gateway.update_issue_status(auditIssue.id, this.options.workflow.done_status_id);
-    const terminal = terminalResult(auditIssue.id, audit);
-    const auditResultFilename = path.basename(auditResultPath);
-    const auditResultUpload = await uploadAuditResult(
+    await this.options.gateway.update_issue_status(criticIssue.id, this.options.workflow.done_status_id);
+    const terminal = terminalResult(criticIssue.id, critique);
+    const critiqueResultFilename = path.basename(critiqueResultPath);
+    const critiqueResultUpload = await uploadCriticResult(
       this.options.gateway,
-      auditResultFilename,
-      await readFile(auditResultPath),
+      critiqueResultFilename,
+      await readFile(critiqueResultPath),
     );
     await this.options.gateway.create_comment(
       cycle.id,
-      cycleResult(terminal, auditResultFilename, auditResultUpload),
+      cycleResult(terminal, critiqueResultFilename, critiqueResultUpload),
     );
     await this.options.gateway.update_issue_status(cycle.id, this.options.workflow.done_status_id);
 
-    return Object.freeze({ cycle, execute, auditIssue, executeProcess, auditProcess, audit, terminal });
+    return Object.freeze({ cycle, artist, criticIssue, artistProcess, criticProcess, critique, terminal });
   }
 }

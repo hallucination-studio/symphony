@@ -17,10 +17,10 @@ test("supervisor partitions .env credentials without crossing boundary ownership
     LINEAR_API_KEY: secret,
     SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret-not-output",
     SYMPHONY_RECONCILE_CODEX_BASE_URL: "https://reconcile.example.test/v1",
-    SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret-not-output",
-    SYMPHONY_EXECUTE_CODEX_BASE_URL: "https://execute.example.test/v1",
-    SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret-not-output",
-    SYMPHONY_AUDIT_CODEX_BASE_URL: "https://audit.example.test/v1",
+    SYMPHONY_ARTIST_CODEX_API_KEY: "execute-secret-not-output",
+    SYMPHONY_ARTIST_CODEX_BASE_URL: "https://execute.example.test/v1",
+    SYMPHONY_CRITIC_CODEX_API_KEY: "audit-secret-not-output",
+    SYMPHONY_CRITIC_CODEX_BASE_URL: "https://audit.example.test/v1",
     CODEX_API_KEY: "generic-secret-must-not-forward",
     GH_TOKEN: "pr-secret-not-output",
     SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-secret-not-output",
@@ -32,13 +32,13 @@ test("supervisor partitions .env credentials without crossing boundary ownership
   assert.equal(partitions.linearEnvironment.LINEAR_API_KEY, secret);
   assert.equal(partitions.reconcileEnvironment.CODEX_API_KEY, "reconcile-secret-not-output");
   assert.equal(partitions.reconcileEnvironment.CODEX_BASE_URL, "https://reconcile.example.test/v1");
-  assert.equal(partitions.executeEnvironment.CODEX_API_KEY, "execute-secret-not-output");
-  assert.equal(partitions.executeEnvironment.CODEX_BASE_URL, "https://execute.example.test/v1");
-  assert.equal(partitions.auditEnvironment.CODEX_API_KEY, "audit-secret-not-output");
-  assert.equal(partitions.auditEnvironment.CODEX_BASE_URL, "https://audit.example.test/v1");
-  assert.equal(partitions.reconcileEnvironment.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
-  assert.equal(partitions.executeEnvironment.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
-  assert.equal(partitions.auditEnvironment.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
+  assert.equal(partitions.artistEnvironment.CODEX_API_KEY, "execute-secret-not-output");
+  assert.equal(partitions.artistEnvironment.CODEX_BASE_URL, "https://execute.example.test/v1");
+  assert.equal(partitions.criticEnvironment.CODEX_API_KEY, "audit-secret-not-output");
+  assert.equal(partitions.criticEnvironment.CODEX_BASE_URL, "https://audit.example.test/v1");
+  assert.equal(partitions.reconcileEnvironment.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
+  assert.equal(partitions.artistEnvironment.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
+  assert.equal(partitions.criticEnvironment.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
   assert.equal(partitions.prEnvironment.GH_TOKEN, "pr-secret-not-output");
   assert.equal(partitions.linearEnvironment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
   assert.equal(partitions.reconcileEnvironment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
@@ -54,8 +54,8 @@ test("supervisor runs local layers and reports external layers as blocked", asyn
   await writeFile(envPath, envSource({
     LINEAR_API_KEY: secret,
     SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret-not-output",
-    SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret-not-output",
-    SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret-not-output",
+    SYMPHONY_ARTIST_CODEX_API_KEY: "execute-secret-not-output",
+    SYMPHONY_CRITIC_CODEX_API_KEY: "audit-secret-not-output",
   }), { encoding: "utf8", mode: 0o600 });
   let testRun = false;
   const result = await runSupervisor({

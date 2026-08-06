@@ -1,7 +1,7 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { parseCycleSpec, type AuditRunResult, type CycleSpec } from "../contracts/cycle.js";
+import { parseCycleSpec, type CritiqueResult, type CycleSpec } from "../contracts/cycle.js";
 import {
   parseRootReconcileRequest,
   parseRootReconcileReportMarkdown,
@@ -301,7 +301,7 @@ function nextCursor(comments: readonly LinearComment[], current?: string): strin
 function withState(state: RootState, changes: Partial<RootState>): RootState {
   const value = { ...state, ...changes } as Record<string, unknown>;
   for (const key of [
-    "pending_finding", "latest_audit", "harness_feedback", "comment_cursor", "delivery",
+    "pending_finding", "latest_critique", "harness_feedback", "comment_cursor", "delivery",
     "token_usage",
   ]) {
     if (value[key] === undefined) delete value[key];
@@ -309,10 +309,10 @@ function withState(state: RootState, changes: Partial<RootState>): RootState {
   return parseRootState(value);
 }
 
-function findingFromAudit(audit: AuditRunResult): MarkdownText | undefined {
-  if (audit.verdict === "accepted") return audit.pending_finding;
-  if (audit.verdict === "process_error") return parseMarkdownText(audit.reason);
-  return audit.pending_finding ?? audit.findings[0] ?? audit.implementation_review;
+function findingFromCritic(critique: CritiqueResult): MarkdownText | undefined {
+  if (critique.verdict === "accepted") return critique.pending_finding;
+  if (critique.verdict === "process_error") return parseMarkdownText(critique.reason);
+  return critique.pending_finding ?? critique.findings[0] ?? critique.implementation_review;
 }
 
 function visibleErrorMessage(error: unknown): MarkdownText {
@@ -515,23 +515,23 @@ export class Conductor {
         event: "cycle_completed", root_id: root.id,
         cycle_number: spec.cycle_number, result: outcome.terminal.result,
       });
-      const pendingFinding = findingFromAudit(outcome.audit);
+      const pendingFinding = findingFromCritic(outcome.critique);
       const cycleTokenUsage = addTokenUsage(
-        addTokenUsage(state.token_usage, outcome.executeProcess.token_usage),
-        outcome.auditProcess.token_usage,
+        addTokenUsage(state.token_usage, outcome.artistProcess.token_usage),
+        outcome.criticProcess.token_usage,
       );
-      if (outcome.audit.verdict === "accepted") {
+      if (outcome.critique.verdict === "accepted") {
         await updateState(withState(state, {
           current_phase: "idle",
-          task_state_markdown: outcome.audit.task_state_markdown ?? state.task_state_markdown,
+          task_state_markdown: outcome.critique.task_state_markdown ?? state.task_state_markdown,
           pending_finding: pendingFinding,
-          latest_audit: outcome.audit,
+          latest_critique: outcome.critique,
           harness_feedback: undefined,
           token_usage: cycleTokenUsage,
         }));
       } else {
         await updateState(withState(state, {
-          current_phase: "idle", pending_finding: pendingFinding, latest_audit: outcome.audit,
+          current_phase: "idle", pending_finding: pendingFinding, latest_critique: outcome.critique,
           token_usage: cycleTokenUsage,
         }));
       }

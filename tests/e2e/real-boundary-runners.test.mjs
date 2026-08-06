@@ -22,23 +22,23 @@ const secret = "fixture-secret-never-output";
 test("real Codex probes leave independent role overrides optional", () => {
   assert.deepEqual(resolveCodexBoundaryConfiguration({}), {
     reconcile: {},
-    execute: {},
-    audit: {},
+    artist: {},
+    critic: {},
   });
   assert.deepEqual(resolveCodexBoundaryConfiguration({
     SYMPHONY_E2E_RECONCILE_AGENT: "codex",
     SYMPHONY_E2E_RECONCILE_MODEL: "reconcile-model",
     SYMPHONY_E2E_RECONCILE_REASONING_EFFORT: "medium",
-    SYMPHONY_E2E_EXECUTE_AGENT: "codex",
-    SYMPHONY_E2E_EXECUTE_MODEL: "execute-model",
-    SYMPHONY_E2E_EXECUTE_REASONING_EFFORT: "high",
-    SYMPHONY_E2E_AUDIT_AGENT: "codex",
-    SYMPHONY_E2E_AUDIT_MODEL: "audit-model",
-    SYMPHONY_E2E_AUDIT_REASONING_EFFORT: "xhigh",
+    SYMPHONY_E2E_ARTIST_AGENT: "codex",
+    SYMPHONY_E2E_ARTIST_MODEL: "execute-model",
+    SYMPHONY_E2E_ARTIST_REASONING_EFFORT: "high",
+    SYMPHONY_E2E_CRITIC_AGENT: "codex",
+    SYMPHONY_E2E_CRITIC_MODEL: "audit-model",
+    SYMPHONY_E2E_CRITIC_REASONING_EFFORT: "xhigh",
   }), {
     reconcile: { agent: "codex", model: "reconcile-model", reasoning_effort: "medium" },
-    execute: { agent: "codex", model: "execute-model", reasoning_effort: "high" },
-    audit: { agent: "codex", model: "audit-model", reasoning_effort: "xhigh" },
+    artist: { agent: "codex", model: "execute-model", reasoning_effort: "high" },
+    critic: { agent: "codex", model: "audit-model", reasoning_effort: "xhigh" },
   });
 });
 
@@ -51,10 +51,10 @@ test("boundary environment partition keeps credentials with their owning boundar
     SYMPHONY_LINEAR_TOKEN: secret,
     SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret-never-output",
     SYMPHONY_RECONCILE_CODEX_BASE_URL: "https://reconcile.example.test/v1",
-    SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret-never-output",
-    SYMPHONY_EXECUTE_CODEX_BASE_URL: "https://execute.example.test/v1",
-    SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret-never-output",
-    SYMPHONY_AUDIT_CODEX_BASE_URL: "https://audit.example.test/v1",
+    SYMPHONY_ARTIST_CODEX_API_KEY: "execute-secret-never-output",
+    SYMPHONY_ARTIST_CODEX_BASE_URL: "https://execute.example.test/v1",
+    SYMPHONY_CRITIC_CODEX_API_KEY: "audit-secret-never-output",
+    SYMPHONY_CRITIC_CODEX_BASE_URL: "https://audit.example.test/v1",
     GH_TOKEN: "github-secret-never-output",
     CODEX_API_KEY: "generic-secret-must-not-forward",
     CODEX_BASE_URL: "https://generic.example.test/v1",
@@ -62,24 +62,24 @@ test("boundary environment partition keeps credentials with their owning boundar
   };
   const linear = partitionBoundaryEnvironment(source, "linear", { PATH: "/usr/bin", HOME: "/tmp/home" });
   const reconcile = partitionBoundaryEnvironment(source, "reconcile", { PATH: "/usr/bin", HOME: "/tmp/home" });
-  const execute = partitionBoundaryEnvironment(source, "execute", { PATH: "/usr/bin", HOME: "/tmp/home" });
-  const audit = partitionBoundaryEnvironment(source, "audit", { PATH: "/usr/bin", HOME: "/tmp/home" });
+  const artist = partitionBoundaryEnvironment(source, "artist", { PATH: "/usr/bin", HOME: "/tmp/home" });
+  const critic = partitionBoundaryEnvironment(source, "critic", { PATH: "/usr/bin", HOME: "/tmp/home" });
   const pr = partitionBoundaryEnvironment(source, "pr", { PATH: "/usr/bin", HOME: "/tmp/home" });
 
   assert.equal(linear.LINEAR_API_KEY, secret);
   assert.equal(linear.CODEX_API_KEY, undefined);
   assert.equal(reconcile.CODEX_API_KEY, "reconcile-secret-never-output");
   assert.equal(reconcile.CODEX_BASE_URL, "https://reconcile.example.test/v1");
-  assert.equal(reconcile.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
-  assert.equal(reconcile.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
-  assert.equal(execute.CODEX_API_KEY, "execute-secret-never-output");
-  assert.equal(execute.CODEX_BASE_URL, "https://execute.example.test/v1");
-  assert.equal(execute.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
-  assert.equal(audit.CODEX_API_KEY, "audit-secret-never-output");
-  assert.equal(audit.CODEX_BASE_URL, "https://audit.example.test/v1");
-  assert.equal(audit.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
-  assert.equal(execute.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
-  assert.equal(audit.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
+  assert.equal(reconcile.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
+  assert.equal(reconcile.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
+  assert.equal(artist.CODEX_API_KEY, "execute-secret-never-output");
+  assert.equal(artist.CODEX_BASE_URL, "https://execute.example.test/v1");
+  assert.equal(artist.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
+  assert.equal(critic.CODEX_API_KEY, "audit-secret-never-output");
+  assert.equal(critic.CODEX_BASE_URL, "https://audit.example.test/v1");
+  assert.equal(critic.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
+  assert.equal(artist.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
+  assert.equal(critic.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
   assert.equal(pr.GH_TOKEN, "github-secret-never-output");
   assert.equal(linear.CODEX_BASE_URL, undefined);
   assert.equal(linear.ARBITRARY_API_KEY, undefined);
@@ -88,31 +88,31 @@ test("boundary environment partition keeps credentials with their owning boundar
 test("role partitions preserve local Codex discovery without cross-role credentials", () => {
   const environment = {
     SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret",
-    SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret",
-    SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret",
+    SYMPHONY_ARTIST_CODEX_API_KEY: "execute-secret",
+    SYMPHONY_CRITIC_CODEX_API_KEY: "audit-secret",
   };
   const inherited = { HOME: "/tmp/home", CODEX_HOME: "/tmp/codex-home", PATH: "/usr/bin" };
 
   const reconcile = partitionBoundaryEnvironment(environment, "reconcile", inherited);
-  const execute = partitionBoundaryEnvironment(environment, "execute", inherited);
-  const audit = partitionBoundaryEnvironment(environment, "audit", inherited);
+  const artist = partitionBoundaryEnvironment(environment, "artist", inherited);
+  const critic = partitionBoundaryEnvironment(environment, "critic", inherited);
 
-  assert.equal(execute.HOME, "/tmp/home");
-  assert.equal(execute.CODEX_HOME, "/tmp/codex-home");
+  assert.equal(artist.HOME, "/tmp/home");
+  assert.equal(artist.CODEX_HOME, "/tmp/codex-home");
   assert.equal(reconcile.CODEX_API_KEY, "reconcile-secret");
-  assert.equal(execute.CODEX_API_KEY, "execute-secret");
-  assert.equal(audit.CODEX_API_KEY, "audit-secret");
-  assert.equal(reconcile.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
-  assert.equal(reconcile.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
-  assert.equal(execute.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
-  assert.equal(audit.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
+  assert.equal(artist.CODEX_API_KEY, "execute-secret");
+  assert.equal(critic.CODEX_API_KEY, "audit-secret");
+  assert.equal(reconcile.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
+  assert.equal(reconcile.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
+  assert.equal(artist.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
+  assert.equal(critic.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
 });
 
 test("role partition ignores generic Codex credentials and base URL", () => {
   const environment = partitionBoundaryEnvironment({
     CODEX_API_KEY: "generic-api-secret-never-output",
     SYMPHONY_CODEX_BASE_URL: "https://generic.example.test/v1",
-  }, "audit", { PATH: "/usr/bin", HOME: "/tmp/home" });
+  }, "critic", { PATH: "/usr/bin", HOME: "/tmp/home" });
   assert.equal(environment.CODEX_API_KEY, undefined);
   assert.equal(environment.CODEX_BASE_URL, undefined);
   assert.equal(environment.SYMPHONY_CODEX_BASE_URL, undefined);
@@ -168,14 +168,14 @@ test("the enabled Codex boundary probes all roles with independent argv and env"
       SYMPHONY_E2E_RECONCILE_AGENT: "codex",
       SYMPHONY_E2E_RECONCILE_MODEL: "reconcile-model",
       SYMPHONY_E2E_RECONCILE_REASONING_EFFORT: "medium",
-      SYMPHONY_E2E_EXECUTE_AGENT: "codex",
-      SYMPHONY_E2E_EXECUTE_MODEL: "execute-model",
-      SYMPHONY_E2E_AUDIT_REASONING_EFFORT: "xhigh",
-      SYMPHONY_E2E_AUDIT_AGENT: "codex",
+      SYMPHONY_E2E_ARTIST_AGENT: "codex",
+      SYMPHONY_E2E_ARTIST_MODEL: "execute-model",
+      SYMPHONY_E2E_CRITIC_REASONING_EFFORT: "xhigh",
+      SYMPHONY_E2E_CRITIC_AGENT: "codex",
       SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret-never-output",
       SYMPHONY_RECONCILE_CODEX_BASE_URL: "https://reconcile.example.test/v1",
-      SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret-never-output",
-      SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret-never-output",
+      SYMPHONY_ARTIST_CODEX_API_KEY: "execute-secret-never-output",
+      SYMPHONY_CRITIC_CODEX_API_KEY: "audit-secret-never-output",
     },
     inheritedEnvironment: { PATH: "/usr/bin", HOME: "/tmp/home" },
     probe: async (probe) => {
@@ -185,18 +185,18 @@ test("the enabled Codex boundary probes all roles with independent argv and env"
   assert.deepEqual(result, { status: "passed", layer: "real_codex", boundary: "codex" });
   assert.deepEqual(probes.map(({ role, configuration }) => ({ role, configuration })), [
     { role: "reconcile", configuration: { agent: "codex", model: "reconcile-model", reasoning_effort: "medium" } },
-    { role: "execute", configuration: { agent: "codex", model: "execute-model" } },
-    { role: "audit", configuration: { agent: "codex", reasoning_effort: "xhigh" } },
+    { role: "artist", configuration: { agent: "codex", model: "execute-model" } },
+    { role: "critic", configuration: { agent: "codex", reasoning_effort: "xhigh" } },
   ]);
   assert.equal(probes[0].environment.CODEX_API_KEY, "reconcile-secret-never-output");
   assert.equal(probes[1].environment.CODEX_API_KEY, "execute-secret-never-output");
   assert.equal(probes[2].environment.CODEX_API_KEY, "audit-secret-never-output");
-  assert.equal(probes[0].environment.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
-  assert.equal(probes[0].environment.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
+  assert.equal(probes[0].environment.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
+  assert.equal(probes[0].environment.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
   assert.equal(probes[1].environment.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
-  assert.equal(probes[1].environment.SYMPHONY_AUDIT_CODEX_API_KEY, undefined);
+  assert.equal(probes[1].environment.SYMPHONY_CRITIC_CODEX_API_KEY, undefined);
   assert.equal(probes[2].environment.SYMPHONY_RECONCILE_CODEX_API_KEY, undefined);
-  assert.equal(probes[2].environment.SYMPHONY_EXECUTE_CODEX_API_KEY, undefined);
+  assert.equal(probes[2].environment.SYMPHONY_ARTIST_CODEX_API_KEY, undefined);
 });
 
 test("a role probe failure does not suppress the other independent role probes", async () => {
@@ -206,11 +206,11 @@ test("a role probe failure does not suppress the other independent role probes",
     inheritedEnvironment: { PATH: "/usr/bin", HOME: "/tmp/home" },
     probe: async ({ role }) => {
       roles.push(role);
-      if (role === "execute") throw new Error("probe_failed");
+      if (role === "artist") throw new Error("probe_failed");
     },
   });
   assert.deepEqual(result, { status: "failed", layer: "real_codex", reason: "probe_failed" });
-  assert.deepEqual(roles, ["reconcile", "execute", "audit"]);
+  assert.deepEqual(roles, ["reconcile", "artist", "critic"]);
 });
 
 test("individual real-boundary runners report blocked instead of claiming a local pass", async () => {

@@ -11,12 +11,12 @@ const valid = [
   "--reconcile-agent", "codex",
   "--reconcile-model", "reconcile-model",
   "--reconcile-reasoning-effort", "medium",
-  "--execute-agent", "codex",
-  "--execute-model", "execute-model",
-  "--execute-reasoning-effort", "high",
-  "--audit-agent", "codex",
-  "--audit-model", "audit-model",
-  "--audit-reasoning-effort", "xhigh",
+  "--artist-agent", "codex",
+  "--artist-model", "execute-model",
+  "--artist-reasoning-effort", "high",
+  "--critic-agent", "codex",
+  "--critic-model", "audit-model",
+  "--critic-reasoning-effort", "xhigh",
   "--max-cycles", "2",
 ];
 
@@ -32,12 +32,12 @@ test("contract CLI smoke accepts the only public Root command", () => {
       reconcile_agent: "codex",
       reconcile_model: "reconcile-model",
       reconcile_reasoning_effort: "medium",
-      execute_agent: "codex",
-      execute_model: "execute-model",
-      execute_reasoning_effort: "high",
-      audit_agent: "codex",
-      audit_model: "audit-model",
-      audit_reasoning_effort: "xhigh",
+      artist_agent: "codex",
+      artist_model: "execute-model",
+      artist_reasoning_effort: "high",
+      critic_agent: "codex",
+      critic_model: "audit-model",
+      critic_reasoning_effort: "xhigh",
       max_cycles: 2,
     },
   });
@@ -49,7 +49,7 @@ test("contract CLI smoke defaults to local Codex configuration", () => {
     "--dir", "/tmp/root-run", "--max-cycles", "2",
   ]).request, {
     linear_root: "ENG-1", workspace_path: "/tmp/root-workspace", run_directory: "/tmp/root-run",
-    reconcile_agent: "codex", execute_agent: "codex", audit_agent: "codex", max_cycles: 2,
+    reconcile_agent: "codex", artist_agent: "codex", critic_agent: "codex", max_cycles: 2,
   });
 });
 

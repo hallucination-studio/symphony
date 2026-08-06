@@ -24,10 +24,10 @@ export class AgentDriver {
   #scripts;
   #calls = [];
 
-  constructor({ execute = [], audit = [], reconcile = [] } = {}) {
+  constructor({ artist = [], critic = [], reconcile = [] } = {}) {
     this.#scripts = {
-      execute: [...execute],
-      audit: [...audit],
+      artist: [...artist],
+      critic: [...critic],
       reconcile: [...reconcile],
     };
   }
@@ -40,18 +40,18 @@ export class AgentDriver {
     const script = this.#scripts[kind]?.shift();
     if (script === undefined) return processResult({ launch_status: "start_failed", sanitized_reason: "agent_script_missing" }, "agent_result_invalid");
     const value = typeof script === "function" ? await script(clone(request), world) : script;
-    if (kind !== "execute") return clone(value);
+    if (kind !== "artist") return clone(value);
     return processResult(value, "agent_result_invalid");
   }
 
-  async execute(request, world) {
-    this.#calls.push(frozen({ role: "execute", request: clone(request) }));
-    return this.#run("execute", request, world);
+  async artist(request, world) {
+    this.#calls.push(frozen({ role: "artist", request: clone(request) }));
+    return this.#run("artist", request, world);
   }
 
-  async audit(request, world) {
-    this.#calls.push(frozen({ role: "audit", request: clone(request) }));
-    return this.#run("audit", request, world);
+  async critic(request, world) {
+    this.#calls.push(frozen({ role: "critic", request: clone(request) }));
+    return this.#run("critic", request, world);
   }
 
   async reconcile(request, world) {
@@ -60,8 +60,8 @@ export class AgentDriver {
   }
 
   async launch(request, world) {
-    if (request?.sandbox === "workspace_write") return this.execute(request, world);
-    if (request?.sandbox === "read_only") return this.audit(request, world);
+    if (request?.sandbox === "workspace_write") return this.artist(request, world);
+    if (request?.sandbox === "read_only") return this.critic(request, world);
     return this.reconcile(request, world);
   }
 }

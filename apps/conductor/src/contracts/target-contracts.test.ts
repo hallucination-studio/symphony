@@ -3,13 +3,13 @@ import test from "node:test";
 
 import {
   parseAgentKind,
-  parseAuditVerdict,
+  parseCritiqueVerdict,
   parseCycleIssueId,
   parseCycleResult,
-  parseExecuteIssueId,
+  parseArtistIssueId,
   parseIssueStatus,
   parseRootIssueId,
-  parseAuditIssueId,
+  parseCriticIssueId,
   parseCommentId,
 } from "./identity.js";
 import {
@@ -24,7 +24,7 @@ import {
 import {
   parseCycleSpec,
   parseCycleTerminalResult,
-  parseAuditRunResult,
+  parseCritiqueResult,
 } from "./cycle.js";
 import {
   parseRootReconcileDecision,
@@ -73,19 +73,19 @@ const rootState = {
 test("identity values are provider strings with closed status vocabularies", () => {
   assert.equal(parseRootIssueId("ENG-123"), "ENG-123");
   assert.equal(parseCycleIssueId("issue-cycle-1"), "issue-cycle-1");
-  assert.equal(parseExecuteIssueId("issue-execute-1"), "issue-execute-1");
-  assert.equal(parseAuditIssueId("issue-audit-1"), "issue-audit-1");
+  assert.equal(parseArtistIssueId("issue-execute-1"), "issue-execute-1");
+  assert.equal(parseCriticIssueId("issue-audit-1"), "issue-audit-1");
   assert.equal(parseCommentId("comment-1"), "comment-1");
   assert.equal(parseAgentKind("codex"), "codex");
   assert.equal(parseIssueStatus("completed"), "completed");
   assert.equal(parseCycleResult("failed"), "failed");
-  assert.equal(parseAuditVerdict("process_error"), "process_error");
+  assert.equal(parseCritiqueVerdict("process_error"), "process_error");
 
   for (const parse of [
     parseRootIssueId,
     parseCycleIssueId,
-    parseExecuteIssueId,
-    parseAuditIssueId,
+    parseArtistIssueId,
+    parseCriticIssueId,
     parseCommentId,
   ]) {
     assert.throws(() => parse(""), /invalid_provider_id/u);
@@ -94,7 +94,7 @@ test("identity values are provider strings with closed status vocabularies", () 
   assert.throws(() => parseAgentKind("claude"), /invalid_contract_variant/u);
   assert.throws(() => parseIssueStatus("in_progress"), /invalid_contract_variant/u);
   assert.throws(() => parseCycleResult("awaiting_acceptance"), /invalid_contract_variant/u);
-  assert.throws(() => parseAuditVerdict("passed"), /invalid_contract_variant/u);
+  assert.throws(() => parseCritiqueVerdict("passed"), /invalid_contract_variant/u);
 });
 
 test("HarnessRunRequest is exact, bounded, and does not carry credentials", () => {
@@ -105,12 +105,12 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
     reconcile_agent: "codex",
     reconcile_model: "reconcile-model",
     reconcile_reasoning_effort: "medium",
-    execute_agent: "codex",
-    execute_model: "execute-model",
-    execute_reasoning_effort: "high",
-    audit_agent: "codex",
-    audit_model: "audit-model",
-    audit_reasoning_effort: "xhigh",
+    artist_agent: "codex",
+    artist_model: "execute-model",
+    artist_reasoning_effort: "high",
+    critic_agent: "codex",
+    critic_model: "audit-model",
+    critic_reasoning_effort: "xhigh",
     max_cycles: 30,
   });
   assert.deepEqual(request, {
@@ -120,12 +120,12 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
     reconcile_agent: "codex",
     reconcile_model: "reconcile-model",
     reconcile_reasoning_effort: "medium",
-    execute_agent: "codex",
-    execute_model: "execute-model",
-    execute_reasoning_effort: "high",
-    audit_agent: "codex",
-    audit_model: "audit-model",
-    audit_reasoning_effort: "xhigh",
+    artist_agent: "codex",
+    artist_model: "execute-model",
+    artist_reasoning_effort: "high",
+    critic_agent: "codex",
+    critic_model: "audit-model",
+    critic_reasoning_effort: "xhigh",
     max_cycles: 30,
   });
   assert.ok(Object.isFrozen(request));
@@ -138,7 +138,7 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
   }
   assert.throws(() => parseHarnessRunRequest({ ...request, agent: "codex" }), /invalid_contract_keys/u);
   assert.throws(() => parseHarnessRunRequest({ ...request, reconcile_agent: "claude" }), /invalid_contract_variant/u);
-  assert.throws(() => parseHarnessRunRequest({ ...request, audit_agent: null }), /invalid_contract_variant/u);
+  assert.throws(() => parseHarnessRunRequest({ ...request, critic_agent: null }), /invalid_contract_variant/u);
   assert.throws(() => parseHarnessRunRequest({ ...request, max_cycles: 0 }), /invalid_max_cycles/u);
   assert.throws(() => parseHarnessRunRequest({ ...request, workspace_path: "relative" }), /invalid_workspace_path/u);
   assert.deepEqual(parseHarnessRunRequest({
@@ -146,17 +146,17 @@ test("HarnessRunRequest is exact, bounded, and does not carry credentials", () =
     run_directory: "/runs/ENG-123", max_cycles: 30,
   }), {
     linear_root: "ENG-123", workspace_path: "/workspaces/ENG-123",
-    run_directory: "/runs/ENG-123", reconcile_agent: "codex", execute_agent: "codex", audit_agent: "codex", max_cycles: 30,
+    run_directory: "/runs/ENG-123", reconcile_agent: "codex", artist_agent: "codex", critic_agent: "codex", max_cycles: 30,
   });
   assert.deepEqual(parseHarnessRunRequest({
     linear_root: "ENG-123", workspace_path: "/workspaces/ENG-123",
-    run_directory: "/runs/ENG-123", reconcile_reasoning_effort: "high", execute_model: "execute-only",
-    audit_reasoning_effort: "xhigh", max_cycles: 1,
+    run_directory: "/runs/ENG-123", reconcile_reasoning_effort: "high", artist_model: "execute-only",
+    critic_reasoning_effort: "xhigh", max_cycles: 1,
   }), {
     linear_root: "ENG-123", workspace_path: "/workspaces/ENG-123",
     run_directory: "/runs/ENG-123", reconcile_agent: "codex", reconcile_reasoning_effort: "high",
-    execute_agent: "codex", execute_model: "execute-only", audit_agent: "codex",
-    audit_reasoning_effort: "xhigh", max_cycles: 1,
+    artist_agent: "codex", artist_model: "execute-only", critic_agent: "codex",
+    critic_reasoning_effort: "xhigh", max_cycles: 1,
   });
 });
 
@@ -189,31 +189,31 @@ test("Linear values and RootState normalize provider data without provider paylo
   assert.throws(() => parseRootState({ ...rootState, delivery: { kind: "branch", branch: "" } }), /invalid_delivery_branch/u);
 });
 
-test("RootState optionally persists a structured latest Audit result", () => {
-  const latestAudit = {
+test("RootState optionally persists a structured latest Critique", () => {
+  const latestCritic = {
     verdict: "accepted",
-    scope_audited: "Parser source, focused tests, and the complete workspace diff.",
+    scope_reviewed: "Parser source, focused tests, and the complete workspace diff.",
     implementation_review: "The parser rejects ambiguous input before token recovery.",
     checks: ["npm test"],
     evidence: ["Focused test passed."],
     findings: [],
     task_state_markdown: "## Task State\n\nParser verified.",
   } as const;
-  const parsed = parseRootState({ ...rootState, latest_audit: latestAudit });
+  const parsed = parseRootState({ ...rootState, latest_critique: latestCritic });
 
-  assert.deepEqual(parsed.latest_audit, latestAudit);
-  assert.ok(Object.isFrozen(parsed.latest_audit));
-  assert.ok(Object.isFrozen(parsed.latest_audit?.checks));
+  assert.deepEqual(parsed.latest_critique, latestCritic);
+  assert.ok(Object.isFrozen(parsed.latest_critique));
+  assert.ok(Object.isFrozen(parsed.latest_critique?.checks));
   assert.deepEqual(
     parseRootState({
       ...rootState,
-      latest_audit: { verdict: "process_error", reason: "auditor_start_failed" },
-    }).latest_audit,
-    { verdict: "process_error", reason: "auditor_start_failed" },
+      latest_critique: { verdict: "process_error", reason: "critic_start_failed" },
+    }).latest_critique,
+    { verdict: "process_error", reason: "critic_start_failed" },
   );
   assert.throws(() => parseRootState({
     ...rootState,
-    latest_audit: { ...latestAudit, unexpected: "child-report" },
+    latest_critique: { ...latestCritic, unexpected: "child-report" },
   }), /invalid_contract_keys/u);
 });
 
@@ -258,7 +258,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     },
     report: [
       "### Why Continue", "The pending finding remains open.", "",
-      "### Evidence", "The latest Audit found an ambiguity.", "",
+      "### Evidence", "The latest Critic found an ambiguity.", "",
       "### Next Cycle", "Reject the ambiguous parser input.",
     ].join("\n"),
   });
@@ -332,7 +332,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
   }), /invalid_root_worktree_line_totals/u);
 });
 
-test("Performer and Audit contracts keep process facts separate from semantic verdicts", () => {
+test("Performer and Critic contracts keep process facts separate from semantic verdicts", () => {
   const launch = parsePerformerLaunchRequest({
     agent: "codex",
     model: "gpt-5.6-luna",
@@ -398,9 +398,9 @@ test("Performer and Audit contracts keep process facts separate from semantic ve
     },
   }), /invalid_total_tokens/u);
 
-  const audit = parseAuditRunResult({
+  const audit = parseCritiqueResult({
     verdict: "accepted",
-    scope_audited: "Parser source, focused tests, and the complete workspace diff.",
+    scope_reviewed: "Parser source, focused tests, and the complete workspace diff.",
     implementation_review: "The parser rejects ambiguous input before token recovery.",
     checks: ["npm test"],
     evidence: ["Focused test passed."],
@@ -409,13 +409,13 @@ test("Performer and Audit contracts keep process facts separate from semantic ve
   });
   assert.equal(audit.verdict, "accepted");
   assert.ok(Object.isFrozen(audit));
-  assert.deepEqual(parseAuditRunResult({ verdict: "process_error", reason: "auditor_start_failed" }), {
+  assert.deepEqual(parseCritiqueResult({ verdict: "process_error", reason: "critic_start_failed" }), {
     verdict: "process_error",
-    reason: "auditor_start_failed",
+    reason: "critic_start_failed",
   });
-  assert.throws(() => parseAuditRunResult({
+  assert.throws(() => parseCritiqueResult({
     verdict: "accepted",
-    scope_audited: "scope",
+    scope_reviewed: "scope",
     implementation_review: "logic",
     checks: [],
     evidence: [],
@@ -424,36 +424,36 @@ test("Performer and Audit contracts keep process facts separate from semantic ve
   }), /invalid_contract_keys/u);
 });
 
-test("Cycle terminal result maps closed Audit verdicts mechanically", () => {
-  const auditIssueId = parseAuditIssueId("issue-audit-1");
+test("Cycle terminal result maps closed Critic verdicts mechanically", () => {
+  const criticIssueId = parseCriticIssueId("issue-audit-1");
   assert.deepEqual(parseCycleTerminalResult({
     result: "succeeded",
-    audit_issue_id: auditIssueId,
-    audit_verdict: "accepted",
-    reason: "Accepted by the fresh Audit.",
+    critic_issue_id: criticIssueId,
+    critic_verdict: "accepted",
+    reason: "Accepted by the fresh Critic.",
   }), {
     result: "succeeded",
-    audit_issue_id: auditIssueId,
-    audit_verdict: "accepted",
-    reason: "Accepted by the fresh Audit.",
+    critic_issue_id: criticIssueId,
+    critic_verdict: "accepted",
+    reason: "Accepted by the fresh Critic.",
   });
   assert.throws(() => parseCycleTerminalResult({
     result: "succeeded",
-    audit_issue_id: auditIssueId,
-    audit_verdict: "incomplete",
+    critic_issue_id: criticIssueId,
+    critic_verdict: "incomplete",
     reason: "not accepted",
   }), /cycle_result_verdict_mismatch/u);
   assert.throws(() => parseCycleTerminalResult({
     result: "rejected",
-    audit_issue_id: auditIssueId,
-    audit_verdict: "accepted",
+    critic_issue_id: criticIssueId,
+    critic_verdict: "accepted",
     reason: "not accepted",
   }), /cycle_result_verdict_mismatch/u);
   for (const verdict of ["blocked", "violation", "process_error"] as const) {
     assert.equal(parseCycleTerminalResult({
       result: "failed",
-      audit_issue_id: auditIssueId,
-      audit_verdict: verdict,
+      critic_issue_id: criticIssueId,
+      critic_verdict: verdict,
       reason: "The Cycle failed.",
     }).result, "failed");
   }

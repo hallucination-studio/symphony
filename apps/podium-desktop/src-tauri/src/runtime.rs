@@ -570,8 +570,8 @@ where
             PathBuf::from(&allocation.run_directory),
             DEFAULT_MAX_CYCLES,
             binding.reconcile_config(),
-            binding.execute_config(),
-            binding.audit_config(),
+            binding.artist_config(),
+            binding.critic_config(),
         );
         let process = match self.process_launcher.launch(&request) {
             Ok(process) => process,
@@ -727,8 +727,8 @@ fn validate_binding(binding: &ProjectBinding) -> Result<(), RuntimeError> {
         || binding.base_branch.trim().is_empty()
         || binding.concurrency == 0
         || binding.reconcile_agent != "codex"
-        || binding.execute_agent != "codex"
-        || binding.audit_agent != "codex"
+        || binding.artist_agent != "codex"
+        || binding.critic_agent != "codex"
     {
         Err(RuntimeError::InvalidBinding)
     } else {
@@ -854,12 +854,12 @@ mod tests {
             reconcile_agent: "codex".into(),
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            execute_agent: "codex".into(),
-            execute_model: None,
-            execute_reasoning_effort: None,
-            audit_agent: "codex".into(),
-            audit_model: None,
-            audit_reasoning_effort: None,
+            artist_agent: "codex".into(),
+            artist_model: None,
+            artist_reasoning_effort: None,
+            critic_agent: "codex".into(),
+            critic_model: None,
+            critic_reasoning_effort: None,
         }
     }
 

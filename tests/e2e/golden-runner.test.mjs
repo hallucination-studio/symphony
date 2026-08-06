@@ -8,7 +8,7 @@ import {
   archiveGoldenFailure,
   archiveIssueTree,
   createLinearRoot,
-  fetchGoldenAuditResult,
+  fetchGoldenCriticResult,
   githubRepositoryFromOrigin,
   MAX_GOLDEN_ISSUE_TREE_DEPTH,
   MAX_DIAGNOSTIC_STREAM_BYTES,
@@ -64,26 +64,26 @@ test("golden preserves a post-Conductor verification error in existing process c
 test("golden leaves all roles on local Codex configuration when unset", () => {
   assert.deepEqual(resolveGoldenRoleConfiguration({}), {
     reconcile: {},
-    execute: {},
-    audit: {},
+    artist: {},
+    critic: {},
   });
 });
 
-test("golden resolves independent Reconcile, Execute, and Audit configuration", () => {
+test("golden resolves independent Reconcile, Artist, and Critic configuration", () => {
   assert.deepEqual(resolveGoldenRoleConfiguration({
     SYMPHONY_GOLDEN_RECONCILE_AGENT: "codex",
     SYMPHONY_GOLDEN_RECONCILE_MODEL: "reconcile-model",
     SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT: "medium",
-    SYMPHONY_GOLDEN_EXECUTE_AGENT: "codex",
-    SYMPHONY_GOLDEN_EXECUTE_MODEL: "execute-model",
-    SYMPHONY_GOLDEN_EXECUTE_REASONING_EFFORT: "high",
-    SYMPHONY_GOLDEN_AUDIT_AGENT: "codex",
-    SYMPHONY_GOLDEN_AUDIT_MODEL: "audit-model",
-    SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT: "xhigh",
+    SYMPHONY_GOLDEN_ARTIST_AGENT: "codex",
+    SYMPHONY_GOLDEN_ARTIST_MODEL: "execute-model",
+    SYMPHONY_GOLDEN_ARTIST_REASONING_EFFORT: "high",
+    SYMPHONY_GOLDEN_CRITIC_AGENT: "codex",
+    SYMPHONY_GOLDEN_CRITIC_MODEL: "audit-model",
+    SYMPHONY_GOLDEN_CRITIC_REASONING_EFFORT: "xhigh",
   }), {
     reconcile: { agent: "codex", model: "reconcile-model", reasoning_effort: "medium" },
-    execute: { agent: "codex", model: "execute-model", reasoning_effort: "high" },
-    audit: { agent: "codex", model: "audit-model", reasoning_effort: "xhigh" },
+    artist: { agent: "codex", model: "execute-model", reasoning_effort: "high" },
+    critic: { agent: "codex", model: "audit-model", reasoning_effort: "xhigh" },
   });
 });
 
@@ -93,10 +93,10 @@ test("golden launch omits generic --agent and forwards role options independentl
       SYMPHONY_GOLDEN_RECONCILE_AGENT: "codex",
       SYMPHONY_GOLDEN_RECONCILE_MODEL: "reconcile-model",
       SYMPHONY_GOLDEN_RECONCILE_REASONING_EFFORT: "medium",
-      SYMPHONY_GOLDEN_EXECUTE_AGENT: "codex",
-      SYMPHONY_GOLDEN_EXECUTE_MODEL: "execute-model",
-      SYMPHONY_GOLDEN_AUDIT_REASONING_EFFORT: "xhigh",
-      SYMPHONY_GOLDEN_AUDIT_AGENT: "codex",
+      SYMPHONY_GOLDEN_ARTIST_AGENT: "codex",
+      SYMPHONY_GOLDEN_ARTIST_MODEL: "execute-model",
+      SYMPHONY_GOLDEN_CRITIC_REASONING_EFFORT: "xhigh",
+      SYMPHONY_GOLDEN_CRITIC_AGENT: "codex",
       SYMPHONY_GOLDEN_MAX_CYCLES: "3",
     },
     root: "ENG-1",
@@ -112,10 +112,10 @@ test("golden launch omits generic --agent and forwards role options independentl
     "--reconcile-agent", "codex",
     "--reconcile-model", "reconcile-model",
     "--reconcile-reasoning-effort", "medium",
-    "--execute-agent", "codex",
-    "--execute-model", "execute-model",
-    "--audit-agent", "codex",
-    "--audit-reasoning-effort", "xhigh",
+    "--artist-agent", "codex",
+    "--artist-model", "execute-model",
+    "--critic-agent", "codex",
+    "--critic-reasoning-effort", "xhigh",
   ]);
   assert.equal(args.includes("--agent"), false);
 });
@@ -124,10 +124,10 @@ test("golden forwards only role credentials without fixture or generic secrets",
   const environment = partitionGoldenEnvironment({
     SYMPHONY_RECONCILE_CODEX_API_KEY: "reconcile-secret-never-output",
     SYMPHONY_RECONCILE_CODEX_BASE_URL: "https://reconcile.example.test/v1",
-    SYMPHONY_EXECUTE_CODEX_API_KEY: "execute-secret-never-output",
-    SYMPHONY_EXECUTE_CODEX_BASE_URL: "https://execute.example.test/v1",
-    SYMPHONY_AUDIT_CODEX_API_KEY: "audit-secret-never-output",
-    SYMPHONY_AUDIT_CODEX_BASE_URL: "https://audit.example.test/v1",
+    SYMPHONY_ARTIST_CODEX_API_KEY: "execute-secret-never-output",
+    SYMPHONY_ARTIST_CODEX_BASE_URL: "https://execute.example.test/v1",
+    SYMPHONY_CRITIC_CODEX_API_KEY: "audit-secret-never-output",
+    SYMPHONY_CRITIC_CODEX_BASE_URL: "https://audit.example.test/v1",
     CODEX_API_KEY: "generic-secret-must-not-forward",
     CODEX_BASE_URL: "https://generic.example.test/v1",
     SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "fixture-secret-never-output",
@@ -135,10 +135,10 @@ test("golden forwards only role credentials without fixture or generic secrets",
   }, { PATH: "/usr/bin", HOME: "/tmp/home" });
   assert.equal(environment.SYMPHONY_RECONCILE_CODEX_API_KEY, "reconcile-secret-never-output");
   assert.equal(environment.SYMPHONY_RECONCILE_CODEX_BASE_URL, "https://reconcile.example.test/v1");
-  assert.equal(environment.SYMPHONY_EXECUTE_CODEX_API_KEY, "execute-secret-never-output");
-  assert.equal(environment.SYMPHONY_EXECUTE_CODEX_BASE_URL, "https://execute.example.test/v1");
-  assert.equal(environment.SYMPHONY_AUDIT_CODEX_API_KEY, "audit-secret-never-output");
-  assert.equal(environment.SYMPHONY_AUDIT_CODEX_BASE_URL, "https://audit.example.test/v1");
+  assert.equal(environment.SYMPHONY_ARTIST_CODEX_API_KEY, "execute-secret-never-output");
+  assert.equal(environment.SYMPHONY_ARTIST_CODEX_BASE_URL, "https://execute.example.test/v1");
+  assert.equal(environment.SYMPHONY_CRITIC_CODEX_API_KEY, "audit-secret-never-output");
+  assert.equal(environment.SYMPHONY_CRITIC_CODEX_BASE_URL, "https://audit.example.test/v1");
   assert.equal(environment.CODEX_API_KEY, undefined);
   assert.equal(environment.CODEX_BASE_URL, undefined);
   assert.equal(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, undefined);
@@ -162,7 +162,7 @@ test("golden runner reports blocked when product credentials are present but fix
     environment: {
       SYMPHONY_RUN_GOLDEN: "1",
       LINEAR_API_KEY: "product-linear-token",
-      SYMPHONY_EXECUTE_CODEX_API_KEY: "product-execute-codex-token",
+      SYMPHONY_ARTIST_CODEX_API_KEY: "product-execute-codex-token",
     },
     operation: async () => "must not run",
   });
@@ -297,7 +297,7 @@ test("golden rejects a team without one canonical Todo state before Root creatio
   }
 });
 
-test("golden visible tree requires Done Root, Cycle, Execute, and Audit issues", () => {
+test("golden visible tree requires Done Root, Cycle, Artist, and Critic issues", () => {
   const done = { name: "Done", type: "completed" };
   const issue = {
     state: done,
@@ -306,8 +306,8 @@ test("golden visible tree requires Done Root, Cycle, Execute, and Audit issues",
         title: "[Cycle 001] Create the golden file", state: done,
         children: {
           nodes: [
-            { title: "[Executor] Cycle 001", state: done, children: { nodes: [], pageInfo: { hasNextPage: false } } },
-            { title: "[Audit] Cycle 001", state: done, children: { nodes: [], pageInfo: { hasNextPage: false } } },
+            { title: "[Artist] Cycle 001", state: done, children: { nodes: [], pageInfo: { hasNextPage: false } } },
+            { title: "[Critic] Cycle 001", state: done, children: { nodes: [], pageInfo: { hasNextPage: false } } },
           ],
           pageInfo: { hasNextPage: false },
         },
@@ -332,7 +332,7 @@ test("golden visible tree requires Done Root, Cycle, Execute, and Audit issues",
       children: { ...issue.children, nodes: [{
         ...issue.children.nodes[0],
         children: { ...issue.children.nodes[0].children, nodes: [
-          { ...issue.children.nodes[0].children.nodes[0], title: "[Executor] Create the golden file" },
+          { ...issue.children.nodes[0].children.nodes[0], title: "[Artist] Create the golden file" },
           issue.children.nodes[0].children.nodes[1],
         ] },
       }] },
@@ -348,7 +348,7 @@ test("golden visible tree requires Done Root, Cycle, Execute, and Audit issues",
       ...issue,
       children: { ...issue.children, nodes: [{
         ...issue.children.nodes[0],
-        children: { nodes: [{ title: "[Executor] Create the golden file", state: done }], pageInfo: { hasNextPage: false } },
+        children: { nodes: [{ title: "[Artist] Create the golden file", state: done }], pageInfo: { hasNextPage: false } },
       }] },
     }),
     /golden_visible_role_topology_invalid/u,
@@ -385,16 +385,16 @@ test("golden visible tree requires Done Root, Cycle, Execute, and Audit issues",
   );
 });
 
-test("golden result projection uses role descriptions and one visible Audit JSON file", () => {
+test("golden result projection uses role descriptions and one visible Critic JSON file", () => {
   const updatedAt = formatLocalTimestamp();
-  const executorMarkdown = [
+  const artistMarkdown = [
     "## Summary", "Created the golden file.", "", "## File Changes", "### Created",
     "- symphony-golden.txt (+1/-0 lines)", "### Updated", "- README.md (+2/-1 lines)",
     "### Deleted", "- obsolete.txt (-3 lines)",
     "", "## Verification", "- Read back the file.", "",
   ].join("\n");
-  const auditMarkdown = [
-    "verdict: accepted", "", "## Scope Audited", "Inspected the complete workspace diff.", "",
+  const criticMarkdown = [
+    "verdict: accepted", "", "## Scope Reviewed", "Inspected the complete workspace diff.", "",
     "## Implementation Review", "The golden file is present.", "", "## Checks", "- file content matches",
     "", "## Evidence", "- read-only inspection passed", "", "## Findings", "- None", "",
     "## Task State", "The golden file is verified.", "",
@@ -434,7 +434,7 @@ test("golden result projection uses role descriptions and one visible Audit JSON
       "+1 / -0 lines",
       "",
       "### Verification",
-      "The latest Audit accepted the complete diff.",
+      "The latest Critic accepted the complete diff.",
       "",
       "### Token Usage",
       "Total tokens: 1.2k",
@@ -453,16 +453,16 @@ test("golden result projection uses role descriptions and one visible Audit JSON
             { body: [
               "# Symphony Harness: Reconcile", "", "### Why Continue",
               "The requested golden file is not yet present.", "", "### Evidence",
-              "No accepted Audit has verified the file.", "", "### Next Cycle",
+              "No accepted Critic has verified the file.", "", "### Next Cycle",
               "Create and verify the golden file.",
             ].join("\n") },
             { body: [
               "## Cycle Result",
               "- Result: succeeded",
-              "- Audit Issue: audit-1",
-              "- Audit verdict: accepted",
+              "- Critic Issue: audit-1",
+              "- Critic verdict: accepted",
               "- Reason: The golden file is present.",
-              "- Audit result: [cycle-001-audit-result.json](https://linear.example/upload/1)",
+              "- Critique: [cycle-001-critique-result.json](https://linear.example/upload/1)",
             ].join("\n") },
           ],
           pageInfo: { hasNextPage: false },
@@ -470,16 +470,16 @@ test("golden result projection uses role descriptions and one visible Audit JSON
         children: {
           nodes: [
             {
-              title: "[Executor] Cycle 001",
-              description: `# Task\n\n## Objective\n\nCreate the golden file.\n\n# Symphony Metadata\n\n## Role\n\nExecute\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${executorMarkdown}`,
+              title: "[Artist] Cycle 001",
+              description: `# Task\n\n## Objective\n\nCreate the golden file.\n\n# Symphony Metadata\n\n## Role\n\nArtist\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${artistMarkdown}`,
               comments: {
                 nodes: [],
                 pageInfo: { hasNextPage: false },
               },
             },
             {
-              title: "[Audit] Cycle 001",
-              description: `# Task\n\n## Acceptance\n\nVerify the golden file.\n\n# Symphony Metadata\n\n## Role\n\nAudit\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${auditMarkdown}`,
+              title: "[Critic] Cycle 001",
+              description: `# Task\n\n## Acceptance\n\nVerify the golden file.\n\n# Symphony Metadata\n\n## Role\n\nCritic\n\n# Result\n\nUpdated at: ${updatedAt}\n\n${criticMarkdown}`,
               comments: { nodes: [], pageInfo: { hasNextPage: false } },
             },
           ],
@@ -503,10 +503,10 @@ test("golden result projection uses role descriptions and one visible Audit JSON
   linearNormalizedProjection.children.nodes[0].children.nodes[0].description =
     linearNormalizedProjection.children.nodes[0].children.nodes[0].description.replaceAll("\n- ", "\n* ");
   assert.doesNotThrow(() => validateGoldenResultComments(linearNormalizedProjection));
-  const executorFailure = structuredClone(projection);
-  executorFailure.children.nodes[0].children.nodes[0].description =
-    `# Task\n\nExecute the Cycle.\n\n# Symphony Metadata\n\n## Role\n\nExecute\n\n# Result\n\nUpdated at: ${updatedAt}\n\n## Executor Result\n- Result: failure\n- Error: Process timed out`;
-  assert.doesNotThrow(() => validateGoldenResultComments(executorFailure));
+  const artistFailure = structuredClone(projection);
+  artistFailure.children.nodes[0].children.nodes[0].description =
+    `# Task\n\nArtist the Cycle.\n\n# Symphony Metadata\n\n## Role\n\nArtist\n\n# Result\n\nUpdated at: ${updatedAt}\n\n## Artist Result\n- Result: failure\n- Error: Process timed out`;
+  assert.doesNotThrow(() => validateGoldenResultComments(artistFailure));
   const missingRootReport = structuredClone(projection);
   missingRootReport.description = "Create the requested golden file.";
   assert.throws(
@@ -530,7 +530,7 @@ test("golden result projection uses role descriptions and one visible Audit JSON
           ...projection.children.nodes[0],
           comments: {
             ...projection.children.nodes[0].comments,
-            nodes: [{ body: "## Cycle Result\n- Audit result: [cycle-001-audit-result.json](url)" }],
+            nodes: [{ body: "## Cycle Result\n- Critique: [cycle-001-critique-result.json](url)" }],
           },
         }],
       },
@@ -539,9 +539,9 @@ test("golden result projection uses role descriptions and one visible Audit JSON
   );
 });
 
-test("golden fetches the linked Audit JSON with the human token and validates its file type", async () => {
+test("golden fetches the linked Critic JSON with the human token and validates its file type", async () => {
   const calls = [];
-  const result = await fetchGoldenAuditResult(
+  const result = await fetchGoldenCriticResult(
     "https://uploads.linear.app/assets/audit.json",
     "human-linear-token",
     async (url, options) => {
@@ -551,7 +551,7 @@ test("golden fetches the linked Audit JSON with the human token and validates it
         headers: { get: (name) => name === "content-type" ? "application/json; charset=utf-8" : null },
         arrayBuffer: async () => Buffer.from(JSON.stringify({
           verdict: "accepted",
-          scope_audited: "Workspace diff",
+          scope_reviewed: "Workspace diff",
           implementation_review: "File change inspected",
           checks: ["read-only check"],
           evidence: ["file read succeeded"],
@@ -571,9 +571,9 @@ test("golden fetches the linked Audit JSON with the human token and validates it
   assert.ok(calls[0].options.signal instanceof AbortSignal);
 });
 
-test("golden rejects a linked Audit resource that is not JSON", async () => {
+test("golden rejects a linked Critic resource that is not JSON", async () => {
   await assert.rejects(
-    fetchGoldenAuditResult(
+    fetchGoldenCriticResult(
       "https://uploads.linear.app/assets/audit.md",
       "human-linear-token",
       async () => ({
@@ -582,18 +582,18 @@ test("golden rejects a linked Audit resource that is not JSON", async () => {
         arrayBuffer: async () => Buffer.from("# not JSON", "utf8"),
       }),
     ),
-    /golden_audit_file_content_type_invalid/u,
+    /golden_critic_file_content_type_invalid/u,
   );
 });
 
 test("golden never sends the human token to an external linked host", async () => {
   let calls = 0;
   await assert.rejects(
-    fetchGoldenAuditResult("https://attacker.example/audit.json", "human-linear-token", async () => {
+    fetchGoldenCriticResult("https://attacker.example/audit.json", "human-linear-token", async () => {
       calls += 1;
       return { ok: true };
     }),
-    /golden_audit_file_request_invalid/u,
+    /golden_critic_file_request_invalid/u,
   );
   assert.equal(calls, 0);
 });
@@ -601,11 +601,11 @@ test("golden never sends the human token to an external linked host", async () =
 test("golden rejects a non-standard upload host port before sending the token", async () => {
   let calls = 0;
   await assert.rejects(
-    fetchGoldenAuditResult("https://uploads.linear.app:8443/audit.json", "human-linear-token", async () => {
+    fetchGoldenCriticResult("https://uploads.linear.app:8443/audit.json", "human-linear-token", async () => {
       calls += 1;
       return { ok: true };
     }),
-    /golden_audit_file_request_invalid/u,
+    /golden_critic_file_request_invalid/u,
   );
   assert.equal(calls, 0);
 });

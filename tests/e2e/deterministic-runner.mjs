@@ -8,7 +8,7 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
   const comments = await linear.listRootCommentsAfter();
   const cycle = await linear.createCycle({
     objective: "Write one verified result file.",
-    acceptance: "A fresh read-only Audit confirms the exact result file.",
+    acceptance: "A fresh read-only Critic confirms the exact result file.",
     boundaries: "Only one result file may change.",
     consumedCommentIds: comments.map((comment) => comment.id),
   });
@@ -19,61 +19,61 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
     "The requested result file is not yet independently verified.",
     "",
     "### Evidence",
-    "No accepted Audit has verified the current workspace.",
+    "No accepted Critic has verified the current workspace.",
     "",
     "### Next Cycle",
     "Create and audit the requested result file.",
   ].join("\n"));
-  const executeRequest = Object.freeze({
+  const artistRequest = Object.freeze({
     root_id: root.id,
     cycle_id: cycle.id,
     objective: cycle.objective,
     working_directory: world.workspace,
     sandbox: "workspace_write",
-    final_response_path: `${world.runDirectory}/cycle-001-executor-result.md`,
+    final_response_path: `${world.runDirectory}/cycle-001-artist-result.md`,
   });
-  const execute = await agent.execute(executeRequest, world);
-  const executorResultPath = `${world.runDirectory}/cycle-001-executor-result.md`;
-  const executorMarkdown = await readFile(executorResultPath, "utf8").catch(() => "");
-  await linear.recordExecute(cycle.id, {
-    launch_status: execute.launch_status,
-    ...(execute.exit_code === undefined ? {} : { exit_code: execute.exit_code }),
+  const artist = await agent.artist(artistRequest, world);
+  const artistResultPath = `${world.runDirectory}/cycle-001-artist-result.md`;
+  const artistMarkdown = await readFile(artistResultPath, "utf8").catch(() => "");
+  await linear.recordArtist(cycle.id, {
+    launch_status: artist.launch_status,
+    ...(artist.exit_code === undefined ? {} : { exit_code: artist.exit_code }),
   });
   await linear.updateIssueDescription(
-    cycle.execute_issue?.id ?? `execute-${cycle.id}`,
-    `${cycle.execute_issue?.description ?? "# Task\n\nExecute\n\n# Symphony Metadata\n\n## Role\n\nExecute"}\n\n# Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${executorMarkdown || "Executor result missing."}`,
+    cycle.artist_issue?.id ?? `artist-${cycle.id}`,
+    `${cycle.artist_issue?.description ?? "# Task\n\nArtist\n\n# Symphony Metadata\n\n## Role\n\nArtist"}\n\n# Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${artistMarkdown || "Artist result missing."}`,
   );
-  const auditRequest = Object.freeze({
+  const criticRequest = Object.freeze({
     root_id: root.id,
     cycle_id: cycle.id,
     acceptance: cycle.acceptance,
     working_directory: world.workspace,
     sandbox: "read_only",
-    final_response_path: `${world.runDirectory}/cycle-001-audit-result.md`,
+    final_response_path: `${world.runDirectory}/cycle-001-critic-result.md`,
   });
-  const audit = await agent.audit(auditRequest, world);
-  const auditResult = audit.result ?? audit;
-  const auditResponsePath = `${world.runDirectory}/cycle-001-audit-result.md`;
-  const auditMarkdown = await readFile(auditResponsePath, "utf8").catch(() => "");
-  const auditJsonPath = `${world.runDirectory}/cycle-001-audit-result.json`;
-  await writeFile(auditJsonPath, `${JSON.stringify(auditResult)}\n`, { encoding: "utf8", mode: 0o600 });
-  const persistedAudit = JSON.parse(await readFile(auditJsonPath, "utf8"));
-  await linear.recordAudit(cycle.id, persistedAudit);
+  const critic = await agent.critic(criticRequest, world);
+  const critique = critic.result ?? critic;
+  const criticResponsePath = `${world.runDirectory}/cycle-001-critic-result.md`;
+  const criticMarkdown = await readFile(criticResponsePath, "utf8").catch(() => "");
+  const critiqueJsonPath = `${world.runDirectory}/cycle-001-critique-result.json`;
+  await writeFile(critiqueJsonPath, `${JSON.stringify(critique)}\n`, { encoding: "utf8", mode: 0o600 });
+  const persistedCritic = JSON.parse(await readFile(critiqueJsonPath, "utf8"));
+  await linear.recordCritic(cycle.id, persistedCritic);
   await linear.updateIssueDescription(
-    cycle.audit_issue?.id ?? `audit-${cycle.id}`,
-    `${cycle.audit_issue?.description ?? "# Task\n\nAudit\n\n# Symphony Metadata\n\n## Role\n\nAudit"}\n\n# Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${auditMarkdown || "Audit result missing."}`,
+    cycle.critic_issue?.id ?? `critic-${cycle.id}`,
+    `${cycle.critic_issue?.description ?? "# Task\n\nCritic\n\n# Symphony Metadata\n\n## Role\n\nCritic"}\n\n# Result\n\nUpdated at: ${formatLocalTimestamp()}\n\n${criticMarkdown || "Critique missing."}`,
   );
   await writeFile(
     `${world.runDirectory}/deterministic-evidence.jsonl`,
-    `${JSON.stringify({ event: "execute", launch_status: execute.launch_status })}\n${JSON.stringify({ event: "audit", verdict: auditResult.verdict })}\n`,
+    `${JSON.stringify({ event: "artist", launch_status: artist.launch_status })}\n${JSON.stringify({ event: "critique", verdict: critique.verdict })}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
-  const cycleResult = auditResult.verdict === "accepted"
+  const cycleResult = critique.verdict === "accepted"
     ? "succeeded"
-    : auditResult.verdict === "incomplete" ? "rejected" : "failed";
-  const uploadOutcome = await uploadAuditResult(linear, auditJsonPath);
+    : critique.verdict === "incomplete" ? "rejected" : "failed";
+  const uploadOutcome = await uploadCriticResult(linear, critiqueJsonPath);
   await linear.createComment(cycle.id, cycleResultComment({
-    cycleResult, audit: persistedAudit, uploadOutcome, auditIssueId: cycle.audit_issue?.id ?? `audit-${cycle.id}`,
+    cycleResult, critique: persistedCritic, uploadOutcome, criticIssueId: cycle.critic_issue?.id ?? `critic-${cycle.id}`,
   }));
   await linear.finishCycle(cycle.id, cycleResult, uploadOutcome);
 
@@ -84,14 +84,14 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
       root_branch: world.rootBranch,
       current_phase: "NeedsHuman",
       task_state_markdown: "No independently audited task progress yet.",
-      pending_finding: auditResult.pending_finding
-        ?? auditResult.findings?.[0]
-        ?? auditResult.scope_audited
-        ?? auditResult.implementation_review
-        ?? auditResult.reason,
-      latest_audit: persistedAudit,
+      pending_finding: critique.pending_finding
+        ?? critique.findings?.[0]
+        ?? critique.scope_reviewed
+        ?? critique.implementation_review
+        ?? critique.reason,
+      latest_critique: persistedCritic,
     });
-    return Object.freeze({ status: "rejected", cycle_result: cycleResult, audit: persistedAudit });
+    return Object.freeze({ status: "rejected", cycle_result: cycleResult, critic: persistedCritic });
   }
 
   await linear.writeRootState({
@@ -99,8 +99,8 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
     run_directory: world.runDirectory,
     root_branch: world.rootBranch,
     current_phase: "publishing",
-    task_state_markdown: auditResult.task_state_markdown,
-    latest_audit: persistedAudit,
+    task_state_markdown: critique.task_state_markdown,
+    latest_critique: persistedCritic,
   });
   await world.commit("deterministic verified result");
   await world.push();
@@ -114,21 +114,21 @@ export async function runDeterministicScenario({ world, linear, agent, createPul
     run_directory: world.runDirectory,
     root_branch: world.rootBranch,
     current_phase: "completed",
-    task_state_markdown: auditResult.task_state_markdown,
-    latest_audit: persistedAudit,
+    task_state_markdown: critique.task_state_markdown,
+    latest_critique: persistedCritic,
     pull_request_url: pullRequestUrl,
   });
   await linear.setRootStatus("completed");
   return Object.freeze({
     status: "done",
     cycle_result: cycleResult,
-    audit: persistedAudit,
+    critic: persistedCritic,
     pull_request_url: pullRequestUrl,
     evidence: await new EvidenceReader(world, linear).read(),
   });
 }
 
-async function uploadAuditResult(linear, filePath) {
+async function uploadCriticResult(linear, filePath) {
   const filename = filePath.split("/").at(-1);
   try {
     const result = await linear.uploadFile(filename, "application/json", await readFile(filePath));
@@ -141,18 +141,18 @@ async function uploadAuditResult(linear, filePath) {
   }
 }
 
-function cycleResultComment({ cycleResult, audit, uploadOutcome, auditIssueId }) {
-  const reason = audit.verdict === "process_error"
-    ? audit.reason
-    : audit.implementation_review ?? audit.findings?.[0] ?? audit.scope_audited;
+function cycleResultComment({ cycleResult, critique, uploadOutcome, criticIssueId }) {
+  const reason = critique.verdict === "process_error"
+    ? critique.reason
+    : critique.implementation_review ?? critique.findings?.[0] ?? critique.scope_reviewed;
   return [
     "## Cycle Result",
     `- Result: ${cycleResult}`,
-    `- Audit Issue: ${auditIssueId}`,
-    `- Audit verdict: ${audit.verdict}`,
+    `- Critic Issue: ${criticIssueId}`,
+    `- Critic verdict: ${critique.verdict}`,
     `- Reason: ${reason}`,
     uploadOutcome.status === "uploaded"
-      ? `- Audit result: [${uploadOutcome.filename}](${uploadOutcome.url})`
-      : `- Audit result: upload failed (${uploadOutcome.reason})`,
+      ? `- Critique: [${uploadOutcome.filename}](${uploadOutcome.url})`
+      : `- Critique: upload failed (${uploadOutcome.reason})`,
   ].join("\n");
 }

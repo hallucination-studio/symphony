@@ -21,17 +21,17 @@ export async function createProductionRootRun(
   });
   const cycleRunner = new CycleRunner({
     gateway: startup.gateway,
-    executePerformer: startup.executePerformer,
-    auditPerformer: startup.auditPerformer,
+    artistPerformer: startup.artistPerformer,
+    criticPerformer: startup.criticPerformer,
     workflow,
-    executeAgent: startup.request.execute_agent,
-    ...(startup.request.execute_model === undefined ? {} : { executeModel: startup.request.execute_model }),
-    ...(startup.request.execute_reasoning_effort === undefined
-      ? {} : { executeReasoningEffort: startup.request.execute_reasoning_effort }),
-    auditAgent: startup.request.audit_agent,
-    ...(startup.request.audit_model === undefined ? {} : { auditModel: startup.request.audit_model }),
-    ...(startup.request.audit_reasoning_effort === undefined
-      ? {} : { auditReasoningEffort: startup.request.audit_reasoning_effort }),
+    artistAgent: startup.request.artist_agent,
+    ...(startup.request.artist_model === undefined ? {} : { artistModel: startup.request.artist_model }),
+    ...(startup.request.artist_reasoning_effort === undefined
+      ? {} : { artistReasoningEffort: startup.request.artist_reasoning_effort }),
+    criticAgent: startup.request.critic_agent,
+    ...(startup.request.critic_model === undefined ? {} : { criticModel: startup.request.critic_model }),
+    ...(startup.request.critic_reasoning_effort === undefined
+      ? {} : { criticReasoningEffort: startup.request.critic_reasoning_effort }),
     timeoutMs: 120_000,
   });
   return new Conductor({

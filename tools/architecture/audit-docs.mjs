@@ -182,15 +182,15 @@ export function inspectArchitectureAuthority(sources) {
 export function inspectTargetSemantics(sources) {
   const combined = [...sources.values()].join("\n");
   const required = [
-    ["missing_root_cycle_execute_audit_topology", /Cycle \| Root[\s\S]*Execute \| Cycle[\s\S]*Audit \| Cycle/u],
-    ["missing_failed_execute_audit", /Execute process fails or exits unexpectedly[^\n]*still dispatch Audit/u],
-    ["missing_trusted_state_gate", /trusted task state[^\n]*Succeeded Cycles with an `accepted` Audit verdict/u],
+    ["missing_root_cycle_artist_critic_topology", /Cycle \| Root[\s\S]*Artist \| Cycle[\s\S]*Critic \| Cycle/u],
+    ["missing_failed_artist_critique", /Artist process fails or exits unexpectedly[^\n]*still dispatch Critic/u],
+    ["missing_trusted_state_gate", /trusted task state[^\n]*Succeeded Cycles with an `accepted` Critic verdict/u],
     ["missing_done_noop", /Root \| `Done`[^\n]*no Root-owned mutation; exit successfully/u],
     ["missing_root_inbox_fence", /active Cycle exists and new Root comments arrive[^\n]*do not dispatch them into the Cycle/u],
     ["missing_single_root_entry", /Root mode is the only public execution entry[\s\S]*no one-shot\s+role CLI/u],
-    ["missing_execute_output_boundary", /Execute model output is neither parsed nor projected/u],
-    ["missing_audit_only_result_authority", /verdict alone determines the Cycle result/u],
-    ["missing_cycle_summary_boundary", /Cycle Result repeats only the mapped result[\s\S]*never copies Audit evidence/u],
+    ["missing_artist_output_boundary", /Artist model output is neither parsed nor projected/u],
+    ["missing_critique_only_result_authority", /verdict alone determines the Cycle result/u],
+    ["missing_cycle_summary_boundary", /Cycle Result repeats only the mapped result[\s\S]*never copies Critic evidence/u],
   ];
   const forbidden = [
     ["superseded_plan_issue", /Plan Issue/iu],

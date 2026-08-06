@@ -13,24 +13,24 @@ but must not define another transition for the same fact.
 |---|---|---|---|
 | `WF-AUTH-001` | original long-term requirement | Linear Root title and the immutable requirement section of its description | Linear mode rejects simultaneous `--task`; the managed snapshot is excluded from the input |
 | `WF-AUTH-002` | new user input | new user-authored Root comments | pending input for a later Reconcile only |
-| `WF-AUTH-003` | trusted task state | Succeeded Cycles with an `accepted` Audit verdict | only source of trusted Root State progress |
-| `WF-AUTH-004` | active small-step contract | frozen Cycle description and local `CycleSpec` | Execute and Audit scope |
-| `WF-AUTH-005` | implementation state | current Root workspace | Execute effects, Audit evidence, and final PR content |
+| `WF-AUTH-003` | trusted task state | Succeeded Cycles with an `accepted` Critic verdict | only source of trusted Root State progress |
+| `WF-AUTH-004` | active small-step contract | frozen Cycle description and local `CycleSpec` | Artist and Critic scope |
+| `WF-AUTH-005` | implementation state | current Root workspace | Artist effects, Critic evidence, and final PR content |
 | `WF-AUTH-006` | human-readable workflow view | Linear statuses, child Issues, Root managed snapshot, role terminal descriptions, and Cycle history comments | sole operator view; no Dashboard projection |
 | `WF-AUTH-007` | next step | one fresh Root Reconcile session over Root and Root State inputs | create one Cycle, recommend completion, or request human input |
 | `WF-AUTH-008` | terminal delivery success | one valid Root Reconcile Delivery: pull request, branch, or local files | only fact that allows Root `Done` |
-| `WF-AUTH-009` | real-state verification | fresh Audit against the Root workspace | Reconcile never substitutes workspace inspection or Executor claims |
+| `WF-AUTH-009` | real-state verification | fresh Critic against the Root workspace | Reconcile never substitutes workspace inspection or Artist claims |
 | `WF-AUTH-010` | visible workflow status | the five canonical Linear statuses resolved for the Root team | arbitrary user states, status-order inference, or hidden local state |
-| `WF-AUTH-011` | latest audit detail | `RootState.latest_audit`, the complete typed `AuditRunResult` from the newest terminal Audit | any Cycle DAG, child comment, or reconstructed audit history |
+| `WF-AUTH-011` | latest critique detail | `RootState.latest_critique`, the complete typed `CritiqueResult` from the newest terminal Critic | any Cycle DAG, child comment, or reconstructed critique history |
 | `WF-AUTH-012` | human-readable Reconcile rationale | latest validated report in the managed Root suffix; `create_cycle` also copies it once to the new Cycle comment | hidden decisions, raw Git status text, or a second summarizer call |
 
-Execute model output is neither parsed nor projected into semantic state. Execute
-and Audit each receive an original role prompt that requires one final
+Artist model output is neither parsed nor projected into semantic state. Artist
+and Critic each receive an original role prompt that requires one final
 human-readable Markdown response at its prescribed local result path. There is
-exactly one Execute process and one fresh Audit process per Cycle; Conductor
+exactly one Artist process and one fresh Critic process per Cycle; Conductor
 never starts a second summarization or format-repair Agent call.
 
-Executor Markdown is appended byte-for-byte once to the Execute Issue description
+Artist Markdown is appended byte-for-byte once to the Artist Issue description
 at terminal handling. The append also records one mechanical RFC3339 local-time
 line `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`; retries never append a
 second report. Its
@@ -39,21 +39,21 @@ fixed report is a summary of actual file changes and validation: `## Summary`,
 line deltas, followed by `## Verification`. It does not repeat Cycle
 description, acceptance, or boundaries and remains untrusted process output.
 
-Audit Markdown is appended byte-for-byte once to the Audit Issue description at
+Critic Markdown is appended byte-for-byte once to the Critic Issue description at
 terminal handling. The append also records one mechanical RFC3339 local-time
 line `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>`; retries never append a
 second report. Its
-fixed report starts with the verdict and then reports `## Scope Audited`,
+fixed report starts with the verdict and then reports `## Scope Reviewed`,
 `## Implementation Review`, `## Checks`, `## Evidence`, `## Findings`, and
 `## Task State`; it describes what was inspected and how it was implemented,
-not the Cycle description. The fresh Audit is the sole semantic authority over
+not the Cycle description. The fresh Critic is the sole semantic authority over
 the real workspace. Conductor parses this Markdown once into the typed
-`AuditRunResult`, serializes that value to the local
-`cycle-NNN-audit-result.json`, reads it back and validates it, then uses the
+`CritiqueResult`, serializes that value to the local
+`cycle-NNN-critique-result.json`, reads it back and validates it, then uses the
 re-read value for Cycle and Root progression. Only this JSON file is uploaded to
 the Cycle as `application/json`; the Cycle Result comment records its resource
 link or the current upload error's first 50 characters. Root Reconcile sees the
-latest audit detail only through Root State and never reads the Cycle DAG or role
+latest critique detail only through Root State and never reads the Cycle DAG or role
 content. A Reconcile completion decision includes a structured Delivery and is
 not Root completion until the final Inbox check and durable projection succeed.
 
@@ -69,7 +69,7 @@ is not human report content.
 Diagnostic evidence is an investigation aid, not an authority. Raw Agent JSONL,
 stderr, and causal error context may be retained only in the private external
 run directory so a bounded visible failure remains diagnosable. It is never sent to
-Audit, Root Reconcile, or Linear and cannot change a Cycle result.
+Critic, Root Reconcile, or Linear and cannot change a Cycle result.
 
 ## Root description projection
 
@@ -102,7 +102,7 @@ visible provider/state error; it is not silently repaired from child Issues.
 
 ## Linear status plane
 
-Linear is the visible workflow plane. Root, Cycle, Execute, and Audit all use
+Linear is the visible workflow plane. Root, Cycle, Artist, and Critic all use
 the same five canonical statuses; comments and Root State explain detail but do
 not replace an Issue status.
 
@@ -128,14 +128,14 @@ without waiting for a comment or a local checkpoint.
 
 | Issue | Creation | Start or advance | Terminal transition |
 |---|---|---|---|
-| Root | `Todo` after Prepare and before first fresh Reconcile | durable Cycle family -> `In Progress`; complete Audit writes `latest_audit` -> `In Review`; later decisions remain `In Review` | valid Delivery projection -> `Done` |
-| Cycle | `Todo` when created | recorded family sets `In Progress`; starting Audit sets `In Review` | a terminal Cycle result sets `Done` |
-| Execute | `Todo` when created | process launch sets `In Progress` | process return, timeout, interruption, or start failure sets `Done` |
-| Audit | `Todo` when created | Audit launch sets `In Review` | Audit report or process error sets `Done`; the report is exact Markdown |
+| Root | `Todo` after Prepare and before first fresh Reconcile | durable Cycle family -> `In Progress`; complete Critic writes `latest_critique` -> `In Review`; later decisions remain `In Review` | valid Delivery projection -> `Done` |
+| Cycle | `Todo` when created | recorded family sets `In Progress`; starting Critic sets `In Review` | a terminal Cycle result sets `Done` |
+| Artist | `Todo` when created | process launch sets `In Progress` | process return, timeout, interruption, or start failure sets `Done` |
+| Critic | `Todo` when created | Critic launch sets `In Review` | Critic report or process error sets `Done`; the report is exact Markdown |
 | unfinished descendant at startup | existing nonterminal status | startup abandonment does not resume it | set `Canceled` before fresh Reconcile |
 
-The terminal `Done` status on Execute, Audit, and Cycle does not imply success;
-the role terminal descriptions, Cycle result comment, and typed Audit verdict retain those facts.
+The terminal `Done` status on Artist, Critic, and Cycle does not imply success;
+the role terminal descriptions, Cycle result comment, and typed Critic verdict retain those facts.
 Root Reconcile remains the only semantic authority for `create_cycle`, `complete`,
 and `needs_human`; status updates merely project that decision. Only the
 validated Root Reconcile Delivery may project `Done` onto Root.
@@ -145,11 +145,11 @@ validated Root Reconcile Delivery may project `Done` onto Root.
 | Rule | Resource | Parent | Cardinality | Owner |
 |---|---|---|---|---|
 | `WF-TOPO-001` | Cycle | Root | historical many; nonterminal at most one | Root Reconciler |
-| `WF-TOPO-002` | Execute | Cycle | exactly one | Cycle Runner |
-| `WF-TOPO-003` | Audit | Cycle | exactly one | Cycle Runner |
-| `WF-TOPO-004` | Execute terminal report | Execute | exactly one exact `cycle-NNN-executor-result.md` append to its description | Cycle Runner |
-| `WF-TOPO-005` | Audit terminal report | Audit | exactly one exact `cycle-NNN-audit-result.md` append to its description | Cycle Runner |
-| `WF-TOPO-006` | Cycle Result comment and uploaded file | Cycle | one mechanical result plus one `cycle-NNN-audit-result.json` file | Cycle Runner |
+| `WF-TOPO-002` | Artist | Cycle | exactly one | Cycle Runner |
+| `WF-TOPO-003` | Critic | Cycle | exactly one | Cycle Runner |
+| `WF-TOPO-004` | Artist terminal report | Artist | exactly one exact `cycle-NNN-artist-result.md` append to its description | Cycle Runner |
+| `WF-TOPO-005` | Critic terminal report | Critic | exactly one exact `cycle-NNN-critic-result.md` append to its description | Cycle Runner |
+| `WF-TOPO-006` | Cycle Result comment and uploaded file | Cycle | one mechanical result plus one `cycle-NNN-critique-result.json` file | Cycle Runner |
 | `WF-TOPO-007` | Harness-managed checkpoint suffix | Root description | exactly one mutable suffix | Conductor |
 | `WF-TOPO-008` | latest Reconcile report | Root managed suffix | exactly one replaceable report | Conductor |
 | `WF-TOPO-009` | create-cycle rationale comment | Cycle | exactly one append-only copy of the creating Reconcile report | Cycle Runner |
@@ -158,10 +158,10 @@ validated Root Reconcile Delivery may project `Done` onto Root.
 %% source-rules: WF-TOPO-001 WF-TOPO-002 WF-TOPO-003 WF-AUTH-008
 flowchart TD
   Root[Linear Root Issue] --> Cycle[Cycle 001]
-  Cycle --> Execute[Execute]
-  Cycle --> Audit[Audit]
-  Execute --> Audit
-  Audit --> Result[Cycle Result]
+  Cycle --> Artist[Artist]
+  Cycle --> Critic[Critic]
+  Artist --> Critic
+  Critic --> Result[Cycle Result]
   Result --> State[Promoted Root State]
   State --> Reconcile[Root Reconcile]
   Reconcile -->|next step| Cycle
@@ -169,8 +169,8 @@ flowchart TD
   Delivery --> Done[Root Done]
 ```
 
-Cycle, Execute, and Audit are created before execution. Execute must terminate
-before Audit starts. Audit runs even when Execute failed. All Cycles share the
+Cycle, Artist, and Critic are created before execution. Artist must terminate
+before Critic starts. Critic runs even when Artist failed. All Cycles share the
 one caller-supplied Root workspace bound at process startup.
 
 ## Lifecycle
@@ -179,12 +179,12 @@ one caller-supplied Root workspace bound at process startup.
 |---|---|---|---|---|---|
 | `WF-TR-001` | Root workspace | unprepared | Root Reconcile Prepare adopts current checkout or prepares the preferred path | ready | validate and bind returned workspace/run directory/branch; later starts reuse them |
 | `WF-TR-002` | Root | `Todo` | startup gates pass before the first fresh Reconcile | `Todo` | normalize the canonical Root status and initialize the Root State checkpoint |
-| `WF-TR-003` | Cycle family | absent | Reconcile selects a step | all three Issues `Todo` | create and persist the family, then set Cycle and Root `In Progress` before Execute starts |
-| `WF-TR-004` | Execute | `Todo` | Cycle starts | `In Progress` | set status, then start one fresh workspace-write session |
-| `WF-TR-005` | Execute | `In Progress` | process returns or errors | `Done` | append exact Executor Markdown to the description when present, expose current error message limited to 50 characters when absent, then transition |
-| `WF-TR-006` | Audit | `Todo` | Execute is terminal | `In Review` | set status, then start one distinct fresh read-only session |
-| `WF-TR-007` | Audit | `In Review` | process returns or errors | `Done` | append exact Audit Markdown to the description when valid, expose current error message limited to 50 characters when invalid, then transition |
-| `WF-TR-008` | Cycle | `In Progress` or `In Review` | complete Audit result resolves | `Done` | persist/re-read typed JSON, upload only that file, record its link/error, then finish Cycle and Root projection |
+| `WF-TR-003` | Cycle family | absent | Reconcile selects a step | all three Issues `Todo` | create and persist the family, then set Cycle and Root `In Progress` before Artist starts |
+| `WF-TR-004` | Artist | `Todo` | Cycle starts | `In Progress` | set status, then start one fresh workspace-write session |
+| `WF-TR-005` | Artist | `In Progress` | process returns or errors | `Done` | append exact Artist Markdown to the description when present, expose current error message limited to 50 characters when absent, then transition |
+| `WF-TR-006` | Critic | `Todo` | Artist is terminal | `In Review` | set status, then start one distinct fresh read-only session |
+| `WF-TR-007` | Critic | `In Review` | process returns or errors | `Done` | append exact Critic Markdown to the description when valid, expose current error message limited to 50 characters when invalid, then transition |
+| `WF-TR-008` | Cycle | `In Progress` or `In Review` | complete Critique resolves | `Done` | persist/re-read typed JSON, upload only that file, record its link/error, then finish Cycle and Root projection |
 | `WF-TR-009` | prior unfinished descendants | nonterminal | process starts | `Canceled` | mechanically cancel all before fresh Reconcile |
 | `WF-TR-010` | Root | `Todo` or `In Progress` | Reconcile recommends completion or needs human input | `In Review` | perform final Inbox check or record the human gate; do not mark Done yet |
 | `WF-TR-011` | Root Reconcile Delivery | absent | final Inbox is empty and trusted state supports completion | running | Root Reconcile creates the best available PR, branch, or files delivery |
@@ -197,13 +197,13 @@ Cycle result comment carries `Succeeded`, `Rejected`, or `Failed` semantics.
 
 ## Cycle result
 
-Audit exposes one closed verdict rather than independent status, integrity, and
-process axes. `violation` and `process_error` are terminal failures. Execute
+Critic exposes one closed verdict rather than independent status, integrity, and
+process axes. `violation` and `process_error` are terminal failures. Artist
 exit facts never decide semantic success or failure: even after a timeout,
-nonzero exit, or start failure, Audit inspects the retained workspace and its
+nonzero exit, or start failure, Critic inspects the retained workspace and its
 verdict alone determines the Cycle result.
 
-| Rule | Audit | Cycle result |
+| Rule | Critic | Cycle result |
 |---|---|---|
 | `WF-RESULT-001` | `accepted` | `Succeeded` |
 | `WF-RESULT-002` | `incomplete` | `Rejected` |
@@ -211,29 +211,29 @@ verdict alone determines the Cycle result.
 | `WF-RESULT-004` | `violation` | `Failed` |
 | `WF-RESULT-005` | `process_error` | `Failed` |
 
-Only `WF-RESULT-001` updates trusted Root State fields. The typed Audit verdict
-from the re-read JSON derived from exact Audit Markdown governs promotion. The
+Only `WF-RESULT-001` updates trusted Root State fields. The typed Critic verdict
+from the re-read JSON derived from exact Critic Markdown governs promotion. The
 Cycle Result records only mapped terminal fields and one JSON resource outcome;
 it never summarizes, reformats, or semantically interprets either role response.
 The exact role Markdown remains in the terminal section of its own Issue
 description, while only the typed
-`cycle-NNN-audit-result.json` is uploaded for the Cycle and used for
+`cycle-NNN-critique-result.json` is uploaded for the Cycle and used for
 progression.
-The same re-read result is written to `RootState.latest_audit` before the next
+The same re-read result is written to `RootState.latest_critique` before the next
 Reconcile; Reconcile sees that field, never the Cycle comment or DAG. A
 missing/invalid result file is a process error, not an invitation to make
 another Agent call.
 
 The verdict alone determines the Cycle result.
 Cycle Result repeats only the mapped result
-and the JSON file link or current upload error. It never copies Audit evidence or
+and the JSON file link or current upload error. It never copies Critic evidence or
 role Markdown or Cycle description text into its mechanical fields.
 
 Cycle history comments are append-only operator breadcrumbs. Conductor adds one
 for each visible status transition, Root decision, terminal Cycle result, and
 JSON upload/link outcome. Their Linear `createdAt` is the only event timestamp;
 the body does not add a second timestamp. They explain what happened but are
-never Reconcile input, trusted state, or a substitute for the exact Audit JSON.
+never Reconcile input, trusted state, or a substitute for the exact Critique JSON.
 
 ## Serial routing
 
@@ -242,10 +242,10 @@ Rows are evaluated in order and exactly one action runs at a time.
 | Rule | Current fact | Action |
 |---|---|---|
 | `WF-ROUTE-001` | Root is `Done` | no-op and exit |
-| `WF-ROUTE-002` | Execute waiting | run Execute |
-| `WF-ROUTE-003` | Execute terminal and Audit waiting | run fresh Audit |
-| `WF-ROUTE-004` | Audit terminal and Cycle lacks result | close Cycle from result table |
-| `WF-ROUTE-005` | Cycle terminal | write the complete `latest_audit`, update Root State and Root view to `In Review`, then Reconcile |
+| `WF-ROUTE-002` | Artist waiting | run Artist |
+| `WF-ROUTE-003` | Artist terminal and Critic waiting | run fresh Critic |
+| `WF-ROUTE-004` | Critic terminal and Cycle lacks result | close Cycle from result table |
+| `WF-ROUTE-005` | Cycle terminal | write the complete `latest_critique`, update Root State and Root view to `In Review`, then Reconcile |
 | `WF-ROUTE-006` | no Cycle and no completion recommendation | Reconcile |
 | `WF-ROUTE-007` | completion recommendation and new Root input exists | discard completion recommendation and Reconcile again |
 | `WF-ROUTE-008` | completion decision, empty Inbox, no active Cycle | validate and persist Root Reconcile Delivery |
@@ -256,23 +256,23 @@ Rows are evaluated in order and exactly one action runs at a time.
 
 | Rule | Observation | Required behavior | Forbidden behavior |
 |---|---|---|---|
-| `WF-FAIL-001` | Execute process fails or exits unexpectedly | append process facts and still dispatch Audit | parse Execute prose, skip Audit, or infer semantic failure |
-| `WF-FAIL-002` | Audit is incomplete or blocked | persist findings and apply the result table | let Execute self-report override Audit |
-| `WF-FAIL-003` | Auditor process errors | persist bounded error and fail Cycle | infer a clean result or mutate workspace |
+| `WF-FAIL-001` | Artist process fails or exits unexpectedly | append process facts and still dispatch Critic | parse Artist prose, skip Critic, or infer semantic failure |
+| `WF-FAIL-002` | Critic is incomplete or blocked | persist findings and apply the result table | let Artist self-report override Critic |
+| `WF-FAIL-003` | Critic process errors | persist bounded error and fail Cycle | infer a clean result or mutate workspace |
 | `WF-FAIL-004` | Linear action fails | expose error and stop | use another task mode, guess state, or duplicate resources |
 | `WF-FAIL-005` | Prepare cannot use/create the supplied preferred workspace | expose the Root Reconcile failure and require human input | silently adopt another path |
 | `WF-FAIL-006` | Root Reconcile cannot produce any valid Delivery | leave Root `In Review` and retain workspace/evidence | Conductor retries Git, invents a location, or marks Root Done |
 | `WF-FAIL-007` | remote publication is unavailable | Root Reconcile may return an explicit files Delivery | require an empty commit or hide the local result |
-| `WF-FAIL-008` | unfinished descendants at startup | cancel all, warn of possible unaudited workspace changes, then Reconcile | resume, audit, parse, or synthesize their results |
+| `WF-FAIL-008` | unfinished descendants at startup | cancel all, warn of possible unreviewed workspace changes, then Reconcile | resume, review, parse, or synthesize their results |
 | `WF-FAIL-009` | maximum Cycle count reached | set Root State `NeedsHuman`, project Root `In Review`, and stop with the reason visible | create another Cycle or deliver |
 | `WF-FAIL-010` | saved workspace or run directory is missing, invalid, or mismatched | set Root State `NeedsHuman`, project Root `In Review`, and stop | create a replacement path or infer files from child Issues |
-| `WF-FAIL-012` | any visible process or upload error | show only the current `error.message`, first 50 characters | walk causes, add prefixes or codes, publish raw context, or change the Audit verdict for an upload failure |
+| `WF-FAIL-012` | any visible process or upload error | show only the current `error.message`, first 50 characters | walk causes, add prefixes or codes, publish raw context, or change the Critic verdict for an upload failure |
 | `WF-FAIL-013` | a runtime error escapes normal Cycle or decision handling | persist the bounded current message on Root, project Root `In Review`, then fail the process | leave Root `In Progress` or hide the visible failure |
 
 Failure to create a PR is not necessarily a delivery failure. Root Reconcile
 may return a branch or files Delivery; Conductor does not call an HTTP fallback.
 
-The only automatic repair loop is domain-level: Audit exposes real workspace
+The only automatic repair loop is domain-level: Critic exposes real workspace
 findings and the next Reconcile may create a repair Cycle. Infrastructure and
 PR failures do not enter a recovery state machine.
 
@@ -282,7 +282,7 @@ PR failures do not enter a recovery state machine.
 |---|---|---|
 | `WF-INBOX-001` | fetch comments newer than startup cursor | add eligible user comments to pending input |
 | `WF-INBOX-002` | Reconcile receives all comments after cursor | place every ID in candidate `CycleSpec`, or return `NeedsHuman`; never partially consume |
-| `WF-INBOX-003` | create Cycle, Execute, Audit and record their provider IDs locally | establish complete frozen family |
+| `WF-INBOX-003` | create Cycle, Artist, Critic and record their provider IDs locally | establish complete frozen family |
 | `WF-INBOX-004` | persist created `CycleSpec` with `consumed_comment_ids` | mark exactly those IDs consumed for this run |
 | `WF-INBOX-005` | Reconcile recommends completion | fetch once more before PR publication; any new input returns to Reconcile |
 
@@ -297,10 +297,10 @@ When an active Cycle exists and new Root comments arrive, do not dispatch them i
 | `WF-PERSIST-001` | Linear Root description | immutable human requirement section plus one exact Harness-managed snapshot block | treating the managed suffix as requirement input or user-authored content |
 | `WF-PERSIST-002` | Harness-managed Root description suffix | minimal checkpoint fields defined in `RootState`, latest Reconcile report, and local-offset `Updated at` | raw trajectories, revisions, child history, or process handles |
 | `WF-PERSIST-003` | Linear Root user comments | new input after saved cursor | descendant instructions or active-Cycle mutation |
-| `WF-PERSIST-004` | Linear Cycle description | frozen objective, acceptance, boundaries, and consumed comment references | later input, executor selection, or mutable progress |
-| `WF-PERSIST-005` | descriptions, Cycle comments, uploaded file | one terminal report per role; append-only history/mechanical comments; typed Audit JSON | no Execute semantics or streams; history/result is not Reconcile input |
-| `WF-PERSIST-006` | supplied external run directory | Cycle records, provider IDs, bounded parse inputs, Audit material, PR command log, and private diagnostics | credentials or Root-commit files |
-| `WF-PERSIST-007` | private diagnostic paths in the external run directory | raw Agent JSONL/stderr, error context, and `thread_id` index | Audit/Root/Linear inputs or public raw streams |
+| `WF-PERSIST-004` | Linear Cycle description | frozen objective, acceptance, boundaries, and consumed comment references | later input, artist selection, or mutable progress |
+| `WF-PERSIST-005` | descriptions, Cycle comments, uploaded file | one terminal report per role; append-only history/mechanical comments; typed Critique JSON | no Artist semantics or streams; history/result is not Reconcile input |
+| `WF-PERSIST-006` | supplied external run directory | Cycle records, provider IDs, bounded parse inputs, Critic material, PR command log, and private diagnostics | credentials or Root-commit files |
+| `WF-PERSIST-007` | private diagnostic paths in the external run directory | raw Agent JSONL/stderr, error context, and `thread_id` index | Critic/Root/Linear inputs or public raw streams |
 
 Linear is the human-readable control plane; the supplied run directory is the
 minimal transaction and evidence plane. Private diagnostics exist to preserve
@@ -335,4 +335,4 @@ Root/Cycle state machine or changes a Root's trusted state.
 The routing label is a visible operator label used by the Desktop binding; it is
 not a hidden Linear status or a second workflow authority. The Desktop has no
 Web surface in this target. A Conductor remains the only owner of Root
-Reconcile, Execute/Audit order, Root State promotion, and terminal delivery.
+Reconcile, Artist/Critic order, Root State promotion, and terminal delivery.

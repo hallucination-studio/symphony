@@ -74,7 +74,7 @@ const completeReport = [
   "### Overview", "All trusted acceptance checks are satisfied.", "",
   "### File Changes", "#### Created", "- None", "", "#### Updated", "- None", "", "#### Deleted", "- None", "",
   "### Line Changes", "+0 / -0 lines", "",
-  "### Verification", "The latest Audit accepted the complete workspace.", "",
+  "### Verification", "The latest Critic accepted the complete workspace.", "",
   "### Token Usage", "Total tokens: Unknown",
 ].join("\n");
 
@@ -130,32 +130,32 @@ test("returns one Cycle draft from Root-owned inputs without exposing workspace 
   assert.equal(launches[0]?.prompt.includes(world.runDirectory), false);
   assert.equal(launches[0]?.prompt.includes("Preserve error locations."), true);
   assert.equal(launches[0]?.prompt.includes("Do not add recovery."), true);
-  assert.equal(launches[0]?.prompt.includes("## Latest Audit Result"), false);
+  assert.equal(launches[0]?.prompt.includes("## Latest Critic Result"), false);
   assert.equal(launches[0]?.prompt.includes("decision: cycle\n\n## Objective"), true);
   assert.equal(launches[0]?.prompt.includes("decision: complete\n\n## Summary"), true);
   assert.equal(launches[0]?.prompt.includes("decision: needs_human\n\n## Reason"), true);
 });
 
-test("includes the complete latest Audit in the prompt without child DAG content", async () => {
+test("includes the complete latest Critic in the prompt without child DAG content", async () => {
   const audits = [
     {
       verdict: "accepted",
-      scope_audited: "Parser behavior and focused tests.",
+      scope_reviewed: "Parser behavior and focused tests.",
       implementation_review: "Parser behavior is verified.",
       checks: ["npm test"],
       evidence: ["Focused test passed."],
       findings: [],
       task_state_markdown: "Parser behavior is trusted.",
     },
-    { verdict: "process_error", reason: "auditor_start_failed" },
+    { verdict: "process_error", reason: "critic_start_failed" },
   ] as const;
 
-  for (const latest_audit of audits) {
+  for (const latest_critique of audits) {
     const world = await fixture();
     const request = parseRootReconcileRequest({
       phase: "reconcile",
       root: world.request.root,
-      root_state: { ...world.request.root_state, latest_audit },
+      root_state: { ...world.request.root_state, latest_critique },
       new_root_comments: world.request.new_root_comments,
       worktree_summary: world.request.worktree_summary,
     });
@@ -167,9 +167,9 @@ test("includes the complete latest Audit in the prompt without child DAG content
 
     await reconciler.reconcile(request);
     const prompt = launches[0]?.prompt ?? "";
-    assert.equal(prompt.includes(`<<< BEGIN LATEST_AUDIT >>>\n${JSON.stringify(latest_audit, null, 2)}`), true);
+    assert.equal(prompt.includes(`<<< BEGIN LATEST_CRITIC >>>\n${JSON.stringify(latest_critique, null, 2)}`), true);
     assert.equal(prompt.includes("Cycle DAG"), false);
-    assert.equal(prompt.includes("## Execute"), false);
+    assert.equal(prompt.includes("## Artist"), false);
     assert.equal(prompt.includes("cycle-child-secret"), false);
     assert.equal(prompt.includes("execute-child-secret"), false);
   }

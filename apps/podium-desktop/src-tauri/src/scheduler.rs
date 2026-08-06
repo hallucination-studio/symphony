@@ -149,12 +149,12 @@ mod tests {
             reconcile_agent: role().agent,
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            execute_agent: role().agent,
-            execute_model: None,
-            execute_reasoning_effort: None,
-            audit_agent: role().agent,
-            audit_model: None,
-            audit_reasoning_effort: None,
+            artist_agent: role().agent,
+            artist_model: None,
+            artist_reasoning_effort: None,
+            critic_agent: role().agent,
+            critic_model: None,
+            critic_reasoning_effort: None,
         }
     }
 

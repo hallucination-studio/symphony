@@ -31,8 +31,8 @@ const DIAGNOSTIC_DIR_PREFIX = "golden-failure-";
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
-const MAX_GOLDEN_AUDIT_RESULT_BYTES = 64 * 1024;
-const GOLDEN_AUDIT_RESULT_TIMEOUT_MS = 15_000;
+const MAX_GOLDEN_CRITIC_RESULT_BYTES = 64 * 1024;
+const GOLDEN_CRITIC_RESULT_TIMEOUT_MS = 15_000;
 
 function absolutePath(value) {
   return typeof value === "string" && value.length > 0 && path.isAbsolute(value) && !value.includes("\0");
@@ -447,7 +447,7 @@ export function validateGoldenVisibleTree(issue) {
     }
     const roles = cycle.children?.nodes;
     if (!Array.isArray(roles) || roles.length !== 2
-      || !["[Audit]", "[Executor]"].every((prefix) => roles.some((role) => roleTitle(role?.title, prefix, cycleTitle[1])))
+      || !["[Critic]", "[Artist]"].every((prefix) => roles.some((role) => roleTitle(role?.title, prefix, cycleTitle[1])))
       || roles.some((role) => !exactObject(role, ["title", "state", "children"]))) {
       throw new Error("golden_visible_role_topology_invalid");
     }
@@ -466,7 +466,7 @@ function commentConnection(connection) {
     && connection.pageInfo.hasNextPage === false;
 }
 
-const EXECUTOR_REPORT_HEADINGS = Object.freeze([
+const ARTIST_REPORT_HEADINGS = Object.freeze([
   "## Summary", "## File Changes", "### Created", "### Updated", "### Deleted", "## Verification",
 ]);
 const RAW_GIT_PORCELAIN_LINE = /^(?:(?:\?\?|[ MADRCU?!]{1,2}) |[12u?!] )[^\r\n]+$/u;
@@ -481,11 +481,11 @@ function descriptionResult(description, separator) {
   return projection.slice(boundary + 2);
 }
 
-function validExecutorHumanReport(body) {
+function validArtistHumanReport(body) {
   if (typeof body !== "string") return false;
   const lines = body.split(/\r?\n/u);
   if (lines.some((line) => RAW_GIT_PORCELAIN_LINE.test(line))) return false;
-  const indexes = EXECUTOR_REPORT_HEADINGS.map((heading) => lines.indexOf(heading));
+  const indexes = ARTIST_REPORT_HEADINGS.map((heading) => lines.indexOf(heading));
   if (indexes[0] !== 0 || indexes.some((index) => index < 0)
     || indexes.some((index, position) => position > 0 && index <= indexes[position - 1])) {
     return false;
@@ -497,11 +497,11 @@ function validExecutorHumanReport(body) {
   return true;
 }
 
-function validExecutorErrorReport(body) {
+function validArtistErrorReport(body) {
   if (typeof body !== "string") return false;
   const lines = body.split(/\r?\n/u);
   const error = lines.find((line) => line.startsWith("- Error: "))?.slice("- Error: ".length);
-  return lines[0] === "## Executor Result"
+  return lines[0] === "## Artist Result"
     && lines.includes("- Result: failure")
     && typeof error === "string" && error.length > 0 && error.length <= 50
     && !/[\r\n\0]/u.test(error);
@@ -554,7 +554,7 @@ export function validateGoldenResultComments(issue) {
   if (!validRootReconcileReport(completionReport, "complete")) {
     throw new Error("golden_root_description_invalid");
   }
-  const auditResultUrls = [];
+  const critiqueResultUrls = [];
   for (const cycle of cycles) {
     const cycleTitle = typeof cycle?.title === "string"
       ? /^\[Cycle ([0-9]{3})\] [^\r\n]{1,68}$/u.exec(cycle.title)
@@ -563,57 +563,57 @@ export function validateGoldenResultComments(issue) {
       throw new Error("golden_result_comments_cycle_invalid");
     }
     const roles = cycle.children.nodes;
-    const executor = roles.find((role) => role?.title === `[Executor] Cycle ${cycleTitle[1]}`);
-    const audit = roles.find((role) => role?.title === `[Audit] Cycle ${cycleTitle[1]}`);
-    if (executor === undefined || audit === undefined
-      || typeof executor.description !== "string" || typeof audit.description !== "string"
-      || !commentConnection(executor.comments) || !commentConnection(audit.comments)) {
+    const artist = roles.find((role) => role?.title === `[Artist] Cycle ${cycleTitle[1]}`);
+    const audit = roles.find((role) => role?.title === `[Critic] Cycle ${cycleTitle[1]}`);
+    if (artist === undefined || audit === undefined
+      || typeof artist.description !== "string" || typeof audit.description !== "string"
+      || !commentConnection(artist.comments) || !commentConnection(audit.comments)) {
       throw new Error("golden_result_comments_role_invalid");
     }
     const resultSeparator = "\n\n# Result\n\n";
-    const executorBody = descriptionResult(executor.description, resultSeparator);
+    const artistBody = descriptionResult(artist.description, resultSeparator);
     const auditBody = descriptionResult(audit.description, resultSeparator);
-    if (executorBody === undefined || auditBody === undefined
-      || !executor.description.startsWith("# Task\n\n")
-      || !executor.description.includes("\n\n# Symphony Metadata\n\n")
+    if (artistBody === undefined || auditBody === undefined
+      || !artist.description.startsWith("# Task\n\n")
+      || !artist.description.includes("\n\n# Symphony Metadata\n\n")
       || !audit.description.startsWith("# Task\n\n")
       || !audit.description.includes("\n\n# Symphony Metadata\n\n")
-      || executor.comments.nodes.length !== 0 || audit.comments.nodes.length !== 0) {
+      || artist.comments.nodes.length !== 0 || audit.comments.nodes.length !== 0) {
       throw new Error("golden_result_comments_missing");
     }
     const cycleBodies = cycle.comments.nodes.map(({ body }) => body);
     const cycleTransition = cycleBodies.find((body) => body.startsWith("# Symphony Harness: Reconcile"));
     const cycleResult = cycleBodies.find((body) => body.startsWith("## Cycle Result"));
-    const auditResultLink = cycleResult?.match(
-      new RegExp(`- Audit result: \\[cycle-${cycleTitle?.[1] ?? "000"}-audit-result\\.json\\]\\((https://[^)\\s]+)\\)`, "u"),
+    const critiqueResultLink = cycleResult?.match(
+      new RegExp(`- Critique: \\[cycle-${cycleTitle?.[1] ?? "000"}-critique-result\\.json\\]\\((https://[^)\\s]+)\\)`, "u"),
     );
-    if (auditResultLink?.[1] !== undefined) auditResultUrls.push(auditResultLink[1]);
+    if (critiqueResultLink?.[1] !== undefined) critiqueResultUrls.push(critiqueResultLink[1]);
     if (cycleTransition === undefined || cycleResult === undefined
       || !validRootReconcileReport(cycleTransition, "cycle")
-      || !(validExecutorHumanReport(executorBody) || validExecutorErrorReport(executorBody))
+      || !(validArtistHumanReport(artistBody) || validArtistErrorReport(artistBody))
       || !auditBody.startsWith("verdict: ")
-      || !auditBody.includes("## Scope Audited")
+      || !auditBody.includes("## Scope Reviewed")
       || !auditBody.includes("## Implementation Review")
       || !auditBody.includes("## Findings")
       || cycleBodies.includes(auditBody)
-      || !cycleResult.includes(`- Audit result: [cycle-${cycleTitle[1]}-audit-result.json](https://`)
-      || cycleResult.includes("cycle-" + cycleTitle[1] + "-executor-result.md")
-      || cycleResult.includes("cycle-" + cycleTitle[1] + "-audit-result.md")
-      || cycleResult.includes("## Scope Audited")
+      || !cycleResult.includes(`- Critique: [cycle-${cycleTitle[1]}-critique-result.json](https://`)
+      || cycleResult.includes("cycle-" + cycleTitle[1] + "-artist-result.md")
+      || cycleResult.includes("cycle-" + cycleTitle[1] + "-critic-result.md")
+      || cycleResult.includes("## Scope Reviewed")
       || cycleResult.includes("## Implementation Review")
       || cycleBodies.some((body) => /(?:\.jsonl|\.stderr)/u.test(body))) {
       throw new Error("golden_result_comments_projection_invalid");
     }
   }
-  if (auditResultUrls.length !== 1) throw new Error("golden_result_comments_file_link_invalid");
-  return auditResultUrls[0];
+  if (critiqueResultUrls.length !== 1) throw new Error("golden_result_comments_file_link_invalid");
+  return critiqueResultUrls[0];
 }
 
-function validAuditJson(value) {
+function validCriticJson(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   if (!["accepted", "incomplete", "blocked", "violation", "process_error"].includes(value.verdict)) return false;
   if (value.verdict === "process_error") return typeof value.reason === "string" && value.reason.length > 0;
-  return typeof value.scope_audited === "string" && value.scope_audited.length > 0
+  return typeof value.scope_reviewed === "string" && value.scope_reviewed.length > 0
     && typeof value.implementation_review === "string" && value.implementation_review.length > 0
     && ["checks", "evidence", "findings"].every((key) => (
       Array.isArray(value[key]) && value[key].every((entry) => typeof entry === "string")
@@ -622,7 +622,7 @@ function validAuditJson(value) {
     && (value.pending_finding === undefined || typeof value.pending_finding === "string");
 }
 
-export async function fetchGoldenAuditResult(url, token, fetchImpl = globalThis.fetch) {
+export async function fetchGoldenCriticResult(url, token, fetchImpl = globalThis.fetch) {
   let parsedUrl;
   try {
     if (typeof url !== "string") throw new Error("invalid");
@@ -638,11 +638,11 @@ export async function fetchGoldenAuditResult(url, token, fetchImpl = globalThis.
     || parsedUrl.password.length > 0
     || typeof token !== "string" || token.length === 0
     || typeof fetchImpl !== "function") {
-    throw new Error("golden_audit_file_request_invalid");
+    throw new Error("golden_critic_file_request_invalid");
   }
   let response;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), GOLDEN_AUDIT_RESULT_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), GOLDEN_CRITIC_RESULT_TIMEOUT_MS);
   try {
     response = await fetchImpl(url, {
       method: "GET",
@@ -651,37 +651,37 @@ export async function fetchGoldenAuditResult(url, token, fetchImpl = globalThis.
       headers: { Authorization: token, Accept: "application/json" },
     });
   } catch {
-    throw new Error("golden_audit_file_fetch_failed");
+    throw new Error("golden_critic_file_fetch_failed");
   } finally {
     clearTimeout(timeout);
   }
-  if (response?.ok !== true) throw new Error("golden_audit_file_http_failed");
+  if (response?.ok !== true) throw new Error("golden_critic_file_http_failed");
   const contentType = response.headers?.get?.("content-type") ?? "";
   if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) {
-    throw new Error("golden_audit_file_content_type_invalid");
+    throw new Error("golden_critic_file_content_type_invalid");
   }
   const contentLength = response.headers?.get?.("content-length");
   if (contentLength !== null && contentLength !== undefined
-    && (!/^\d+$/u.test(contentLength) || Number(contentLength) > MAX_GOLDEN_AUDIT_RESULT_BYTES)) {
-    throw new Error("golden_audit_file_too_large");
+    && (!/^\d+$/u.test(contentLength) || Number(contentLength) > MAX_GOLDEN_CRITIC_RESULT_BYTES)) {
+    throw new Error("golden_critic_file_too_large");
   }
   let bytes;
   try {
     bytes = new Uint8Array(await response.arrayBuffer());
   } catch {
-    throw new Error("golden_audit_file_read_failed");
+    throw new Error("golden_critic_file_read_failed");
   }
-  if (bytes.byteLength > MAX_GOLDEN_AUDIT_RESULT_BYTES) {
-    throw new Error("golden_audit_file_too_large");
+  if (bytes.byteLength > MAX_GOLDEN_CRITIC_RESULT_BYTES) {
+    throw new Error("golden_critic_file_too_large");
   }
   let parsed;
   try {
     const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     parsed = JSON.parse(source);
   } catch {
-    throw new Error("golden_audit_file_json_invalid");
+    throw new Error("golden_critic_file_json_invalid");
   }
-  if (!validAuditJson(parsed)) throw new Error("golden_audit_file_shape_invalid");
+  if (!validCriticJson(parsed)) throw new Error("golden_critic_file_shape_invalid");
   return parsed;
 }
 
@@ -743,7 +743,7 @@ async function verifyGoldenResultComments(token, rootId) {
     }
   }`, { id: rootId });
   const url = validateGoldenResultComments(data.issue);
-  await fetchGoldenAuditResult(url, token);
+  await fetchGoldenCriticResult(url, token);
 }
 
 function githubEnvironment(environment, inherited) {

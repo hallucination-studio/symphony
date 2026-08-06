@@ -5,12 +5,12 @@ const OPTIONS = Object.freeze([
   "--reconcile-agent",
   "--reconcile-model",
   "--reconcile-reasoning-effort",
-  "--execute-agent",
-  "--execute-model",
-  "--execute-reasoning-effort",
-  "--audit-agent",
-  "--audit-model",
-  "--audit-reasoning-effort",
+  "--artist-agent",
+  "--artist-model",
+  "--artist-reasoning-effort",
+  "--critic-agent",
+  "--critic-model",
+  "--critic-reasoning-effort",
   "--max-cycles",
 ]);
 
@@ -76,8 +76,8 @@ export function runCliSmoke(arguments_) {
   }
   for (const [role, option] of [
     ["reconcile", "--reconcile-agent"],
-    ["execute", "--execute-agent"],
-    ["audit", "--audit-agent"],
+    ["artist", "--artist-agent"],
+    ["critic", "--critic-agent"],
   ]) {
     if (values.has(option) && values.get(option) !== "codex") throw runnerError(`${role}_agent_invalid`);
   }
@@ -93,14 +93,14 @@ export function runCliSmoke(arguments_) {
       ...(values.has("--reconcile-model") ? { reconcile_model: values.get("--reconcile-model") } : {}),
       ...(values.has("--reconcile-reasoning-effort")
         ? { reconcile_reasoning_effort: values.get("--reconcile-reasoning-effort") } : {}),
-      execute_agent: values.get("--execute-agent") ?? "codex",
-      ...(values.has("--execute-model") ? { execute_model: values.get("--execute-model") } : {}),
-      ...(values.has("--execute-reasoning-effort")
-        ? { execute_reasoning_effort: values.get("--execute-reasoning-effort") } : {}),
-      audit_agent: values.get("--audit-agent") ?? "codex",
-      ...(values.has("--audit-model") ? { audit_model: values.get("--audit-model") } : {}),
-      ...(values.has("--audit-reasoning-effort")
-        ? { audit_reasoning_effort: values.get("--audit-reasoning-effort") } : {}),
+      artist_agent: values.get("--artist-agent") ?? "codex",
+      ...(values.has("--artist-model") ? { artist_model: values.get("--artist-model") } : {}),
+      ...(values.has("--artist-reasoning-effort")
+        ? { artist_reasoning_effort: values.get("--artist-reasoning-effort") } : {}),
+      critic_agent: values.get("--critic-agent") ?? "codex",
+      ...(values.has("--critic-model") ? { critic_model: values.get("--critic-model") } : {}),
+      ...(values.has("--critic-reasoning-effort")
+        ? { critic_reasoning_effort: values.get("--critic-reasoning-effort") } : {}),
       max_cycles: maxCycles,
     }),
   });

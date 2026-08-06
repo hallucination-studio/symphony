@@ -23,16 +23,16 @@ pub struct ProjectBinding {
     pub reconcile_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconcile_reasoning_effort: Option<String>,
-    pub execute_agent: String,
+    pub artist_agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execute_model: Option<String>,
+    pub artist_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execute_reasoning_effort: Option<String>,
-    pub audit_agent: String,
+    pub artist_reasoning_effort: Option<String>,
+    pub critic_agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit_model: Option<String>,
+    pub critic_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit_reasoning_effort: Option<String>,
+    pub critic_reasoning_effort: Option<String>,
 }
 
 impl ProjectBinding {
@@ -44,19 +44,19 @@ impl ProjectBinding {
         }
     }
 
-    pub fn execute_config(&self) -> RoleLaunchConfig {
+    pub fn artist_config(&self) -> RoleLaunchConfig {
         RoleLaunchConfig {
-            agent: self.execute_agent.clone(),
-            model: self.execute_model.clone(),
-            reasoning_effort: self.execute_reasoning_effort.clone(),
+            agent: self.artist_agent.clone(),
+            model: self.artist_model.clone(),
+            reasoning_effort: self.artist_reasoning_effort.clone(),
         }
     }
 
-    pub fn audit_config(&self) -> RoleLaunchConfig {
+    pub fn critic_config(&self) -> RoleLaunchConfig {
         RoleLaunchConfig {
-            agent: self.audit_agent.clone(),
-            model: self.audit_model.clone(),
-            reasoning_effort: self.audit_reasoning_effort.clone(),
+            agent: self.critic_agent.clone(),
+            model: self.critic_model.clone(),
+            reasoning_effort: self.critic_reasoning_effort.clone(),
         }
     }
 }
@@ -93,12 +93,12 @@ mod tests {
             reconcile_agent: "codex".into(),
             reconcile_model: Some("gpt-5".into()),
             reconcile_reasoning_effort: Some("high".into()),
-            execute_agent: "codex".into(),
-            execute_model: None,
-            execute_reasoning_effort: None,
-            audit_agent: "codex".into(),
-            audit_model: None,
-            audit_reasoning_effort: Some("medium".into()),
+            artist_agent: "codex".into(),
+            artist_model: None,
+            artist_reasoning_effort: None,
+            critic_agent: "codex".into(),
+            critic_model: None,
+            critic_reasoning_effort: Some("medium".into()),
         };
         let allocation = RootAllocation {
             root_id: "ENG-1".into(),

@@ -18,12 +18,12 @@ const blankBinding = (): BindingFormState => ({
   reconcile_agent: "codex",
   reconcile_model: null,
   reconcile_reasoning_effort: null,
-  execute_agent: "codex",
-  execute_model: null,
-  execute_reasoning_effort: null,
-  audit_agent: "codex",
-  audit_model: null,
-  audit_reasoning_effort: null,
+  artist_agent: "codex",
+  artist_model: null,
+  artist_reasoning_effort: null,
+  critic_agent: "codex",
+  critic_model: null,
+  critic_reasoning_effort: null,
 });
 
 export function SettingsPage({
@@ -228,7 +228,7 @@ export function SettingsPage({
             <h2 id="settings-runtime-heading">Role defaults</h2>
             <span>Closed launch contract</span>
           </div>
-          <p className="quiet">Each Reconcile, Execute, and Audit role uses Codex. Model and reasoning effort overrides are optional.</p>
+          <p className="quiet">Each Reconcile, Artist, and Critic role uses Codex. Model and reasoning effort overrides are optional.</p>
         </section>
       </div>
     </>
@@ -293,11 +293,11 @@ function toCommandBinding(form: BindingFormState): ProjectBindingDraftView {
     reconcile_agent: "codex",
     reconcile_model: form.reconcile_model ?? null,
     reconcile_reasoning_effort: form.reconcile_reasoning_effort ?? null,
-    execute_agent: "codex",
-    execute_model: form.execute_model ?? null,
-    execute_reasoning_effort: form.execute_reasoning_effort ?? null,
-    audit_agent: "codex",
-    audit_model: form.audit_model ?? null,
-    audit_reasoning_effort: form.audit_reasoning_effort ?? null,
+    artist_agent: "codex",
+    artist_model: form.artist_model ?? null,
+    artist_reasoning_effort: form.artist_reasoning_effort ?? null,
+    critic_agent: "codex",
+    critic_model: form.critic_model ?? null,
+    critic_reasoning_effort: form.critic_reasoning_effort ?? null,
   };
 }

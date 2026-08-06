@@ -13,12 +13,12 @@ finalizer code and attempt to keep both paths valid.
 | Order | Slice | Required outcome | Check |
 |---|---|---|---|
 | 1 | delete obsolete implementation and tests | remove every system listed in the permanent subtraction gate and its field-shaped tests | removed-symbol and dependency search |
-| 2 | minimal contracts | Root state/`latest_audit`, managed snapshot, terminal role descriptions, Cycle history, typed Audit JSON, Performer, Gateway, workspace, and PR values | focused contract tests |
+| 2 | minimal contracts | Root state/`latest_critique`, managed snapshot, terminal role descriptions, Cycle history, typed Critique JSON, Performer, Gateway, workspace, and PR values | focused contract tests |
 | 3 | Linear boundary and CLI | injectable Gateway, GraphQL adapter, and one Root-run command | fake Gateway and built CLI scenarios |
 | 4 | Root Prepare resources | Root Reconcile adopts current checkout or creates the preferred worktree; bind its result and external run directory | real Agent/Git/filesystem boundary scenario |
-| 5 | Root Reconcile and Cycle projection | frozen small-step contract, managed snapshot, terminal role reports, Cycle history, typed Audit JSON, and Root/Cycle/Execute/Audit hierarchy | semantic and fake Linear tests |
-| 6 | Execute and Audit | fresh workspace-write Execute and distinct fresh read-only Audit each deliver one final Markdown file; Audit remains sole semantic authority, including failed Execute inspection | real Agent CLI boundary tests |
-| 7 | Root State and Inbox | save every complete terminal Audit as `latest_audit`; promote only `accepted` Audits; checkpoint supplied paths, task state, pending finding, and comment cursor | focused transaction scenarios |
+| 5 | Root Reconcile and Cycle projection | frozen small-step contract, managed snapshot, terminal role reports, Cycle history, typed Critique JSON, and Root/Cycle/Artist/Critic hierarchy | semantic and fake Linear tests |
+| 6 | Artist and Critic | fresh workspace-write Artist and distinct fresh read-only Critic each deliver one final Markdown file; Critic remains sole semantic authority, including failed Artist inspection | real Agent CLI boundary tests |
+| 7 | Root State and Inbox | save every complete terminal Critic as `latest_critique`; promote only `accepted` Critics; checkpoint supplied paths, task state, pending finding, and comment cursor | focused transaction scenarios |
 | 8 | Root Reconcile Delivery | final Inbox check, structured PR/branch/files result, visible projection, then Root Done | real Agent boundary plus three contract scenarios |
 | 9 | scenario suite and docs | rebuild tests around reusable business scenarios and prove the complete manual single-machine flow | black-box suite |
 
@@ -44,7 +44,7 @@ and target documentation must no longer depend on:
 - generic Task Manager capability issuers, MCP schemas, or provider-neutral
   mutation records;
 - Web surfaces, product-level local task mode, or any third operator control plane outside Podium Desktop;
-- `spec_digest`, mutable `task_state`, executor route, or Audit-reference
+- `spec_digest`, mutable `task_state`, artist route, or Critic-reference
   selection in the Cycle contract; task state remains Root-owned context;
 - model access to the complete Root tree, descendant content, old role
   transcripts, or the Reconcile workspace;
@@ -67,30 +67,30 @@ and target documentation must no longer depend on:
   aliases, a shared error taxonomy, or public types for internal
   Inbox/workspace helpers.
 - unbounded Harness feedback history or a background wait/retry loop.
-- a one-shot Execute/Audit CLI or any public role-level Linear mutation path;
-- semantic parsing, projection, or trust of Execute model output;
+- a one-shot Artist/Critic CLI or any public role-level Linear mutation path;
+- semantic parsing, projection, or trust of Artist model output;
 - required complete Agent trajectories or trajectory references in public
   contracts and Linear comments;
 - raw Agent JSONL, stderr, or error context outside the caller-owned external
-  run directory, or diagnostic content supplied to Audit, Root, or Linear;
+  run directory, or diagnostic content supplied to Critic, Root, or Linear;
 - a second summarization or format-repair Agent call, or any Cycle Result that
   invents or semantically interprets role evidence; Cycle Result keeps only
-  mechanical terminal fields and the typed Audit JSON file link/upload error.
+  mechanical terminal fields and the typed Critique JSON file link/upload error.
 
 Only these direct replacements are allowed:
 
 | Removed complexity | V1 replacement |
 |---|---|
-| revision, seal, digest, mutation comparison | none; immutable Root requirement plus managed snapshot and audited Root State |
-| execution graph, Plan, multi-Work | one serial immutable Cycle with Execute then Audit |
+| revision, seal, digest, mutation comparison | none; immutable Root requirement plus managed snapshot and reviewed Root State |
+| execution graph, Plan, multi-Work | one serial immutable Cycle with Artist then Critic |
 | recovery, registry, generation, quarantine | cancel unfinished descendants, add Harness feedback, run fresh Reconcile |
 | delivery subsystem and finalizer | one Root Reconcile Delivery decision; Conductor only validates and projects it |
 | app-server, tool bridge, session resume | one fresh process from the run-selected thin Agent CLI adapter per role |
 | generic Task Manager and capabilities | one injectable `LinearGateway` with the listed operations |
-| Reconcile quality inference from workspace | audited task state, one pending finding, and Harness feedback |
-| Trusted State subsystem | one task-state field, one pending finding, and parsed Audit fields in `latest_audit` updated mechanically in Root State |
+| Reconcile quality inference from workspace | reviewed task state, one pending finding, and Harness feedback |
+| Trusted State subsystem | one task-state field, one pending finding, and parsed Critic fields in `latest_critique` updated mechanically in Root State |
 | PR exactly-once/recovery protocol | one ordered attempt; ambiguous restart becomes `NeedsHuman` |
-| per-role Agent/model configuration | optional independent Reconcile, Execute, and Audit role configuration fixed for the Root run |
+| per-role Agent/model configuration | optional independent Reconcile, Artist, and Critic role configuration fixed for the Root run |
 
 Any proposed exception changes the target architecture and requires explicit
 user approval before code or tests are written.
@@ -102,17 +102,17 @@ only as evidence-path compatibility. They are not target domain concepts.
 
 | Scenario | Observable pass condition |
 |---|---|
-| minimal launch | the only public execution command accepts independent `--reconcile-*`, `--execute-*`, and `--audit-*` role values, one Root, one supplied workspace, and one supplied external run directory |
-| visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Execute/Audit transition follows the Workflow Model matrix |
-| exact topology | Linear shows `Root -> Cycle -> Execute + Audit`; at most one Cycle is active |
-| visible snapshots | Root description has exactly one managed snapshot block refreshed with a local RFC3339 `Updated at` line; Execute/Audit each receive exactly one terminal report append with one local RFC3339 `Updated at` line |
-| frozen input | a Root comment arriving during Execute/Audit appears only in the next Cycle |
-| role isolation | Execute can write; Audit is a different fresh session and cannot write, with independent role capabilities/providers and no shared transcript |
-| failed Execute | Audit still runs against the real residual workspace; Execute output is neither parsed nor supplied as evidence |
-| private diagnostics | bounded raw Agent JSONL/stderr and causal error context remain only under the external run directory; refs/thread IDs never enter Audit, Root, or Linear |
-| trust gate | only an `accepted` Audit adopts the Auditor-supported task state and optional pending finding; Execute exit facts cannot pre-judge the result |
-| Markdown/JSON result projection | role Markdown appends once; typed Audit JSON is the only Cycle upload; history uses Linear `createdAt`; Reconcile sees only parsed `latest_audit` |
-| comment transaction | failed family creation does not consume selected Root comments or start Execute |
+| minimal launch | the only public execution command accepts independent `--reconcile-*`, `--artist-*`, and `--critic-*` role values, one Root, one supplied workspace, and one supplied external run directory |
+| visible status plane | startup binds or creates the five exact canonical statuses, rejects name/type ambiguity, leaves other user states untouched, and every Root/Cycle/Artist/Critic transition follows the Workflow Model matrix |
+| exact topology | Linear shows `Root -> Cycle -> Artist + Critic`; at most one Cycle is active |
+| visible snapshots | Root description has exactly one managed snapshot block refreshed with a local RFC3339 `Updated at` line; Artist/Critic each receive exactly one terminal report append with one local RFC3339 `Updated at` line |
+| frozen input | a Root comment arriving during Artist/Critic appears only in the next Cycle |
+| role isolation | Artist can write; Critic is a different fresh session and cannot write, with independent role capabilities/providers and no shared transcript |
+| failed Artist | Critic still runs against the real residual workspace; Artist output is neither parsed nor supplied as evidence |
+| private diagnostics | bounded raw Agent JSONL/stderr and causal error context remain only under the external run directory; refs/thread IDs never enter Critic, Root, or Linear |
+| trust gate | only an `accepted` Critic adopts the Critic-supported task state and optional pending finding; Artist exit facts cannot pre-judge the result |
+| Markdown/JSON result projection | role Markdown appends once; typed Critique JSON is the only Cycle upload; history uses Linear `createdAt`; Reconcile sees only parsed `latest_critique` |
+| comment transaction | failed family creation does not consume selected Root comments or start Artist |
 | final delivery | Root Reconcile returns a PR, branch, or files Delivery; Conductor persists it, renders `## Delivery`, then sets Root Done |
 | remote delivery failure | Root Reconcile may return local files; Conductor never retries or runs Git |
 
@@ -129,7 +129,7 @@ Each persisted `ProjectBinding` contains:
 - one Linear `project_id` and a visible `routing_label`;
 - one `repository_path` and `base_branch`;
 - one positive local `concurrency` limit; and
-- independent Reconcile, Execute, and Audit `RoleLaunchConfig` values.
+- independent Reconcile, Artist, and Critic `RoleLaunchConfig` values.
 
 For every assigned Root, Desktop persists stable `root_id`, `workspace_path`,
 and `run_directory` paths. Assignment records, process IDs, and the pending
@@ -139,7 +139,7 @@ stop sequence confirms that the complete Conductor process tree has exited
 before a replacement starts.
 
 Podium Desktop owns local routing, queueing, process supervision, and resource
-lifecycle. Conductor owns Root Reconcile, Cycle execution, Audit judgment, Root
+lifecycle. Conductor owns Root Reconcile, Cycle execution, Critic judgment, Root
 State promotion, and terminal delivery. There is no cross-machine lease, SQLite
 store, daemon IPC, or Web surface. This round does not add Podium scheduling,
 UI, or E2E behavior for Conductor `NeedsHuman`; the existing V1 terminal state

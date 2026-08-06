@@ -28,8 +28,8 @@ export function partitionEnvironment(environment, inherited = process.env) {
     testEnvironment: Object.freeze({ ...base }),
     linearEnvironment: partitionBoundaryEnvironment(environment, "linear", inherited),
     reconcileEnvironment: partitionBoundaryEnvironment(environment, "reconcile", inherited),
-    executeEnvironment: partitionBoundaryEnvironment(environment, "execute", inherited),
-    auditEnvironment: partitionBoundaryEnvironment(environment, "audit", inherited),
+    artistEnvironment: partitionBoundaryEnvironment(environment, "artist", inherited),
+    criticEnvironment: partitionBoundaryEnvironment(environment, "critic", inherited),
     gitEnvironment: partitionBoundaryEnvironment({ ...inherited, ...environment }, "git", inherited),
     prEnvironment: partitionBoundaryEnvironment(environment, "pr", inherited),
   });

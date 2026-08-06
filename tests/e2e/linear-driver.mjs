@@ -142,11 +142,11 @@ export class LinearDriver {
       this.#root.description = value;
     } else {
       const cycle = this.#cycles.find((entry) => (
-        entry.execute_issue?.id === issueId || entry.audit_issue?.id === issueId
+        entry.artist_issue?.id === issueId || entry.critic_issue?.id === issueId
       ));
       if (cycle === undefined) throw new Error("linear_issue_not_found");
-      if (cycle.execute_issue.id === issueId) cycle.execute_issue.description = value;
-      else cycle.audit_issue.description = value;
+      if (cycle.artist_issue.id === issueId) cycle.artist_issue.description = value;
+      else cycle.critic_issue.description = value;
     }
     this.#events.push(frozen({ event: "issue_description", issue_id: issueId }));
   }
@@ -195,22 +195,22 @@ export class LinearDriver {
       boundaries: requireText(boundaries, "cycle_boundaries_invalid"),
       consumed_comment_ids: [...consumedCommentIds],
       status: "active",
-      execute: null,
-      audit: null,
-      execute_issue: {
+      artist: null,
+      critic: null,
+      artist_issue: {
         id: `execute-${this.#cycleNumber}`,
-        title: `[Executor] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
+        title: `[Artist] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
         description: managedDescription(
           ["## Objective", objective, "## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
-          "## Role\n\nExecute\n\n## Access\n\nworkspace-write",
+          "## Role\n\nArtist\n\n## Access\n\nworkspace-write",
         ),
       },
-      audit_issue: {
+      critic_issue: {
         id: `audit-${this.#cycleNumber}`,
-        title: `[Audit] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
+        title: `[Critic] Cycle ${String(this.#cycleNumber).padStart(3, "0")}`,
         description: managedDescription(
           ["## Acceptance", acceptance, "## Boundaries", boundaries].join("\n\n"),
-          "## Role\n\nAudit\n\n## Access\n\nread-only",
+          "## Role\n\nCritic\n\n## Access\n\nread-only",
         ),
       },
       result: null,
@@ -226,23 +226,23 @@ export class LinearDriver {
     return cycle;
   }
 
-  async recordExecute(cycleId, facts) {
+  async recordArtist(cycleId, facts) {
     const cycle = this.#cycle(cycleId);
-    if (cycle.execute !== null) throw new Error("execute_already_recorded");
-    cycle.execute = clone(facts);
-    this.#events.push(frozen({ event: "execute_recorded", cycle_id: cycleId }));
+    if (cycle.artist !== null) throw new Error("artist_already_recorded");
+    cycle.artist = clone(facts);
+    this.#events.push(frozen({ event: "artist_recorded", cycle_id: cycleId }));
   }
 
-  async recordAudit(cycleId, result) {
+  async recordCritic(cycleId, result) {
     const cycle = this.#cycle(cycleId);
-    if (cycle.audit !== null) throw new Error("audit_already_recorded");
-    cycle.audit = clone(result);
-    this.#events.push(frozen({ event: "audit_recorded", cycle_id: cycleId, verdict: result.verdict }));
+    if (cycle.critic !== null) throw new Error("critic_already_recorded");
+    cycle.critic = clone(result);
+    this.#events.push(frozen({ event: "critic_recorded", cycle_id: cycleId, verdict: result.verdict }));
   }
 
   async finishCycle(cycleId, result, uploadOutcome = undefined) {
     const cycle = this.#cycle(cycleId);
-    if (cycle.execute === null || cycle.audit === null) throw new Error("cycle_incomplete");
+    if (cycle.artist === null || cycle.critic === null) throw new Error("cycle_incomplete");
     if (!["succeeded", "rejected", "failed"].includes(result)) throw new Error("cycle_result_invalid");
     cycle.status = "completed";
     cycle.result = result;

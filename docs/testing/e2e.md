@@ -20,7 +20,7 @@ cleanup: only resources allocated by that scenario
 Assertions use public facts. They do not assert private call ordering,
 unbounded process output, full Agent transcripts, provider payloads, raw
 diagnostic file bytes, or commit identifiers. Exact role Markdown is public by
-design: tests compare it only at the owned role descriptions. The typed Audit JSON
+design: tests compare it only at the owned role descriptions. The typed Critique JSON
 file is checked as the single Cycle upload, including `application/json` and
 its returned file URL. Root snapshots are checked for exact markers and a local
 RFC3339 `Updated at: <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line. Cycle comment
@@ -34,14 +34,14 @@ The reusable kit lives under `tests/e2e/` and keeps boundary ownership explicit.
 | Component | Responsibility |
 | --- | --- |
 | `ScenarioWorld` | Creates one isolated workspace, an external run directory, a temporary bare remote, and deterministic Root identifiers. It uses real filesystem and Git operations. |
-| `LinearDriver` | Holds normalized Root, managed description regions, comments, Root State (including parsed `latest_audit`), Cycle records, exact terminal role descriptions, Cycle history/result comments, uploaded-file metadata, and public status in an in-memory provider double. |
-| `AgentDriver` | Supplies scripted Execute/Audit Markdown files and Reconcile outcomes, and records only bounded launch facts. Execute Markdown remains untrusted. |
+| `LinearDriver` | Holds normalized Root, managed description regions, comments, Root State (including parsed `latest_critique`), Cycle records, exact terminal role descriptions, Cycle history/result comments, uploaded-file metadata, and public status in an in-memory provider double. |
+| `AgentDriver` | Supplies scripted Artist/Critic Markdown files and Reconcile outcomes, and records only bounded launch facts. Artist Markdown remains untrusted. |
 | `EvidenceReader` | Reads public Linear facts, bounded workspace status/diff evidence, and private run-directory file metadata; raw file bytes are never returned. |
 
-The deterministic runner executes exactly one Execute and then a fresh read-only
-Audit in series. Each prompt asks its role to write the final Markdown to
-`cycle-NNN-executor-result.md` or `cycle-NNN-audit-result.md`; there is no second
-summarization/format-repair Agent call. A failed Execute still reaches Audit,
+The deterministic runner executes exactly one Artist and then a fresh read-only
+Critic in series. Each prompt asks its role to write the final Markdown to
+`cycle-NNN-artist-result.md` or `cycle-NNN-critic-result.md`; there is no second
+summarization/format-repair Agent call. A failed Artist still reaches Critic,
 and partial workspace changes remain available for inspection. A successful
 scenario commits and pushes to the temporary remote before calling its injected
 pull-request boundary.
@@ -59,10 +59,10 @@ conductor run
   --workspace /absolute/root-workspace
   --dir /absolute/root-run-directory
   --agent codex
-  --execute-model <execute-model>
-  --execute-reasoning-effort <execute-effort>
-  --audit-model <audit-model>
-  --audit-reasoning-effort <audit-effort>
+  --artist-model <artist-model>
+  --artist-reasoning-effort <artist-effort>
+  --critic-model <critic-model>
+  --critic-reasoning-effort <critic-effort>
   --max-cycles 3
 ```
 
@@ -71,7 +71,7 @@ defaults to `codex`; role-level launch commands and unknown options are
 rejected. Omitted role model/reasoning values use the user's local `~/.codex`
 configuration and authentication. API keys and base URLs are startup
 environment only, with role-specific values such as
-`SYMPHONY_EXECUTE_CODEX_API_KEY` and `SYMPHONY_AUDIT_CODEX_API_KEY`; they are
+`SYMPHONY_ARTIST_CODEX_API_KEY` and `SYMPHONY_CRITIC_CODEX_API_KEY`; they are
 not public request fields.
 
 ### Deterministic scenario
@@ -80,19 +80,19 @@ not public request fields.
 `ScenarioWorld`:
 
 - one frozen Cycle is created from Root input;
-- Execute uses workspace-write access and writes one untrusted final Markdown file;
-- a fresh read-only Audit inspects the real workspace;
-- the exact Executor Markdown is appended once to the Execute description with
+- Artist uses workspace-write access and writes one untrusted final Markdown file;
+- a fresh read-only Critic inspects the real workspace;
+- the exact Artist Markdown is appended once to the Artist description with
   one local RFC3339 `Updated at` line, without parsing;
-- the exact Audit Markdown is appended once to the Audit description with one
+- the exact Critic Markdown is appended once to the Critic description with one
   local RFC3339 `Updated at` line;
-- the parsed Audit value is written to `cycle-NNN-audit-result.json`, read back
+- the parsed Critic value is written to `cycle-NNN-critique-result.json`, read back
   and validated, then uploaded once as `application/json` for the Cycle;
 - Cycle history/result comments record transitions, decisions, terminal fields,
   and a Markdown file link to the uploaded JSON or the current upload error
   (first 50 characters); their event time is Linear `createdAt`;
-  an upload failure does not change the Audit verdict;
-- Root Reconcile uses the Execute role configuration while Audit may use an
+  an upload failure does not change the Critic verdict;
+- Root Reconcile uses the Artist role configuration while Critic may use an
   independent provider, model, reasoning effort, key, and base URL;
 - every Reconcile decision replaces the latest human-readable report in the
   managed Root suffix; `create_cycle` also copies it once to the new Cycle;
@@ -101,9 +101,9 @@ not public request fields.
 - every durable Root projection refreshes exactly one managed description block
   with a local RFC3339 `Updated at` line, while the immutable requirement bytes
   remain unchanged;
-- an accepted Audit promotes task state and permits one terminal commit, push,
+- an accepted Critic promotes task state and permits one terminal commit, push,
   and injected pull-request result;
-- timed-out Execute facts do not bypass Audit, and failure retains the partial
+- timed-out Artist facts do not bypass Critic, and failure retains the partial
   workspace without publication.
 
 This layer is local, deterministic, and runs without provider or Agent
@@ -112,19 +112,19 @@ credentials.
 The reusable result assertion checks the role-description structure and content,
 accepting Linear's equivalent Markdown list-marker normalization. It also checks
 the exact JSON filename/content type and re-read contents, the one uploaded-file
-URL/error, and the parsed `latest_audit` verdict. Golden validates the Executor's
+URL/error, and the parsed `latest_critique` verdict. Golden validates the Artist's
 human-facing `Created`/`Updated`/`Deleted` file-change sections and rejects raw
 Git porcelain status lines; this remains a display-format check, not semantic
 task evidence. It deliberately does not inspect private JSONL/stderr bytes.
 The deterministic scenario additionally proves continue and completion Root
-reports, token accumulation across Reconcile/Execute/Audit, and `Unknown` when
+reports, token accumulation across Reconcile/Artist/Critic, and `Unknown` when
 any invocation lacks valid usage rather than estimating a total.
 
 The visible Issue tree uses the frozen title contract: `[Cycle NNN]` followed by
 an objective within the 80-character Cycle title limit, then exactly
-`[Executor] Cycle NNN` and `[Audit] Cycle NNN`. Golden assertions inspect this
+`[Artist] Cycle NNN` and `[Critic] Cycle NNN`. Golden assertions inspect this
 tree only as an operator projection; Root Reconcile is proved through
-`RootState.latest_audit`, never through the Cycle DAG.
+`RootState.latest_critique`, never through the Cycle DAG.
 
 ### Private diagnostic evidence
 
@@ -132,7 +132,7 @@ Scenario runners may inspect the external run directory to prove that a failed
 Agent retained bounded raw JSONL, stderr, and causal error context. They may
 check file existence, permissions, refs, and a mechanically indexed
 `thread_id`, but never copy raw bytes into public assertions, Linear comments,
-Root State, Audit prompts, logs, or test output. Unknown failures are diagnosed
+Root State, Critic prompts, logs, or test output. Unknown failures are diagnosed
 from this causal evidence rather than an exhaustive reason-code taxonomy.
 
 ### Individual real boundaries
@@ -162,7 +162,7 @@ run directory. Callers do not supply a Root, workspace, or run-directory path.
 
 The human token is used only to create and archive the test-owned Issue tree.
 The built Conductor receives the product Linear and GitHub credentials plus the
-role-partitioned Execute/Audit Codex startup credentials, not the human fixture
+role-partitioned Artist/Critic Codex startup credentials, not the human fixture
 token. On completion the runner closes its pull request,
 deletes its unique branch, archives only its own Issue tree, and removes only its
 own temporary directories. Without the required credentials or project identity
@@ -179,24 +179,24 @@ cleaned.
 
 The real Agent probe and golden scenario own their optional role model/effort
 pairs instead of inheriting a product default. Scenario-specific overrides must
-use `SYMPHONY_E2E_EXECUTE_*`/
-`SYMPHONY_E2E_AUDIT_*` or `SYMPHONY_GOLDEN_EXECUTE_*`/
-`SYMPHONY_GOLDEN_AUDIT_*` variables; when absent, the Codex process uses the
+use `SYMPHONY_E2E_ARTIST_*`/
+`SYMPHONY_E2E_CRITIC_*` or `SYMPHONY_GOLDEN_ARTIST_*`/
+`SYMPHONY_GOLDEN_CRITIC_*` variables; when absent, the Codex process uses the
 user's local configuration and authentication. No test assumes a model,
 reasoning effort, or capability matrix supplied by Symphony.
 
 The golden visible-tree queries also fetch the Root managed suffix, each role's
 terminal description, and Cycle rationale/result comments. They check the
-frozen title rules, exact Executor/Audit Markdown placement, one local RFC3339
+frozen title rules, exact Artist/Critic Markdown placement, one local RFC3339
 `Updated at` line per terminal role description, and one visible
-`[cycle-NNN-audit-result.json](<assetUrl>)`
+`[cycle-NNN-critique-result.json](<assetUrl>)`
 file link in the mechanical Cycle Result. The real Gateway's successful JSON
 upload is therefore proven at the public Linear boundary without assuming a
 provider file-list schema. Golden also requires one continue report per Cycle
 and one completion report with semantic file changes, line counts,
-verification, and a short exact-or-unknown token total. Executor projection is
+verification, and a short exact-or-unknown token total. Artist projection is
 exactly one successful human report or one explicit bounded failure report;
-an Audit-accepted Cycle is not rejected merely because Execute itself timed
+an Critic-accepted Cycle is not rejected merely because Artist itself timed
 out after leaving the correct workspace change. The runner does not download diagnostic JSONL
 or stderr.
 
@@ -230,10 +230,10 @@ The suite covers these observable outcomes:
 | Scenario | Observable result |
 | --- | --- |
 | public launch | only `run` accepts the Root launch contract |
-| successful serial flow | accepted Audit, committed workspace, pushed temporary branch, and one PR URL |
-| failed Execute | fresh Audit still runs and partial files remain |
-| Markdown/JSON projection | Executor Markdown only in the Execute terminal description; Audit Markdown only in the Audit terminal description; re-read typed Audit JSON is the only Cycle upload; Cycle history comments use Linear `createdAt`; parsed fields enter `latest_audit` and Reconcile ignores the Cycle DAG |
-| uploaded-file failure | Cycle Result exposes the current upload error (first 50 characters) while the Audit verdict and `latest_audit` remain unchanged |
+| successful serial flow | accepted Critic, committed workspace, pushed temporary branch, and one PR URL |
+| failed Artist | fresh Critic still runs and partial files remain |
+| Markdown/JSON projection | Artist Markdown only in the Artist terminal description; Critic Markdown only in the Critic terminal description; re-read typed Critique JSON is the only Cycle upload; Cycle history comments use Linear `createdAt`; parsed fields enter `latest_critique` and Reconcile ignores the Cycle DAG |
+| uploaded-file failure | Cycle Result exposes the current upload error (first 50 characters) while the Critic verdict and `latest_critique` remain unchanged |
 | empty or invalid external setup | boundary result is `blocked` with a bounded reason |
 | credential partition | secrets are available only to their owning real boundary and never emitted |
 | diagnostic boundary | raw Agent JSONL/stderr/error context stays private in the external run directory; only refs are observable |
@@ -247,10 +247,10 @@ owned Root workspace.
 
 ## Explicit non-goals
 
-The suite does not add a second summarization Agent call, treat Executor
+The suite does not add a second summarization Agent call, treat Artist
 Markdown as semantic evidence, upload JSONL/stderr, or use uploaded-file
-success as a semantic gate. Executor Markdown receives only the fixed
-human-facing shape check described above; Audit Markdown is parsed once into a
+success as a semantic gate. Artist Markdown receives only the fixed
+human-facing shape check described above; Critic Markdown is parsed once into a
 typed result, its re-read JSON is the only Cycle progression file, and Linear
 must remain an exact, visible projection of the role descriptions, Cycle history
 comments, Root snapshot, and JSON file;

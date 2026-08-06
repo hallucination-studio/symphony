@@ -1,6 +1,6 @@
 import {
-  parseAuditRunResult,
-  type AuditRunResult,
+  parseCritiqueResult,
+  type CritiqueResult,
 } from "./cycle.js";
 import {
   parsePerformerTokenUsage,
@@ -36,7 +36,7 @@ export interface RootState {
   readonly current_phase: string;
   readonly task_state_markdown: MarkdownText;
   readonly pending_finding?: MarkdownText | undefined;
-  readonly latest_audit?: AuditRunResult | undefined;
+  readonly latest_critique?: CritiqueResult | undefined;
   readonly harness_feedback?: MarkdownText | undefined;
   readonly comment_cursor?: string | undefined;
   readonly delivery?: Delivery | undefined;
@@ -115,7 +115,7 @@ const ROOT_STATE_REQUIRED_KEYS = [
 ] as const;
 const ROOT_STATE_OPTIONAL_KEYS = [
   "pending_finding",
-  "latest_audit",
+  "latest_critique",
   "harness_feedback",
   "comment_cursor",
   "delivery",
@@ -142,7 +142,7 @@ export function parseRootState(value: unknown): RootState {
   const record = asRecord(value, "invalid_root_state");
   assertKeysWithOptional(record, ROOT_STATE_REQUIRED_KEYS, ROOT_STATE_OPTIONAL_KEYS);
   const pendingFinding = optionalMarkdown(record.pending_finding, "invalid_pending_finding");
-  const latestAudit = parseOptional(record.latest_audit, parseAuditRunResult);
+  const latestCritic = parseOptional(record.latest_critique, parseCritiqueResult);
   const harnessFeedback = optionalMarkdown(record.harness_feedback, "invalid_harness_feedback");
   const commentCursor = parseOptional(record.comment_cursor, parseCommentId);
   const delivery = parseOptional(record.delivery, parseDelivery);
@@ -154,7 +154,7 @@ export function parseRootState(value: unknown): RootState {
     current_phase: parseBoundedString(record.current_phase, "invalid_root_phase", 64),
     task_state_markdown: parseMarkdownText(record.task_state_markdown, "invalid_task_state_markdown"),
     ...(pendingFinding === undefined ? {} : { pending_finding: pendingFinding }),
-    ...(latestAudit === undefined ? {} : { latest_audit: latestAudit }),
+    ...(latestCritic === undefined ? {} : { latest_critique: latestCritic }),
     ...(harnessFeedback === undefined ? {} : { harness_feedback: harnessFeedback }),
     ...(commentCursor === undefined ? {} : { comment_cursor: commentCursor }),
     ...(delivery === undefined ? {} : { delivery }),

@@ -18,9 +18,9 @@ const state = parseRootState({
   current_phase: "idle",
   task_state_markdown: "## Task State\n\nNo trusted progress yet.",
   pending_finding: "Parser case remains incomplete.",
-  latest_audit: {
+  latest_critique: {
     verdict: "incomplete",
-    scope_audited: "Parser behavior and its focused test.",
+    scope_reviewed: "Parser behavior and its focused test.",
     implementation_review: "The parser case remains incomplete.",
     checks: ["npm test"],
     evidence: ["Focused test is red."],

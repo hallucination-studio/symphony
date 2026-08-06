@@ -166,7 +166,7 @@ test("an optional final response is returned only as a bounded local reference",
   assert.equal((await stat(responsePath)).size < 100_000, true);
 });
 
-test("Execute-style launch does not capture or return model output", async () => {
+test("Artist-style launch does not capture or return model output", async () => {
   const fake = fakeSpawn((child) => {
     child.output.end("model output must remain discarded");
     child.input.once("finish", () => child.close(0));
@@ -291,8 +291,8 @@ test("JSONL error messages remain direct and raw JSONL stays private", async (co
 test("captures exact Codex JSONL and stderr, extracts process facts, and locks diagnostic files", async (context) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-performer-diagnostics-"));
   context.after(() => rm(temporary, { recursive: true, force: true }));
-  const jsonlPath = path.join(temporary, "execute.jsonl");
-  const stderrPath = path.join(temporary, "execute.stderr");
+  const jsonlPath = path.join(temporary, "artist.jsonl");
+  const stderrPath = path.join(temporary, "artist.stderr");
   const jsonl = [
     '{"type":"thread.started","thread_id":"thread-123"}\n',
     '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
@@ -332,8 +332,8 @@ test("captures exact Codex JSONL and stderr, extracts process facts, and locks d
 test("retains unknown and malformed JSONL while continuing mechanical thread extraction", async (context) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "symphony-performer-diagnostics-"));
   context.after(() => rm(temporary, { recursive: true, force: true }));
-  const jsonlPath = path.join(temporary, "audit.jsonl");
-  const stderrPath = path.join(temporary, "audit.stderr");
+  const jsonlPath = path.join(temporary, "critic.jsonl");
+  const stderrPath = path.join(temporary, "critic.stderr");
   const jsonl = [
     '{"type":"unknown"}',
     "not-json",

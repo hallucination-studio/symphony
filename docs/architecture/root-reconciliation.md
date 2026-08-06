@@ -2,12 +2,12 @@
 
 | Status | Owns | Does not own |
 |---|---|---|
-| target proposal | Prepare, next-Cycle reasoning, and final Delivery judgment | Cycle execution, Audit verdicts, Linear calls, or Podium scheduling |
+| target proposal | Prepare, next-Cycle reasoning, and final Delivery judgment | Cycle execution, Critic verdicts, Linear calls, or Podium scheduling |
 
 Root Reconcile is one role with three phases:
 
 ```text
-Prepare -> Reconcile -> (Cycle -> Execute -> Audit -> Reconcile)* -> Delivery
+Prepare -> Reconcile -> (Cycle -> Artist -> Critic -> Reconcile)* -> Delivery
 ```
 
 Prepare and Delivery are not separate roles or child Issues. Conductor launches
@@ -28,10 +28,10 @@ switching, cleaning, or resetting. Restart uses the persisted binding.
 ## Reconcile phase
 
 Reconcile receives only the Root requirement, trusted Root State, the complete
-latest typed Audit result, one pending finding, optional Harness feedback, new
+latest typed Critique, one pending finding, optional Harness feedback, new
 Root comments after the cursor, and a mechanical file/line summary. It never
-reads the Cycle DAG, child descriptions/comments, Executor prose, or raw
-transcripts. Audit remains the sole semantic authority for implementation
+reads the Cycle DAG, child descriptions/comments, Artist prose, or raw
+transcripts. Critic remains the sole semantic authority for implementation
 quality even though the process has workspace access for its other phases.
 
 Its nonterminal decision is closed:
@@ -41,25 +41,25 @@ create_cycle { objective, acceptance, boundaries, report }
 needs_human { reason, question?, report }
 ```
 
-One Cycle contains exactly one Execute and one Audit. All new Root comments are
+One Cycle contains exactly one Artist and one Critic. All new Root comments are
 consumed as one batch only after the complete family is durably recorded.
 During an active Cycle, retain newer comments as pending for the next Reconcile.
 
 Root State keeps Pending Finding as one current Rejected/Failed summary and
-Task State as compact progress promoted only from an accepted Audit. Conductor
-parses the exact Audit result Markdown once, serializes its typed value to `cycle-NNN-audit-result.json`,
-reads it back and validates it, then writes the re-read fields to `RootState.latest_audit`, promotes trusted
+Task State as compact progress promoted only from an accepted Critic. Conductor
+parses the exact Critique Markdown once, serializes its typed value to `cycle-NNN-critique-result.json`,
+reads it back and validates it, then writes the re-read fields to `RootState.latest_critique`, promotes trusted
 fields, and retains the result as the latest authority. Conductor writes the
 Cycle Result as a separate mechanical projection. Cycle Result remains
 a mechanical persistence and operator projection only.
 Root Reconcile never receives the complete Root Issue tree, the managed Root snapshot, Cycle history/result comments, Cycle DAG, or role transcripts.
 
 Root Reconcile uses its own independent role launch configuration. Reconcile,
-Execute, and Audit agent/model/reasoning values never inherit from one another.
+Artist, and Critic agent/model/reasoning values never inherit from one another.
 
 ## Delivery phase
 
-When trusted Audit state supports the complete Root requirement and the final
+When trusted Critic state supports the complete Root requirement and the final
 Inbox check is empty, Root Reconcile prepares the best available delivery and
 returns:
 
@@ -76,7 +76,7 @@ run Git commands, reinterpret the choice, or require remote publication.
 ## Root State
 
 Root State persists the prepared workspace binding, phase, compact trusted task
-state, latest Audit, one pending finding, one Harness warning, comment cursor,
+state, latest Critic, one pending finding, one Harness warning, comment cursor,
 exact token counters when available, and optional structured Delivery. Delivery
 replaces the retired parallel `pull_request_url` and `delivery_branch` fields.
 
@@ -94,14 +94,14 @@ Todo -> In Progress -> In Review -> Done
 ```
 
 The first fresh Reconcile starts from `Todo`; an active durable Cycle is
-`In Progress`; a terminal Audit and later Root decisions are `In Review`.
+`In Progress`; a terminal Critic and later Root decisions are `In Review`.
 Conductor sets Root `Done` only after a valid Delivery is durably projected.
 
 ## Permissions
 
 | Capability | Allowed | Forbidden |
 |---|---|---|
-| workspace | Prepare binding, final delivery, and mechanical reporting | using self-inspection to overrule Audit quality judgment |
+| workspace | Prepare binding, final delivery, and mechanical reporting | using self-inspection to overrule Critic quality judgment |
 | Linear | none directly | GraphQL, child-tree reads, Issue mutation, or comment rendering |
-| context | Root requirement, trusted Audit/Root State, new Root comments | child DAG, Executor output, raw diagnostics, hidden workflow state |
+| context | Root requirement, trusted Critic/Root State, new Root comments | child DAG, Artist output, raw diagnostics, hidden workflow state |
 | delivery | Git/`gh` when useful, or explicit local files | automatic merge, destructive cleanup, or invented delivery locations |

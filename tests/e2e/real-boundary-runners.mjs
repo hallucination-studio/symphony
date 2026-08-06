@@ -16,13 +16,13 @@ const CODEX_ROLE_KEYS = Object.freeze({
     api_key: "SYMPHONY_RECONCILE_CODEX_API_KEY",
     base_url: "SYMPHONY_RECONCILE_CODEX_BASE_URL",
   }),
-  execute: Object.freeze({
-    api_key: "SYMPHONY_EXECUTE_CODEX_API_KEY",
-    base_url: "SYMPHONY_EXECUTE_CODEX_BASE_URL",
+  artist: Object.freeze({
+    api_key: "SYMPHONY_ARTIST_CODEX_API_KEY",
+    base_url: "SYMPHONY_ARTIST_CODEX_BASE_URL",
   }),
-  audit: Object.freeze({
-    api_key: "SYMPHONY_AUDIT_CODEX_API_KEY",
-    base_url: "SYMPHONY_AUDIT_CODEX_BASE_URL",
+  critic: Object.freeze({
+    api_key: "SYMPHONY_CRITIC_CODEX_API_KEY",
+    base_url: "SYMPHONY_CRITIC_CODEX_BASE_URL",
   }),
 });
 
@@ -30,23 +30,23 @@ const BOUNDARY_KEYS = Object.freeze({
   linear: Object.freeze(["LINEAR_API_KEY", "SYMPHONY_LINEAR_TOKEN"]),
   codex: Object.freeze([
     CODEX_ROLE_KEYS.reconcile.api_key, CODEX_ROLE_KEYS.reconcile.base_url,
-    CODEX_ROLE_KEYS.execute.api_key, CODEX_ROLE_KEYS.execute.base_url,
-    CODEX_ROLE_KEYS.audit.api_key, CODEX_ROLE_KEYS.audit.base_url,
+    CODEX_ROLE_KEYS.artist.api_key, CODEX_ROLE_KEYS.artist.base_url,
+    CODEX_ROLE_KEYS.critic.api_key, CODEX_ROLE_KEYS.critic.base_url,
   ]),
   reconcile: Object.freeze([
     CODEX_ROLE_KEYS.reconcile.api_key, CODEX_ROLE_KEYS.reconcile.base_url,
   ]),
-  execute: Object.freeze([
-    CODEX_ROLE_KEYS.execute.api_key, CODEX_ROLE_KEYS.execute.base_url,
+  artist: Object.freeze([
+    CODEX_ROLE_KEYS.artist.api_key, CODEX_ROLE_KEYS.artist.base_url,
   ]),
-  audit: Object.freeze([
-    CODEX_ROLE_KEYS.audit.api_key, CODEX_ROLE_KEYS.audit.base_url,
+  critic: Object.freeze([
+    CODEX_ROLE_KEYS.critic.api_key, CODEX_ROLE_KEYS.critic.base_url,
   ]),
   git: Object.freeze(["PATH", "HOME"]),
   pr: Object.freeze(["GH_TOKEN", "GITHUB_TOKEN"]),
 });
 
-const CODEX_BOUNDARIES = new Set(["codex", "reconcile", "execute", "audit"]);
+const CODEX_BOUNDARIES = new Set(["codex", "reconcile", "artist", "critic"]);
 
 function hasValue(environment, key) {
   const value = environment?.[key];
@@ -159,8 +159,8 @@ function resolveRoleConfiguration(environment, role) {
 export function resolveCodexBoundaryConfiguration(environment = {}) {
   return Object.freeze({
     reconcile: resolveRoleConfiguration(environment, "reconcile"),
-    execute: resolveRoleConfiguration(environment, "execute"),
-    audit: resolveRoleConfiguration(environment, "audit"),
+    artist: resolveRoleConfiguration(environment, "artist"),
+    critic: resolveRoleConfiguration(environment, "critic"),
   });
 }
 
@@ -182,10 +182,10 @@ async function launchCodexProbe({ role, configuration, environment }) {
       ...configuration,
       prompt: role === "reconcile"
         ? "Return exactly: symphony-reconcile-boundary-ok"
-        : role === "execute" ? "Return exactly: symphony-execute-boundary-ok"
-          : "Return exactly: symphony-audit-boundary-ok",
+        : role === "artist" ? "Return exactly: symphony-artist-boundary-ok"
+          : "Return exactly: symphony-critic-boundary-ok",
       working_directory: temporary,
-      sandbox: role === "reconcile" ? "no_workspace" : role === "execute" ? "workspace_write" : "read_only",
+      sandbox: role === "reconcile" ? "no_workspace" : role === "artist" ? "workspace_write" : "read_only",
       final_response_path: responsePath,
       timeout_ms: 120_000,
     });
@@ -209,7 +209,7 @@ export async function runCodexBoundary({
     inheritedEnvironment,
     operation: async () => {
       let firstError;
-      for (const role of ["reconcile", "execute", "audit"]) {
+      for (const role of ["reconcile", "artist", "critic"]) {
         const roleEnvironment = partitionBoundaryEnvironment(environment, role, inheritedEnvironment);
         try {
           await (probe ?? launchCodexProbe)({

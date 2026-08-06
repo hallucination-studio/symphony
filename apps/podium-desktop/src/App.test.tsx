@@ -42,10 +42,10 @@ test("settings saves a flattened binding with optional role fields", async () =>
       binding: expect.objectContaining({
         projectId: "project-new",
         reconcile_agent: "codex",
-        execute_agent: "codex",
-        audit_agent: "codex",
+        artist_agent: "codex",
+        critic_agent: "codex",
         reconcile_model: null,
-        execute_reasoning_effort: null,
+        artist_reasoning_effort: null,
       }),
     }),
   );

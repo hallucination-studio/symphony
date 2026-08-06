@@ -12,8 +12,8 @@ export interface ConductorStartup {
   readonly request: HarnessRunRequest;
   readonly gateway: LinearGateway;
   readonly reconcilePerformer: Performer;
-  readonly executePerformer: Performer;
-  readonly auditPerformer: Performer;
+  readonly artistPerformer: Performer;
+  readonly criticPerformer: Performer;
 }
 
 const CODEX_ENVIRONMENT_KEYS = [
@@ -22,7 +22,7 @@ const CODEX_ENVIRONMENT_KEYS = [
 
 export function resolveCodexRoleOptions(
   env: Readonly<Record<string, string | undefined>>,
-  role: "RECONCILE" | "EXECUTE" | "AUDIT",
+  role: "RECONCILE" | "ARTIST" | "CRITIC",
 ): CodexCliPerformerOptions {
   const apiKey = env[`SYMPHONY_${role}_CODEX_API_KEY`];
   const baseUrl = env[`SYMPHONY_${role}_CODEX_BASE_URL`];
@@ -38,7 +38,7 @@ export function resolveCodexRoleOptions(
 
 function performerForRole(
   env: Readonly<Record<string, string | undefined>>,
-  role: "RECONCILE" | "EXECUTE" | "AUDIT",
+  role: "RECONCILE" | "ARTIST" | "CRITIC",
 ): Performer {
   return new CodexCliPerformer(resolveCodexRoleOptions(env, role));
 }
@@ -61,7 +61,7 @@ export async function loadStartup(
     request,
     gateway,
     reconcilePerformer: performerForRole(env, "RECONCILE"),
-    executePerformer: performerForRole(env, "EXECUTE"),
-    auditPerformer: performerForRole(env, "AUDIT"),
+    artistPerformer: performerForRole(env, "ARTIST"),
+    criticPerformer: performerForRole(env, "CRITIC"),
   });
 }

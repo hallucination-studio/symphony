@@ -11,10 +11,10 @@
 flowchart TD
   Root[Linear Root Issue] --> C1[Cycle 001]
   Root --> C2[Cycle 002]
-  C1 --> E1[Execute]
-  C1 --> A1[Audit]
-  C2 --> E2[Execute]
-  C2 --> A2[Audit]
+  C1 --> E1[Artist]
+  C1 --> A1[Critic]
+  C2 --> E2[Artist]
+  C2 --> A2[Critic]
 ```
 
 Provider IDs identify resources. Cycle numbers are display order only. The
@@ -35,7 +35,7 @@ stand in for a status transition.
   user-authored original long-term requirement. It is immutable and is never
   replaced or mixed with generated state.
 - **Root description managed snapshot.** Its required content is the
-  workspace, run directory, branch, task state, complete `latest_audit`, pending
+  workspace, run directory, branch, task state, complete `latest_critique`, pending
   finding, Harness feedback, phase, comment cursor, terminal delivery, latest
   Reconcile report, and local `Updated at`. Harness may replace only this
   managed suffix; it is the durable checkpoint and never Reconcile input.
@@ -82,11 +82,11 @@ file contents, transcripts, and estimated token values are forbidden.
 | Document | Required sections | Write policy |
 |---|---|---|
 | Cycle description | `# Task` with Objective, Acceptance, and Boundaries; `# Symphony Metadata` with Consumed Root Comment IDs | create once; never update |
-| Execute description | frozen Task; Role/access Metadata; optional Result | create once; append Result once |
-| Audit description | frozen Task; Role/access Metadata; optional Result | create once; append Result once |
+| Artist description | frozen Task; Role/access Metadata; optional Result | create once; append Result once |
+| Critic description | frozen Task; Role/access Metadata; optional Result | create once; append Result once |
 
-Cycle, Execute, and Audit are created in that order. Audit exists in waiting
-state from family creation and starts only after Execute terminates. These exact
+Cycle, Artist, and Critic are created in that order. Critic exists in waiting
+state from family creation and starts only after Artist terminates. These exact
 top-level regions make ownership visible and mechanically parseable: the Root
 content before the managed marker is user-authored; `# Task` is frozen business
 context; `# Symphony Metadata` is Harness-owned operational context; and
@@ -95,8 +95,8 @@ immutable. Only Conductor may append the terminal role report to each role descr
 V1 does not detect or repair unrelated manual edits.
 
 The frozen Cycle title is `[Cycle NNN] <objective>` with a maximum total title
-length of 80 characters. The role titles are exactly `[Executor] Cycle NNN` and
-`[Audit] Cycle NNN`; they carry the Cycle number rather than repeating its
+length of 80 characters. The role titles are exactly `[Artist] Cycle NNN` and
+`[Critic] Cycle NNN`; they carry the Cycle number rather than repeating its
 objective.
 
 ## Result Markdown and uploaded file
@@ -112,21 +112,21 @@ does not create another report or change its content contract:
 
 | Role | Local file | Required human report | Semantic use |
 |---|---|---|---|
-| Execute | `cycle-NNN-executor-result.md` | `## Summary`, `## File Changes` with `### Created`/`### Updated`/`### Deleted` paths and +/- line counts, and `## Verification` | display-only; never Audit/Root input |
-| Audit | `cycle-NNN-audit-result.md` | `verdict` plus `## Scope Audited`, `## Implementation Review`, `## Checks`, `## Evidence`, `## Findings`, and `## Task State` | parsed once into typed `AuditRunResult` |
+| Artist | `cycle-NNN-artist-result.md` | `## Summary`, `## File Changes` with `### Created`/`### Updated`/`### Deleted` paths and +/- line counts, and `## Verification` | display-only; never Critic/Root input |
+| Critic | `cycle-NNN-critic-result.md` | `verdict` plus `## Scope Reviewed`, `## Implementation Review`, `## Checks`, `## Evidence`, `## Findings`, and `## Task State` | parsed once into typed `CritiqueResult` |
 
-The parsed Audit result is mechanically serialized as
-`cycle-NNN-audit-result.json`, written privately, and read back and validated
+The parsed Critique is mechanically serialized as
+`cycle-NNN-critique-result.json`, written privately, and read back and validated
 before it is used for Cycle/Root progression. Only this JSON file is uploaded
 for the Cycle with `application/json` content type. The Cycle Result comment has
 only terminal fields and one visible resource line:
 
 ```markdown
-- Audit result: [cycle-NNN-audit-result.json](https://linear.example/asset)
+- Critique: [cycle-NNN-critique-result.json](https://linear.example/asset)
 ```
 
-If upload fails, the line is `- Audit result: upload failed (<current error's
-first 50 characters>)`; the failure is visible but does not alter the Audit
+If upload fails, the line is `- Critique: upload failed (<current error's
+first 50 characters>)`; the failure is visible but does not alter the Critic
 verdict or progression. The Cycle never contains role Markdown or a second
 summary. Its append-only history comments record status transitions, Root
 decisions, the terminal result, and this link/error; their event timestamp is
@@ -134,8 +134,8 @@ Linear `createdAt`, not a duplicated body field. A missing, unreadable,
 invalid, or non-UTF-8 role result becomes a visible `process_error`; Conductor
 never makes a second summarization or format-repair Agent call.
 
-There is exactly one Execute and one Audit Agent call. Execute output is never
-supplied to Audit or used to calculate Cycle/Root semantics. JSONL and stderr
+There is exactly one Artist and one Critic Agent call. Artist output is never
+supplied to Critic or used to calculate Cycle/Root semantics. JSONL and stderr
 remain private local diagnostics in the external run directory; they are never
 uploaded as comments or files. Role descriptions, Cycle history/result comments,
 the single JSON file, and explicit statuses are the operator-visible progression
@@ -150,8 +150,8 @@ State from them, or pass them to an Agent.
 
 ```text
 list unfinished descendants
--> cancel each unfinished Execute/Audit/Cycle
--> set Root State phase to idle and add possible-unaudited-changes feedback
+-> cancel each unfinished Artist/Critic/Cycle
+-> set Root State phase to idle and add possible-unreviewed-changes feedback
 -> run fresh Root Reconcile from Root description + Root State
 ```
 
@@ -166,8 +166,8 @@ Reconcile context. Their trusted summaries already exist in Root State.
 | Root comment with a Harness marker | reserved operational output; ignored by Inbox |
 | Root managed description suffix | durable runtime checkpoint and latest report; stripped before Reconcile |
 | Cycle history/result comment | append-only operator history; not Reconcile input |
-| Execute or Audit description terminal report | display-only; not Reconcile input |
-| Execute or Audit comments, any author | display-only |
+| Artist or Critic description terminal report | display-only; not Reconcile input |
+| Artist or Critic comments, any author | display-only |
 
 All comments after the prior cursor are consumed together only after the
 complete Cycle family and local record exist. Root State then advances to the

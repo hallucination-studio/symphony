@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseAuditRunResultMarkdown } from "./cycle.js";
+import { parseCritiqueResultMarkdown } from "./cycle.js";
 
-test("parses the fixed Audit Markdown sections into AuditRunResult", () => {
+test("parses the fixed Critic Markdown sections into CritiqueResult", () => {
   const markdown = [
     "verdict: accepted",
     "",
-    "## Scope Audited",
+    "## Scope Reviewed",
     "Inspected the parser implementation, focused tests, and complete workspace diff.",
     "",
     "## Implementation Review",
@@ -32,9 +32,9 @@ test("parses the fixed Audit Markdown sections into AuditRunResult", () => {
     "",
   ].join("\n");
 
-  assert.deepEqual(parseAuditRunResultMarkdown(markdown), {
+  assert.deepEqual(parseCritiqueResultMarkdown(markdown), {
     verdict: "accepted",
-    scope_audited: "Inspected the parser implementation, focused tests, and complete workspace diff.",
+    scope_reviewed: "Inspected the parser implementation, focused tests, and complete workspace diff.",
     implementation_review: "The parser rejects ambiguous input before token recovery and keeps diagnostics local.",
     checks: ["npm test", "npm run typecheck"],
     evidence: ["Complete workspace patch:\n```diff\n+verified\n```", "The focused test passed."],
@@ -44,57 +44,57 @@ test("parses the fixed Audit Markdown sections into AuditRunResult", () => {
 });
 
 test("parses process_error Markdown with only a fixed Reason section", () => {
-  assert.deepEqual(parseAuditRunResultMarkdown([
+  assert.deepEqual(parseCritiqueResultMarkdown([
     "verdict: process_error",
     "",
     "## Reason",
-    "auditor could not start",
+    "critic could not start",
     "",
   ].join("\n")), {
     verdict: "process_error",
-    reason: "auditor could not start",
+    reason: "critic could not start",
   });
 });
 
-test("rejects an invalid verdict header or incomplete Audit sections", () => {
+test("rejects an invalid verdict header or incomplete Critic sections", () => {
   assert.throws(
-    () => parseAuditRunResultMarkdown("Verdict: accepted\n\n## Summary\nDone."),
-    /invalid_audit_markdown/u,
+    () => parseCritiqueResultMarkdown("Verdict: accepted\n\n## Summary\nDone."),
+    /invalid_critic_markdown/u,
   );
   assert.throws(
-    () => parseAuditRunResultMarkdown([
-      "verdict: accepted", "", "## Scope Audited", "Parser source.", "", "## Checks", "- npm test",
+    () => parseCritiqueResultMarkdown([
+      "verdict: accepted", "", "## Scope Reviewed", "Parser source.", "", "## Checks", "- npm test",
       "", "## Evidence", "- inspected", "", "## Findings", "- None",
     ].join("\n")),
-    /invalid_audit_markdown/u,
+    /invalid_critic_markdown/u,
   );
   assert.throws(
-    () => parseAuditRunResultMarkdown([
-      "verdict: accepted", "", "## Scope Audited", "Parser source.", "", "## Implementation Review", "Logic inspected.",
+    () => parseCritiqueResultMarkdown([
+      "verdict: accepted", "", "## Scope Reviewed", "Parser source.", "", "## Implementation Review", "Logic inspected.",
       "", "## Checks", "- None",
       "", "## Evidence", "- inspected", "", "## Findings", "- None", "",
       "## Task State", "trusted", "", "## Extra", "not allowed",
     ].join("\n")),
-    /invalid_audit_markdown/u,
+    /invalid_critic_markdown/u,
   );
   assert.throws(
-    () => parseAuditRunResultMarkdown([
-      "verdict: accepted", "", "## Scope Audited", "Parser source.", "",
+    () => parseCritiqueResultMarkdown([
+      "verdict: accepted", "", "## Scope Reviewed", "Parser source.", "",
       "## Implementation Review", "Logic inspected.", "", "## Checks", "- npm test",
       "unindented continuation", "", "## Evidence", "- inspected", "", "## Findings", "- None",
       "", "## Task State", "trusted", "",
     ].join("\n")),
-    /invalid_audit_markdown/u,
+    /invalid_critic_markdown/u,
   );
 });
 
 test("rejects the old repetitive Summary section", () => {
   assert.throws(
-    () => parseAuditRunResultMarkdown([
+    () => parseCritiqueResultMarkdown([
       "verdict: accepted", "", "## Summary", "The description is complete.", "",
       "## Checks", "- None", "", "## Evidence", "- None", "", "## Findings", "- None", "",
       "## Task State", "No change.", "",
     ].join("\n")),
-    /invalid_audit_markdown/u,
+    /invalid_critic_markdown/u,
   );
 });

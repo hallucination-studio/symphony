@@ -15,7 +15,7 @@ Conductor still receives one already-resolved Root identifier and does not list
 Projects, claim Roots, or choose a Linear status on Podium's behalf.
 
 `attach_file` is the sole result-file upload operation. It receives the Cycle
-Issue ID, the exact `cycle-NNN-audit-result.json` filename as title and
+Issue ID, the exact `cycle-NNN-critique-result.json` filename as title and
 filename, content type `application/json`, and the local file bytes as
 `Uint8Array`; it returns only a normalized uploaded file `{ url }`. Role
 Markdown is appended once to the terminal role Issue description. JSONL, stderr,
@@ -65,7 +65,7 @@ listing exposes only the fields required for mechanical cancellation.
 content editor. It accepts only one of these owned writes: replace the suffix
 between `# Symphony Harness: Managed Root` and
 `# Symphony Harness: End Managed Root`, or append one terminal
-Executor/Audit report plus one local RFC3339 `Updated at:
+Artist/Critic report plus one local RFC3339 `Updated at:
 <YYYY-MM-DDTHH:mm:ss.sss+/-HH:MM>` line to the matching role description. It
 must preserve all frozen bytes outside the owned region and is never used for
 Cycle descriptions.
@@ -98,8 +98,8 @@ Startup handles each canonical name/type pair as follows:
 Any other user-defined state is ignored completely. Symphony never edits or
 deletes those state definitions, never treats another `started` state as
 `In Progress` or `In Review`, and never copies their names into public
-contracts. The five canonical states are shared by Root, Cycle, Execute, and
-Audit. Startup performs this team-level workflow-contract check even when the
+contracts. The five canonical states are shared by Root, Cycle, Artist, and
+Critic. Startup performs this team-level workflow-contract check even when the
 Root is already `Done`; creating a missing canonical state does not mutate the
 Root or any descendant. An Issue already on the exact canonical `Done` state is
 a terminal no-op and is not normalized through another same-named state.
@@ -116,29 +116,29 @@ state machine. Because both canonical active states have provider type
 |---|---|
 | initialize Root | append the first managed Root snapshot after supplied paths pass validation |
 | startup abandonment | set every unfinished descendant to canonical `Canceled` before fresh Reconcile |
-| create family | create Cycle, Execute, and Audit in `Todo` in order with correct parents and business-aligned titles |
-| activate family | after all IDs are persisted, set Cycle and Root to `In Progress` before Execute starts |
-| start Execute | set Execute to `In Progress` before launching the process |
-| start Audit | set Cycle to `In Review` and Audit to `In Review` before launching the process |
+| create family | create Cycle, Artist, and Critic in `Todo` in order with correct parents and business-aligned titles |
+| activate family | after all IDs are persisted, set Cycle and Root to `In Progress` before Artist starts |
+| start Artist | set Artist to `In Progress` before launching the process |
+| start Critic | set Cycle to `In Review` and Critic to `In Review` before launching the process |
 | append results | append each exact role Markdown once to its own Issue description; write append-only Cycle history/mechanical fields and one JSON outcome; errors show the current message's first 50 characters |
-| attach results | serialize the parsed Audit result as `cycle-NNN-audit-result.json`, re-read and validate it, then upload that exact file as `application/json`; record its returned URL or current upload error |
-| finish role or Cycle | append its bounded result, then set Execute, Audit, or Cycle to canonical `Done` |
+| attach results | serialize the parsed Critique as `cycle-NNN-critique-result.json`, re-read and validate it, then upload that exact file as `application/json`; record its returned URL or current upload error |
+| finish role or Cycle | append its bounded result, then set Artist, Critic, or Cycle to canonical `Done` |
 | project Root decision | active Cycle -> `In Progress`; `complete`, `needs_human`, or escaped runtime failure -> `In Review`; recorded PR or pushed branch delivery -> `Done` |
 | project Root Reconcile result | replace the latest report in the managed Root suffix; copy `create_cycle` once to Cycle history; project trusted completion file/line/token facts; never feed it to Inbox |
 | update Root State | replace only the canonical Harness-managed Root description suffix |
 
-Cycle title/description is never updated after creation. Execute and Audit
+Cycle title/description is never updated after creation. Artist and Critic
 descriptions are updated exactly once at terminal handling by appending the exact
 role report to their frozen context. Their frozen titles are
-`[Cycle NNN] <objective>` (maximum 80 characters total), `[Executor] Cycle NNN`, and
-`[Audit] Cycle NNN` so each role is visibly aligned with its business Cycle.
+`[Cycle NNN] <objective>` (maximum 80 characters total), `[Artist] Cycle NNN`, and
+`[Critic] Cycle NNN` so each role is visibly aligned with its business Cycle.
 Issue status transitions are explicit Linear mutations and are not replaced by
-comments or Root State. Executor/Audit Markdown is what operators see in their
+comments or Root State. Artist/Critic Markdown is what operators see in their
 terminal Issue descriptions; Cycle history/result comments show lifecycle and
-upload facts; the typed Audit JSON is the only Cycle resource and is the file
+upload facts; the typed Critique JSON is the only Cycle resource and is the file
 used for progression. The Cycle Result links that resource or exposes its
 current upload error. No second summarizer is inserted. An upload failure is
-visible but does not change the parsed Audit verdict. Agent sessions never
+visible but does not change the parsed Critic verdict. Agent sessions never
 receive a Gateway.
 
 ## Root State policy
@@ -148,7 +148,7 @@ Root State is the durable runtime checkpoint and contains only:
 - Root workspace path, external run directory, and branch;
 - current phase or `NeedsHuman` reason;
 - current task state and one pending finding;
-- complete `latest_audit` from the newest terminal Audit;
+- complete `latest_critique` from the newest terminal Critic;
 - at most one current Harness warning;
 - Root comment cursor;
 - exact accumulated process token usage when known;

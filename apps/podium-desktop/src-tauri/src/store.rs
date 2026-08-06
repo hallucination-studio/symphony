@@ -90,8 +90,8 @@ fn validate_state(state: &PersistedState) -> io::Result<()> {
             || !valid_identifier(&binding.routing_label)
             || binding.concurrency == 0
             || binding.reconcile_agent != "codex"
-            || binding.execute_agent != "codex"
-            || binding.audit_agent != "codex"
+            || binding.artist_agent != "codex"
+            || binding.critic_agent != "codex"
         {
             return Err(invalid_state("invalid project binding"));
         }
@@ -234,12 +234,12 @@ mod tests {
                 reconcile_agent: "codex".into(),
                 reconcile_model: None,
                 reconcile_reasoning_effort: None,
-                execute_agent: "codex".into(),
-                execute_model: None,
-                execute_reasoning_effort: None,
-                audit_agent: "codex".into(),
-                audit_model: None,
-                audit_reasoning_effort: None,
+                artist_agent: "codex".into(),
+                artist_model: None,
+                artist_reasoning_effort: None,
+                critic_agent: "codex".into(),
+                critic_model: None,
+                critic_reasoning_effort: None,
             }],
             allocations: Vec::new(),
         };
@@ -317,12 +317,12 @@ mod tests {
             reconcile_agent: "codex".into(),
             reconcile_model: None,
             reconcile_reasoning_effort: None,
-            execute_agent: "codex".into(),
-            execute_model: None,
-            execute_reasoning_effort: None,
-            audit_agent: "codex".into(),
-            audit_model: None,
-            audit_reasoning_effort: None,
+            artist_agent: "codex".into(),
+            artist_model: None,
+            artist_reasoning_effort: None,
+            critic_agent: "codex".into(),
+            critic_model: None,
+            critic_reasoning_effort: None,
         }
     }
 
@@ -356,7 +356,7 @@ mod tests {
             PersistedState { bindings: vec![valid_binding("project", 0)], allocations: Vec::new() },
             PersistedState {
                 bindings: vec![ProjectBinding {
-                    execute_agent: "other".into(),
+                    artist_agent: "other".into(),
                     ..valid_binding("project", 1)
                 }],
                 allocations: Vec::new(),
