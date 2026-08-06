@@ -21,9 +21,10 @@ Provider IDs identify resources. Cycle numbers are display order only. The
 hierarchy is for human visibility and mechanical cancellation; it is not the
 state supplied to Root Reconcile.
 
-Every Issue in this hierarchy uses the shared five-state Linear status plane:
-`Todo` (`unstarted`), `In Progress` (`started`), `In Review` (`started`), `Done`
-(`completed`), or `Canceled` (`canceled`). Conductor changes the Issue status at
+Root uses `Todo`, `In Progress`, `In Review`, `Needs Human`, `Done`, and
+`Canceled`. Descendants use the same set except `Needs Human`, which is reserved
+for a Root Reconcile question and is never projected onto Cycle, Artist, or
+Critic. Conductor changes the Issue status at
 each lifecycle boundary defined by the [Workflow Model](workflow-model.md), so
 the Linear tree is a direct, human-readable view of waiting, running, review,
 terminal, and abandoned work. Comments and Root State add detail but never
@@ -177,12 +178,17 @@ Reconcile context. Their trusted summaries already exist in Root State.
 |---|---|
 | Root, user-authored after saved cursor | new input for a future Reconcile |
 | Root comment with a Harness marker | reserved operational output; ignored by Inbox |
+| Root `Needs Human` question comment | exactly one Harness comment for that decision; concrete questions and options; never Inbox input |
+| Root reply after the latest question | one reply batch for fresh Reconcile; no reaction means not yet processed |
 | Root managed description suffix | durable runtime checkpoint and latest report; stripped before Reconcile |
 | Cycle creation/result comment | exactly two append-only operator records; not Reconcile input |
 | Artist or Critic description terminal report | display-only; not Reconcile input |
 | Artist or Critic comments, any author | display-only |
 
-All comments after the prior cursor are consumed together only after the
-complete Cycle family and local record exist. Root State then advances to the
-newest included comment. A comment arriving during an active Cycle cannot alter
-it.
+All eligible comments after the prior cursor form one batch. An accepted batch
+receives `white_check_mark` (`✅`) reactions; a rejected batch receives `x`
+(`❌`) reactions and one new question comment explains the rejection. Reactions
+are visible receipts only: user-authored reactions do not affect scheduling or
+the cursor. Root State advances to the newest processed comment. Editing an old
+comment does not replay it; the human adds a new Root comment. A comment arriving
+during an active Cycle cannot alter it.
