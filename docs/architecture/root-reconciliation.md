@@ -41,8 +41,17 @@ Its nonterminal decision is closed:
 
 ```text
 create_cycle { objective, acceptance, boundaries, report }
-needs_human { reason, question?, report }
+needs_human { reason, questions[1..n], reply_disposition?, report }
 ```
+
+Each question contains two to four concrete mutually exclusive options. Every
+option has a stable key, a human label, and the consequence of choosing it.
+Free-form-only questions, inferred yes/no choices, and missing options are
+invalid. When Reconcile receives a reply batch while Root is `Needs Human`, it
+must classify the whole batch as `accepted` or `rejected`; partial acceptance is
+not a contract. Rejection includes a concrete reason and can only lead to a new
+`needs_human` decision. Acceptance may create a Cycle, complete, or expose a
+new independent question.
 
 One Cycle contains exactly one Artist and one Critic. All new Root comments are
 consumed as one batch only after the complete family is durably recorded.
@@ -96,16 +105,19 @@ delivery, a mechanically rendered human-visible `## Delivery` section.
 
 ## Status projection
 
-The same five canonical Linear statuses apply to Root and descendants. Prepare
-is metadata, not a sixth status.
+Root uses the canonical `Needs Human`/`started` status in addition to the five
+statuses shared with descendants. Prepare remains metadata rather than a
+status.
 
 ```text
-Todo -> In Progress -> In Review -> Done
+Todo -> In Progress -> In Review -> Needs Human -> In Progress -> Done
 ```
 
 The first fresh Reconcile starts from `Todo`; an active durable Cycle is
-`In Progress`; a terminal Critic and later Root decisions are `In Review`.
-Conductor sets Root `Done` only after a valid Delivery is durably projected.
+`In Progress`; a terminal Critic is `In Review`; a concrete Reconcile question
+is `Needs Human`. A resumed Reconcile leaves the Root there until its decision
+is known. Conductor sets Root `Done` only after a valid Delivery is durably
+projected.
 
 ## Permissions
 

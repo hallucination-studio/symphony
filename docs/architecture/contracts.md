@@ -265,7 +265,7 @@ RootReconcileRequest {
 RootReconcileDecision =
   | { kind: create_cycle, cycle: CycleSpec, report }
   | { kind: complete, summary, delivery: Delivery, report }
-  | { kind: needs_human, reason, question?, report }
+  | { kind: needs_human, reason, questions[1..n], reply_disposition?, report }
 
 RootReconcileOutcome { decision, process? }
 ```
