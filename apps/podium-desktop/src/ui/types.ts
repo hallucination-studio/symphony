@@ -104,6 +104,7 @@ export type DesktopCommand =
   | { kind: "start_binding"; bindingId: string }
   | { kind: "stop_binding"; bindingId: string }
   | { kind: "connect_linear" }
+  | { kind: "cancel_linear_connect" }
   | { kind: "disconnect_linear" }
   | { kind: "list_linear_projects" }
   | RootAction;

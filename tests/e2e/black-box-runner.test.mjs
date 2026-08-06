@@ -66,10 +66,10 @@ test("contract runner does not accept a second public control plane", () => {
   }
 });
 
-test("E2E failures expose only the current message's first 50 characters", () => {
+test("E2E failures preserve the complete current error message", () => {
   const error = new Error("Current boundary message " + "x".repeat(50), {
     cause: new Error("nested cause must stay hidden"),
   });
-  assert.equal(safeReason(error), error.message.slice(0, 50));
+  assert.equal(safeReason(error), error.message);
   assert.equal(safeReason(new Error("")), "e2e_runner_failed");
 });
