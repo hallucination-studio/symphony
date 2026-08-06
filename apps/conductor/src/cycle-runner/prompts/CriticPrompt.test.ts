@@ -14,10 +14,16 @@ test("Critic prompt owns independent read-only judgment and receives process fac
     parseCycleSpec({
       cycle_number: 1, objective: "Reject ambiguity", acceptance: "Focused test passes",
       boundaries: "Parser only", consumed_comment_ids: [],
+      architecture_decisions: [{
+        id: "ADR-001", title: "Keep strict parsing", decision: "Reject ambiguity.",
+        rationale: "The human selected strict parsing.", consequences: ["No recovery mode."],
+        source_action_comment_id: "action-1", source_reply_ids: ["reply-1"],
+        decided_at: "2026-08-05 00:00:00 GMT+08:00",
+      }],
     }),
     parseRootState({
       workspace_path: "/workspace", run_directory: "/run", root_branch: "root/ENG-1",
-      current_phase: "cycle", task_state_markdown: "Lexer trusted",
+      current_phase: "cycle", task_state_markdown: "Lexer trusted", architecture_decisions: [],
       latest_critique: {
         verdict: "incomplete", task_state_markdown: "Lexer trusted", pending_finding: "Ambiguity remains",
       },
@@ -31,6 +37,8 @@ test("Critic prompt owns independent read-only judgment and receives process fac
   assert.match(prompt, /<<< BEGIN CYCLE_CONTRACT >>>/u);
   assert.match(prompt, /<<< BEGIN PRIOR_TRUSTED_STATE >>>/u);
   assert.match(prompt, /<<< BEGIN ARTIST_PROCESS_FACTS >>>/u);
+  assert.match(prompt, /ADR-001/u);
+  assert.match(prompt, /Reject ambiguity\./u);
   assert.match(prompt, /"exit_code":1/u);
   assert.match(prompt, /compact machine envelope followed by a free human-readable Markdown audit/u);
   assert.match(prompt, /fenced `json` block containing exactly one single-line JSON object/u);

@@ -75,7 +75,7 @@ does not own Cycle semantics, Root State, role prompts, or Critic judgment.
 | exactly one Artist and one Critic per Cycle | planning stage, DAG, parallel work, or subagents |
 | one terminal report appended to each Artist/Critic description, plus exactly one Cycle creation and one terminal comment | changing a Cycle title or description after creation |
 | one exact Harness-managed checkpoint suffix on Root description | treating generated state as Root requirement or introducing a second checkpoint |
-| five canonical Linear statuses shared by Root and descendants | inferred mappings or editing/deleting user-defined state definitions |
+| six canonical Root statuses, with `Needs Human` excluded from descendants | inferred mappings or editing/deleting user-defined state definitions |
 | new Root comments become next-Reconcile input | old-comment replay or descendant comments as instructions |
 | Root State locates the existing workspace after restart | Agent-session resume, state reconstruction from children, or replacement workspace |
 | startup cancels all unfinished descendants before fresh Reconcile | continuing, reviewing, or interpreting old active children |
@@ -112,7 +112,8 @@ references. This evidence is never supplied to Critic or Root Reconcile, never
 uploaded to Linear, and never treated as workflow authority. The caller owns
 retention; golden E2E failures archive evidence before cleaning their owned
 local/branch resources, preserve the Linear Root tree for inspection, and report
-only `diagnostic_ref`. Only a visibly verified successful fixture is archived.
+only `diagnostic_ref`. Golden fixtures retain their Linear tree, workspace,
+run directory, PR, and branch after every terminal outcome for inspection.
 
 ## Podium Desktop V2 boundary
 
@@ -145,6 +146,6 @@ slots. Root rows explain queue position or the latest event and provide direct
 actions to open Linear, workspace, delivery, and private diagnostics. Raw local
 paths remain behind those actions.
 There is no cross-machine lease, distributed claim, SQLite store, daemon IPC,
-or Web surface in this V2 target. Conductor `NeedsHuman` remains a V1 terminal
-state, but its Podium scheduling, UI, and E2E behavior are out of scope for this
-round.
+or Web surface in this V2 target. Podium recognizes a replied `Needs Human`
+Root as an ordinary candidate while keeping the existing priority/creation/ID
+order. It renders status only and exposes no answer or Resume surface.

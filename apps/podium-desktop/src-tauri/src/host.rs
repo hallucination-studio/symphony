@@ -408,8 +408,7 @@ fn cleanup_workspace(host: State<'_, DesktopHost>, root_id: String) -> Result<()
 /// are returned directly; they never contain provider bodies or credentials.
 #[tauri::command]
 async fn connect_linear(host: State<'_, DesktopHost>) -> Result<LinearConnectionView, String> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    *lock(&host.pending_connect) = Some(cancel.clone());
+    let cancel = begin_connect(&host)?;
     let connection = host.connection.clone();
     let result = tauri::async_runtime::spawn_blocking(move || connection.connect(&cancel)).await;
     *lock(&host.pending_connect) = None;
@@ -418,6 +417,18 @@ async fn connect_linear(host: State<'_, DesktopHost>) -> Result<LinearConnection
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err(OAuthError::Transport.to_string()),
     }
+}
+
+/// One authorization at a time; a second click gets a bounded rejection
+/// instead of two competing browser flows.
+fn begin_connect(host: &DesktopHost) -> Result<Arc<AtomicBool>, String> {
+    let mut pending = lock(&host.pending_connect);
+    if pending.is_some() {
+        return Err("linear_connect_in_progress".to_owned());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    *pending = Some(cancel.clone());
+    Ok(cancel)
 }
 
 #[tauri::command]
@@ -512,6 +523,16 @@ mod tests {
         ] {
             assert_eq!(root_action_unavailable_reason(kind), expected);
         }
+    }
+
+    #[test]
+    fn a_second_connect_is_rejected_while_one_is_pending() {
+        let host = test_host(HostRuntime::Unavailable);
+        let first = begin_connect(&host).expect("first connect starts");
+        assert_eq!(begin_connect(&host).unwrap_err(), "linear_connect_in_progress");
+        assert!(!first.load(Ordering::Relaxed));
+        *lock(&host.pending_connect) = None;
+        assert!(begin_connect(&host).is_ok());
     }
 
     #[test]

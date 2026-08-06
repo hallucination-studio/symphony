@@ -1,8 +1,10 @@
 //! Podium's narrow Linear candidate boundary.
 //!
-//! This module deliberately knows only how to read top-level, unstarted Root
-//! Issues for one persisted [`ProjectBinding`].  It does not sort candidates
-//! or make scheduling decisions; the scheduler owns that policy.
+//! This module deliberately knows only how to read top-level Todo or replied
+//! Needs Human Root Issues for one persisted [`ProjectBinding`].  A Needs Human
+//! candidate requires an unprocessed direct human reply under the current
+//! Human Action comment. It does not sort candidates or make scheduling
+//! decisions; the scheduler owns that policy.
 
 use crate::domain::{ProjectBinding, RootCandidate};
 use serde_json::{json, Map, Value};
@@ -12,6 +14,8 @@ use std::sync::{Arc, RwLock};
 
 const LINEAR_GRAPHQL_ENDPOINT: &str = "https://api.linear.app/graphql";
 const ROOT_CANDIDATES_OPERATION: &str = "ListPodiumRootCandidates";
+const ROOT_COMMENTS_OPERATION: &str = "ListPodiumRootComments";
+const ROOT_ACTION_REPLIES_OPERATION: &str = "ListPodiumHumanActionReplies";
 const PROJECTS_OPERATION: &str = "ListPodiumProjects";
 const ROOT_CANDIDATES_QUERY: &str = r#"
 query ListPodiumRootCandidates($projectId: ID!, $routingLabel: String!, $cursor: String, $first: Int!) {
@@ -19,7 +23,7 @@ query ListPodiumRootCandidates($projectId: ID!, $routingLabel: String!, $cursor:
     filter: {
       project: { id: { eq: $projectId } }
       labels: { name: { eq: $routingLabel } }
-      state: { name: { eq: "Todo" }, type: { eq: unstarted } }
+      state: { type: { in: [unstarted, started] } }
       parent: { null: true }
     }
     after: $cursor
@@ -40,6 +44,35 @@ query ListPodiumRootCandidates($projectId: ID!, $routingLabel: String!, $cursor:
   }
 }
 "#;
+const ROOT_COMMENTS_QUERY: &str = r#"
+query ListPodiumRootComments($rootId: ID!, $cursor: String, $first: Int!) {
+  issue(id: $rootId) {
+    comments(after: $cursor, first: $first) {
+      nodes { id body createdAt user { id } parent { id } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"#;
+const ROOT_ACTION_REPLIES_QUERY: &str = r#"
+query ListPodiumHumanActionReplies($commentId: ID!, $cursor: String, $first: Int!) {
+  comment(id: $commentId) {
+    children(after: $cursor, first: $first) {
+      nodes {
+        id
+        body
+        createdAt
+        user { id }
+        reactions(first: $first) {
+          nodes { emoji user { id } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"#;
 const PROJECTS_QUERY: &str = r#"
 query ListPodiumProjects($cursor: String, $first: Int!) {
   projects(after: $cursor, first: $first) {
@@ -53,8 +86,11 @@ const DEFAULT_PAGE_SIZE: usize = 50;
 const DEFAULT_MAX_PAGES: usize = 100;
 const MAX_IDENTIFIER_LENGTH: usize = 256;
 const MAX_TITLE_LENGTH: usize = 4_096;
+const MAX_COMMENT_BODY_LENGTH: usize = 100_000;
 const MAX_TIMESTAMP_LENGTH: usize = 128;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const HARNESS_COMMENT_MARKER: &str = "# Symphony Harness:";
+const HUMAN_ACTION_COMMENT_MARKER: &str = "# Symphony Harness: Human Action";
 
 /// A request sent to an injectable GraphQL transport.
 ///
@@ -171,6 +207,36 @@ pub struct LinearRoot {
     pub title: String,
     pub priority: u8,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootComment {
+    id: String,
+    body: String,
+    created_at: String,
+    author_id: String,
+    parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootReply {
+    id: String,
+    body: String,
+    created_at: String,
+    author_id: String,
+    reactions: Vec<CommentReaction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommentReaction {
+    emoji: String,
+    author_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootCandidateState {
+    Todo,
+    NeedsHuman,
 }
 
 /// The complete provider data exposed by the first-run Project picker.
@@ -336,10 +402,13 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
 
             for node in nodes {
                 let node = object(node)?;
-                if !matches_binding_filters(node, binding)? {
+                let Some(state) = root_candidate_state(node, binding)? else { continue };
+                let root = parse_root(node)?;
+                if state == RootCandidateState::NeedsHuman
+                    && !self.has_replied_needs_human(&root.id, &access_token)?
+                {
                     continue;
                 }
-                let root = parse_root(node)?;
                 if seen_ids.insert(root.id.clone()) {
                     candidates.push(root);
                 }
@@ -347,6 +416,158 @@ impl<T: LinearTransport> LinearCandidateAdapter<T> {
 
             if !has_next {
                 return Ok(candidates);
+            }
+            let Some(next) = next_cursor else {
+                return Err(LinearError::InvalidResponse);
+            };
+            if next.is_empty() || cursor.as_deref() == Some(next.as_str()) {
+                return Err(LinearError::InvalidResponse);
+            }
+            if page + 1 == self.max_pages {
+                return Err(LinearError::PaginationLimit);
+            }
+            cursor = Some(next);
+        }
+        Err(LinearError::PaginationLimit)
+    }
+
+    fn has_replied_needs_human(
+        &self,
+        root_id: &str,
+        access_token: &str,
+    ) -> Result<bool, LinearError> {
+        let comments = self.list_root_comments(root_id, access_token)?;
+        let Some(action) = comments
+            .iter()
+            .filter(|comment| comment.parent_id.is_none() && is_human_action_comment(&comment.body))
+            .max_by(|left, right| {
+                left.created_at.cmp(&right.created_at).then(left.id.cmp(&right.id))
+            })
+        else {
+            return Ok(false);
+        };
+        let replies = self.list_action_replies(&action.id, access_token)?;
+        Ok(replies.iter().any(|reply| {
+            !reply.body.starts_with(HARNESS_COMMENT_MARKER)
+                && reply.author_id != action.author_id
+                && !reply.reactions.iter().any(|reaction| {
+                    reaction.author_id == action.author_id
+                        && matches!(reaction.emoji.as_str(), "white_check_mark" | "x")
+                })
+        }))
+    }
+
+    fn list_root_comments(
+        &self,
+        root_id: &str,
+        access_token: &str,
+    ) -> Result<Vec<RootComment>, LinearError> {
+        validate_identifier(root_id, MAX_IDENTIFIER_LENGTH)?;
+        let mut comments = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_ids = HashSet::new();
+
+        for page in 0..self.max_pages {
+            let request = GraphqlRequest {
+                operation: ROOT_COMMENTS_OPERATION,
+                query: ROOT_COMMENTS_QUERY,
+                variables: json!({
+                    "rootId": root_id,
+                    "cursor": cursor,
+                    "first": self.page_size,
+                }),
+            };
+            let envelope = self
+                .transport
+                .execute(&self.endpoint, &request, access_token)
+                .map_err(|_| LinearError::Transport)?;
+            let data = parse_envelope(envelope)?;
+            let issue = object_field(&data, "issue")?;
+            let connection = object_field(issue, "comments")?;
+            let nodes = array_field(connection, "nodes")?;
+            let page_info = object_field(connection, "pageInfo")?;
+            let has_next = bool_field(page_info, "hasNextPage")?;
+            let next_cursor = nullable_string_field(page_info, "endCursor")?;
+
+            for node in nodes {
+                let comment = parse_root_comment(object(node)?)?;
+                if !seen_ids.insert(comment.id.clone()) {
+                    return Err(LinearError::InvalidResponse);
+                }
+                comments.push(comment);
+            }
+
+            if !has_next {
+                if next_cursor.is_some() {
+                    return Err(LinearError::InvalidResponse);
+                }
+                comments.sort_by(|left, right| {
+                    left.created_at.cmp(&right.created_at).then(left.id.cmp(&right.id))
+                });
+                return Ok(comments);
+            }
+            let Some(next) = next_cursor else {
+                return Err(LinearError::InvalidResponse);
+            };
+            if next.is_empty() || cursor.as_deref() == Some(next.as_str()) {
+                return Err(LinearError::InvalidResponse);
+            }
+            if page + 1 == self.max_pages {
+                return Err(LinearError::PaginationLimit);
+            }
+            cursor = Some(next);
+        }
+        Err(LinearError::PaginationLimit)
+    }
+
+    fn list_action_replies(
+        &self,
+        action_id: &str,
+        access_token: &str,
+    ) -> Result<Vec<RootReply>, LinearError> {
+        validate_identifier(action_id, MAX_IDENTIFIER_LENGTH)?;
+        let mut replies = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_ids = HashSet::new();
+
+        for page in 0..self.max_pages {
+            let request = GraphqlRequest {
+                operation: ROOT_ACTION_REPLIES_OPERATION,
+                query: ROOT_ACTION_REPLIES_QUERY,
+                variables: json!({
+                    "commentId": action_id,
+                    "cursor": cursor,
+                    "first": self.page_size,
+                }),
+            };
+            let envelope = self
+                .transport
+                .execute(&self.endpoint, &request, access_token)
+                .map_err(|_| LinearError::Transport)?;
+            let data = parse_envelope(envelope)?;
+            let comment = object_field(&data, "comment")?;
+            let connection = object_field(comment, "children")?;
+            let nodes = array_field(connection, "nodes")?;
+            let page_info = object_field(connection, "pageInfo")?;
+            let has_next = bool_field(page_info, "hasNextPage")?;
+            let next_cursor = nullable_string_field(page_info, "endCursor")?;
+
+            for node in nodes {
+                let reply = parse_root_reply(object(node)?)?;
+                if !seen_ids.insert(reply.id.clone()) {
+                    return Err(LinearError::InvalidResponse);
+                }
+                replies.push(reply);
+            }
+
+            if !has_next {
+                if next_cursor.is_some() {
+                    return Err(LinearError::InvalidResponse);
+                }
+                replies.sort_by(|left, right| {
+                    left.created_at.cmp(&right.created_at).then(left.id.cmp(&right.id))
+                });
+                return Ok(replies);
             }
             let Some(next) = next_cursor else {
                 return Err(LinearError::InvalidResponse);
@@ -508,32 +729,38 @@ fn parse_envelope(value: Value) -> Result<Map<String, Value>, LinearError> {
     Ok(object(data)?.clone())
 }
 
-fn matches_binding_filters(
+fn root_candidate_state(
     node: &Map<String, Value>,
     binding: &ProjectBinding,
-) -> Result<bool, LinearError> {
+) -> Result<Option<RootCandidateState>, LinearError> {
     let project = object(node.get("project").ok_or(LinearError::InvalidResponse)?)?;
     if bounded_string(
         project.get("id").ok_or(LinearError::InvalidResponse)?,
         MAX_IDENTIFIER_LENGTH,
     )? != binding.project_id
     {
-        return Ok(false);
+        return Ok(None);
     }
     let parent = node.get("parent").ok_or(LinearError::InvalidResponse)?;
     if !parent.is_null() {
-        return Ok(false);
+        let parent = object(parent)?;
+        bounded_string(
+            parent.get("id").ok_or(LinearError::InvalidResponse)?,
+            MAX_IDENTIFIER_LENGTH,
+        )?;
+        return Ok(None);
     }
     let state = object(node.get("state").ok_or(LinearError::InvalidResponse)?)?;
-    if bounded_string(state.get("name").ok_or(LinearError::InvalidResponse)?, 128)? != "Todo"
-        || bounded_string(state.get("type").ok_or(LinearError::InvalidResponse)?, 128)?
-            != "unstarted"
-    {
-        return Ok(false);
-    }
+    let state_name = bounded_string(state.get("name").ok_or(LinearError::InvalidResponse)?, 128)?;
+    let state_type = bounded_string(state.get("type").ok_or(LinearError::InvalidResponse)?, 128)?;
+    let candidate_state = match (state_name.as_str(), state_type.as_str()) {
+        ("Todo", "unstarted") => RootCandidateState::Todo,
+        ("Needs Human", "started") => RootCandidateState::NeedsHuman,
+        _ => return Ok(None),
+    };
     if let Some(routing) = node.get("routingLabel").or_else(|| node.get("routing_label")) {
         if bounded_string(routing, MAX_IDENTIFIER_LENGTH)? != binding.routing_label {
-            return Ok(false);
+            return Ok(None);
         }
     }
     let labels = object(node.get("labels").ok_or(LinearError::InvalidResponse)?)?;
@@ -550,9 +777,9 @@ fn matches_binding_filters(
         }
     }
     if !matched_label {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(true)
+    Ok(Some(candidate_state))
 }
 
 fn parse_root(node: &Map<String, Value>) -> Result<LinearRoot, LinearError> {
@@ -578,6 +805,91 @@ fn parse_root(node: &Map<String, Value>) -> Result<LinearRoot, LinearError> {
         return Err(LinearError::InvalidResponse);
     }
     Ok(LinearRoot { id, identifier, title, priority, created_at })
+}
+
+fn parse_root_comment(node: &Map<String, Value>) -> Result<RootComment, LinearError> {
+    let id =
+        bounded_string(node.get("id").ok_or(LinearError::InvalidResponse)?, MAX_IDENTIFIER_LENGTH)?;
+    let body = bounded_text(
+        node.get("body").ok_or(LinearError::InvalidResponse)?,
+        MAX_COMMENT_BODY_LENGTH,
+    )?;
+    let created_at = bounded_string(
+        node.get("createdAt").ok_or(LinearError::InvalidResponse)?,
+        MAX_TIMESTAMP_LENGTH,
+    )?;
+    if !valid_rfc3339(&created_at) {
+        return Err(LinearError::InvalidResponse);
+    }
+    let author = object(node.get("user").ok_or(LinearError::InvalidResponse)?)?;
+    let author_id = bounded_string(
+        author.get("id").ok_or(LinearError::InvalidResponse)?,
+        MAX_IDENTIFIER_LENGTH,
+    )?;
+    let parent = node.get("parent").ok_or(LinearError::InvalidResponse)?;
+    let parent_id = if parent.is_null() {
+        None
+    } else {
+        Some(bounded_string(
+            object(parent)?.get("id").ok_or(LinearError::InvalidResponse)?,
+            MAX_IDENTIFIER_LENGTH,
+        )?)
+    };
+    Ok(RootComment { id, body, created_at, author_id, parent_id })
+}
+
+fn is_human_action_comment(body: &str) -> bool {
+    body == HUMAN_ACTION_COMMENT_MARKER
+        || body
+            .strip_prefix(HUMAN_ACTION_COMMENT_MARKER)
+            .is_some_and(|suffix| suffix.starts_with('\n'))
+}
+
+fn parse_root_reply(node: &Map<String, Value>) -> Result<RootReply, LinearError> {
+    let id =
+        bounded_string(node.get("id").ok_or(LinearError::InvalidResponse)?, MAX_IDENTIFIER_LENGTH)?;
+    let body = bounded_text(
+        node.get("body").ok_or(LinearError::InvalidResponse)?,
+        MAX_COMMENT_BODY_LENGTH,
+    )?;
+    let created_at = bounded_string(
+        node.get("createdAt").ok_or(LinearError::InvalidResponse)?,
+        MAX_TIMESTAMP_LENGTH,
+    )?;
+    if !valid_rfc3339(&created_at) {
+        return Err(LinearError::InvalidResponse);
+    }
+    let author = object(node.get("user").ok_or(LinearError::InvalidResponse)?)?;
+    let author_id = bounded_string(
+        author.get("id").ok_or(LinearError::InvalidResponse)?,
+        MAX_IDENTIFIER_LENGTH,
+    )?;
+    let reactions = object_field(node, "reactions")?;
+    let reaction_nodes = array_field(reactions, "nodes")?;
+    let reaction_page_info = object_field(reactions, "pageInfo")?;
+    if bool_field(reaction_page_info, "hasNextPage")?
+        || nullable_string_field(reaction_page_info, "endCursor")?.is_some()
+    {
+        return Err(LinearError::PaginationLimit);
+    }
+    let mut parsed_reactions = Vec::with_capacity(reaction_nodes.len());
+    for reaction in reaction_nodes {
+        let reaction = object(reaction)?;
+        let emoji = bounded_string(
+            reaction.get("emoji").ok_or(LinearError::InvalidResponse)?,
+            MAX_IDENTIFIER_LENGTH,
+        )?;
+        if !matches!(emoji.as_str(), "white_check_mark" | "x") {
+            continue;
+        }
+        let author = object(reaction.get("user").ok_or(LinearError::InvalidResponse)?)?;
+        let author_id = bounded_string(
+            author.get("id").ok_or(LinearError::InvalidResponse)?,
+            MAX_IDENTIFIER_LENGTH,
+        )?;
+        parsed_reactions.push(CommentReaction { emoji, author_id });
+    }
+    Ok(RootReply { id, body, created_at, author_id, reactions: parsed_reactions })
 }
 
 fn object(value: &Value) -> Result<&Map<String, Value>, LinearError> {
@@ -624,6 +936,14 @@ fn nullable_string_field(
 fn bounded_string(value: &Value, max: usize) -> Result<String, LinearError> {
     let value = value.as_str().ok_or(LinearError::InvalidResponse)?;
     validate_identifier(value, max)?;
+    Ok(value.to_owned())
+}
+
+fn bounded_text(value: &Value, max: usize) -> Result<String, LinearError> {
+    let value = value.as_str().ok_or(LinearError::InvalidResponse)?;
+    if value.is_empty() || value.len() > max || value.chars().any(|ch| ch == '\0') {
+        return Err(LinearError::InvalidResponse);
+    }
     Ok(value.to_owned())
 }
 
@@ -818,6 +1138,73 @@ mod tests {
         })
     }
 
+    fn needs_human_node(id: &str, identifier: &str, priority: u64, created_at: &str) -> Value {
+        let mut value = node(id, identifier, priority, created_at);
+        value["state"] = json!({ "name": "Needs Human", "type": "started" });
+        value
+    }
+
+    fn comment(id: &str, body: &str, created_at: &str, user_id: &str) -> Value {
+        comment_with_parent(id, body, created_at, user_id, None)
+    }
+
+    fn comment_with_parent(
+        id: &str,
+        body: &str,
+        created_at: &str,
+        user_id: &str,
+        parent_id: Option<&str>,
+    ) -> Value {
+        json!({
+            "id": id,
+            "body": body,
+            "createdAt": created_at,
+            "user": { "id": user_id },
+            "parent": parent_id.map(|id| json!({ "id": id })).unwrap_or(Value::Null),
+        })
+    }
+
+    fn reply(
+        id: &str,
+        body: &str,
+        created_at: &str,
+        user_id: &str,
+        reactions: Vec<Value>,
+    ) -> Value {
+        json!({
+            "id": id,
+            "body": body,
+            "createdAt": created_at,
+            "user": { "id": user_id },
+            "reactions": {
+                "nodes": reactions,
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+            },
+        })
+    }
+
+    fn reaction(emoji: &str, user_id: &str) -> Value {
+        json!({ "emoji": emoji, "user": { "id": user_id } })
+    }
+
+    fn comments_page(nodes: Vec<Value>, has_next: bool, end_cursor: Option<&str>) -> Value {
+        json!({
+            "data": { "issue": { "comments": {
+                "nodes": nodes,
+                "pageInfo": { "hasNextPage": has_next, "endCursor": end_cursor },
+            }}}
+        })
+    }
+
+    fn action_replies_page(nodes: Vec<Value>, has_next: bool, end_cursor: Option<&str>) -> Value {
+        json!({
+            "data": { "comment": { "children": {
+                "nodes": nodes,
+                "pageInfo": { "hasNextPage": has_next, "endCursor": end_cursor },
+            }}}
+        })
+    }
+
     fn page(nodes: Vec<Value>, has_next: bool, end_cursor: Option<&str>) -> Value {
         json!({
             "data": { "issues": {
@@ -882,6 +1269,245 @@ mod tests {
         assert_eq!(seen[0].1["routingLabel"], "core");
         assert_eq!(seen[0].1["first"], DEFAULT_PAGE_SIZE);
         assert_eq!(seen[0].2, "fixture-token");
+    }
+
+    #[test]
+    fn includes_only_replied_needs_human_roots_alongside_todo_roots() {
+        let requests = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport = move |_endpoint: &str, request: &GraphqlRequest, _token: &str| {
+            requests_for_transport
+                .lock()
+                .unwrap()
+                .push((request.operation.to_owned(), request.variables.clone()));
+            match request.operation {
+                ROOT_CANDIDATES_OPERATION => Ok(page(
+                    vec![
+                        node("todo", "ENG-1", 3, "2024-02-01T00:00:00Z"),
+                        needs_human_node("needs-human-replied", "ENG-2", 1, "2024-01-01T00:00:00Z"),
+                        needs_human_node("needs-human-waiting", "ENG-3", 0, "2024-01-02T00:00:00Z"),
+                        needs_human_node("needs-human-harness", "ENG-4", 2, "2024-01-03T00:00:00Z"),
+                        needs_human_node("needs-human-checked", "ENG-5", 2, "2024-01-04T00:00:00Z"),
+                        needs_human_node(
+                            "needs-human-rejected",
+                            "ENG-6",
+                            2,
+                            "2024-01-05T00:00:00Z",
+                        ),
+                        needs_human_node(
+                            "needs-human-user-reaction",
+                            "ENG-7",
+                            2,
+                            "2024-01-06T00:00:00Z",
+                        ),
+                        needs_human_node(
+                            "needs-human-old-reply",
+                            "ENG-8",
+                            2,
+                            "2024-01-07T00:00:00Z",
+                        ),
+                    ],
+                    false,
+                    None,
+                )),
+                ROOT_COMMENTS_OPERATION => {
+                    let root_id = request.variables["rootId"].as_str().unwrap();
+                    let comments = match root_id {
+                        "needs-human-replied" => vec![
+                            comment(
+                                "question-replied",
+                                "# Symphony Harness: Human Action\n\nPlease choose.",
+                                "2024-02-01T00:00:00Z",
+                                "harness-1",
+                            ),
+                            comment_with_parent(
+                                "harness-follow-up",
+                                "# Symphony Harness: Human Action Follow-up\n\nChoose again.",
+                                "2024-02-03T00:00:00Z",
+                                "harness-1",
+                                Some("question-replied"),
+                            ),
+                            comment(
+                                "flat-reply",
+                                "Flat answer must not count.",
+                                "2024-02-02T00:00:00Z",
+                                "user-1",
+                            ),
+                        ],
+                        "needs-human-waiting" => vec![
+                            comment(
+                                "question-waiting",
+                                "# Symphony Harness: Human Action\n\nPlease choose.",
+                                "2024-02-01T00:00:00Z",
+                                "harness-1",
+                            ),
+                            comment(
+                                "flat-only",
+                                "Only a flat answer.",
+                                "2024-02-02T00:00:00Z",
+                                "user-1",
+                            ),
+                        ],
+                        "needs-human-harness" => vec![comment(
+                            "question-harness",
+                            "# Symphony Harness: Human Action\n\nPlease choose.",
+                            "2024-02-01T00:00:00Z",
+                            "harness-1",
+                        )],
+                        "needs-human-checked" => vec![comment(
+                            "question-checked",
+                            "# Symphony Harness: Human Action\n\nPlease choose.",
+                            "2024-02-01T00:00:00Z",
+                            "harness-1",
+                        )],
+                        "needs-human-rejected" => vec![comment(
+                            "question-rejected",
+                            "# Symphony Harness: Human Action\n\nPlease choose.",
+                            "2024-02-01T00:00:00Z",
+                            "harness-1",
+                        )],
+                        "needs-human-user-reaction" => vec![comment(
+                            "question-user-reaction",
+                            "# Symphony Harness: Human Action\n\nPlease choose.",
+                            "2024-02-01T00:00:00Z",
+                            "harness-1",
+                        )],
+                        "needs-human-old-reply" => vec![
+                            comment(
+                                "question-old",
+                                "# Symphony Harness: Human Action\n\nOld question.",
+                                "2024-01-01T00:00:00Z",
+                                "harness-1",
+                            ),
+                            comment(
+                                "question-new",
+                                "# Symphony Harness: Human Action\n\nNew question.",
+                                "2024-01-03T00:00:00Z",
+                                "harness-1",
+                            ),
+                        ],
+                        _ => panic!("unexpected root id {root_id}"),
+                    };
+                    Ok(comments_page(comments, false, None))
+                }
+                ROOT_ACTION_REPLIES_OPERATION => {
+                    let comment_id = request.variables["commentId"].as_str().unwrap();
+                    let replies = match comment_id {
+                        "question-replied" => vec![reply(
+                            "reply",
+                            "Use option A.",
+                            "2024-02-02T00:00:00Z",
+                            "user-1",
+                            vec![],
+                        )],
+                        "question-waiting" => vec![],
+                        "question-harness" => vec![reply(
+                            "harness-follow-up",
+                            "# Symphony Harness: Human Action Follow-up\n\nChoose again.",
+                            "2024-02-02T00:00:00Z",
+                            "harness-1",
+                            vec![],
+                        )],
+                        "question-checked" => vec![reply(
+                            "checked-reply",
+                            "Accepted earlier.",
+                            "2024-02-02T00:00:00Z",
+                            "user-1",
+                            vec![reaction("white_check_mark", "harness-1")],
+                        )],
+                        "question-rejected" => vec![reply(
+                            "rejected-reply",
+                            "Rejected earlier.",
+                            "2024-02-02T00:00:00Z",
+                            "user-1",
+                            vec![reaction("x", "harness-1")],
+                        )],
+                        "question-user-reaction" => vec![reply(
+                            "user-reaction-reply",
+                            "A user reaction is not a receipt.",
+                            "2024-02-02T00:00:00Z",
+                            "user-1",
+                            vec![reaction("white_check_mark", "user-2")],
+                        )],
+                        "question-new" => vec![],
+                        _ => panic!("unexpected comment id {comment_id}"),
+                    };
+                    Ok(action_replies_page(replies, false, None))
+                }
+                _ => panic!("unexpected operation {}", request.operation),
+            }
+        };
+        let adapter = LinearCandidateAdapter::new(transport, "fixture-token").unwrap();
+
+        let roots = adapter.list_root_candidates(&binding()).unwrap();
+
+        assert_eq!(
+            roots.iter().map(|root| root.id.as_str()).collect::<Vec<_>>(),
+            ["todo", "needs-human-replied", "needs-human-user-reaction"]
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[1].0, ROOT_COMMENTS_OPERATION);
+        assert_eq!(requests[1].1["rootId"], "needs-human-replied");
+        assert_eq!(requests[2].0, ROOT_ACTION_REPLIES_OPERATION);
+        assert_eq!(requests[2].1["commentId"], "question-replied");
+        assert_eq!(
+            requests.iter().filter(|request| request.0 == ROOT_COMMENTS_OPERATION).count(),
+            7
+        );
+        assert_eq!(
+            requests.iter().filter(|request| request.0 == ROOT_ACTION_REPLIES_OPERATION).count(),
+            7
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_needs_human_comments_and_stuck_comment_pages() {
+        let malformed = |_endpoint: &str, request: &GraphqlRequest, _token: &str| {
+            if request.operation == ROOT_CANDIDATES_OPERATION {
+                return Ok(page(
+                    vec![needs_human_node("needs-human", "ENG-1", 1, "2024-01-01T00:00:00Z")],
+                    false,
+                    None,
+                ));
+            }
+            Ok(comments_page(
+                vec![comment(
+                    "question",
+                    "# Symphony Harness: Human Action",
+                    "not-a-time",
+                    "harness-1",
+                )],
+                false,
+                None,
+            ))
+        };
+        let adapter = LinearCandidateAdapter::new(malformed, "fixture-token").unwrap();
+        assert_eq!(adapter.list_root_candidates(&binding()), Err(LinearError::InvalidResponse));
+
+        let stuck = |_endpoint: &str, request: &GraphqlRequest, _token: &str| {
+            if request.operation == ROOT_CANDIDATES_OPERATION {
+                return Ok(page(
+                    vec![needs_human_node("needs-human", "ENG-1", 1, "2024-01-01T00:00:00Z")],
+                    false,
+                    None,
+                ));
+            }
+            if request.operation == ROOT_COMMENTS_OPERATION {
+                return Ok(comments_page(
+                    vec![comment(
+                        "question",
+                        "# Symphony Harness: Human Action",
+                        "2024-01-01T00:00:00Z",
+                        "harness-1",
+                    )],
+                    false,
+                    None,
+                ));
+            }
+            Ok(action_replies_page(vec![], true, Some("same")))
+        };
+        let adapter = LinearCandidateAdapter::new(stuck, "fixture-token").unwrap();
+        assert_eq!(adapter.list_root_candidates(&binding()), Err(LinearError::InvalidResponse));
     }
 
     #[test]

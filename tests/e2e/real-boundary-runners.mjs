@@ -118,29 +118,31 @@ export async function runRealBoundary(boundary, {
   inheritedEnvironment = process.env,
   allow = environment.SYMPHONY_RUN_REAL_BOUNDARIES === "1",
   operation,
+  signal,
 } = {}) {
   const prerequisite = boundaryPrerequisite(environment, boundary, { allow });
   if (prerequisite !== null) return prerequisite;
   if (typeof operation !== "function") return blocked(boundary, "runner_not_implemented");
   const boundaryEnvironment = partitionBoundaryEnvironment(environment, boundary, inheritedEnvironment);
   try {
-    await operation(boundaryEnvironment);
+    await operation(boundaryEnvironment, signal);
     return passed(`real_${boundary}`, { boundary });
   } catch (error) {
     return failed(`real_${boundary}`, error);
   }
 }
 
-export async function runLinearBoundary({ environment = process.env, inheritedEnvironment = process.env, rootReference } = {}) {
+export async function runLinearBoundary({ environment = process.env, inheritedEnvironment = process.env, rootReference, signal } = {}) {
   const reference = rootReference ?? environment.SYMPHONY_GOLDEN_ROOT ?? environment.SYMPHONY_E2E_LINEAR_ROOT;
   if (typeof reference !== "string" || reference.length === 0) return blocked("linear", "root_input_missing");
   return runRealBoundary("linear", {
     environment,
     inheritedEnvironment,
-    operation: async (boundaryEnvironment) => {
+    operation: async (boundaryEnvironment, operationSignal) => {
       const { createProductionLinearGateway } = await import("../../apps/conductor/dist/linear/LinearGraphqlGateway.js");
-      await createProductionLinearGateway(boundaryEnvironment).get_issue(reference);
+      await createProductionLinearGateway(boundaryEnvironment).get_issue(reference, operationSignal);
     },
+    signal,
   });
 }
 
@@ -164,7 +166,7 @@ export function resolveCodexBoundaryConfiguration(environment = {}) {
   });
 }
 
-async function launchCodexProbe({ role, configuration, environment }) {
+async function launchCodexProbe({ role, configuration, environment, signal }) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), `symphony-${role}-boundary-`));
   try {
     await execute("git", ["init", "--quiet"], {
@@ -188,7 +190,7 @@ async function launchCodexProbe({ role, configuration, environment }) {
       sandbox: role === "reconcile" ? "no_workspace" : role === "artist" ? "workspace_write" : "read_only",
       final_response_path: responsePath,
       timeout_ms: 120_000,
-    });
+    }, signal);
     const succeeded = result.launch_status === "exited"
       && result.exit_code === 0
       && result.final_response_ref === responsePath;
@@ -202,21 +204,24 @@ export async function runCodexBoundary({
   environment = process.env,
   inheritedEnvironment = process.env,
   probe,
+  signal,
 } = {}) {
   const configuration = resolveCodexBoundaryConfiguration(environment);
   return runRealBoundary("codex", {
     environment,
     inheritedEnvironment,
-    operation: async () => {
+    signal,
+    operation: async (_boundaryEnvironment, operationSignal) => {
       let firstError;
       for (const role of ["reconcile", "artist", "critic"]) {
         const roleEnvironment = partitionBoundaryEnvironment(environment, role, inheritedEnvironment);
         try {
-          await (probe ?? launchCodexProbe)({
-            role,
-            configuration: configuration[role],
-            environment: roleEnvironment,
-          });
+      await (probe ?? launchCodexProbe)({
+        role,
+        configuration: configuration[role],
+        environment: roleEnvironment,
+        signal: operationSignal,
+      });
         } catch (error) {
           firstError ??= error;
         }
@@ -226,32 +231,34 @@ export async function runCodexBoundary({
   });
 }
 
-export async function runGitBoundary({ environment = process.env, inheritedEnvironment = process.env } = {}) {
+export async function runGitBoundary({ environment = process.env, inheritedEnvironment = process.env, signal } = {}) {
   return runRealBoundary("git", {
     environment: { ...inheritedEnvironment, ...environment },
     inheritedEnvironment,
     allow: environment.SYMPHONY_RUN_REAL_BOUNDARIES === "1",
-    operation: async (boundaryEnvironment) => {
-      await execute("git", ["--version"], { env: boundaryEnvironment, encoding: "utf8" });
+    operation: async (boundaryEnvironment, operationSignal) => {
+      await execute("git", ["--version"], { env: boundaryEnvironment, encoding: "utf8", signal: operationSignal });
     },
+    signal,
   });
 }
 
-export async function runPullRequestBoundary({ environment = process.env, inheritedEnvironment = process.env } = {}) {
+export async function runPullRequestBoundary({ environment = process.env, inheritedEnvironment = process.env, signal } = {}) {
   return runRealBoundary("pr", {
     environment,
     inheritedEnvironment,
-    operation: async (boundaryEnvironment) => {
-      await execute("gh", ["auth", "status"], { env: boundaryEnvironment, encoding: "utf8" });
+    operation: async (boundaryEnvironment, operationSignal) => {
+      await execute("gh", ["auth", "status"], { env: boundaryEnvironment, encoding: "utf8", signal: operationSignal });
     },
+    signal,
   });
 }
 
-export async function runIndividualBoundaries({ environment = process.env, inheritedEnvironment = process.env } = {}) {
+export async function runIndividualBoundaries({ environment = process.env, inheritedEnvironment = process.env, signal } = {}) {
   return Object.freeze(await Promise.all([
-    runLinearBoundary({ environment, inheritedEnvironment }),
-    runCodexBoundary({ environment, inheritedEnvironment }),
-    runGitBoundary({ environment, inheritedEnvironment }),
-    runPullRequestBoundary({ environment, inheritedEnvironment }),
+    runLinearBoundary({ environment, inheritedEnvironment, signal }),
+    runCodexBoundary({ environment, inheritedEnvironment, signal }),
+    runGitBoundary({ environment, inheritedEnvironment, signal }),
+    runPullRequestBoundary({ environment, inheritedEnvironment, signal }),
   ]));
 }
