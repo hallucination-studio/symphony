@@ -54,6 +54,7 @@ const issue = {
 const comment = {
   id: "comment-1",
   issue_id: issue.id,
+  parent_id: null,
   body: "Please include the failure case.",
   creator_id: "user-2",
   created_at: "2026-08-05T00:00:00.000Z",
@@ -72,6 +73,7 @@ const rootState = {
   },
   harness_feedback: "",
   comment_cursor: comment.id,
+  architecture_decisions: [],
 } as const;
 
 test("identity values are provider strings with closed status vocabularies", () => {
@@ -172,6 +174,7 @@ test("Linear values and RootState normalize provider data without provider paylo
     todo_status_id: "state-todo",
     in_progress_status_id: "state-active",
     in_review_status_id: "state-review",
+    needs_human_status_id: "state-needs-human",
     done_status_id: "state-completed",
     canceled_status_id: "state-canceled",
   });
@@ -190,7 +193,33 @@ test("Linear values and RootState normalize provider data without provider paylo
   assert.throws(() => parseLinearIssue({ ...issue, metadata: {} }), /invalid_contract_keys/u);
   assert.throws(() => parseLinearComment({ ...comment, authorization: "secret" }), /invalid_contract_keys/u);
   assert.throws(() => parseRootState({ ...rootState, raw_trajectory: "secret" }), /invalid_contract_keys/u);
+  const missingDecisions = Object.fromEntries(
+    Object.entries(rootState).filter(([key]) => key !== "architecture_decisions"),
+  );
+  assert.throws(() => parseRootState(missingDecisions), /invalid_contract_keys/u);
   assert.throws(() => parseRootState({ ...rootState, delivery: { kind: "branch", branch: "" } }), /invalid_delivery_branch/u);
+});
+
+test("RootState persists Human Action and accepted Architecture Decisions", () => {
+  const parsed = parseRootState({
+    ...rootState,
+    human_action: { comment_id: "human-action-1", reply_cursor: "human-reply-1" },
+    architecture_decisions: [{
+      id: "ADR-001",
+      title: "Use strict parsing",
+      decision: "Reject ambiguous tokens.",
+      rationale: "The accepted reply selected strict parsing.",
+      consequences: ["Recovery remains out of scope."],
+      source_action_comment_id: "human-action-1",
+      source_reply_ids: ["human-reply-1"],
+      decided_at: "2026-08-05 10:00:00 GMT+08:00",
+    }],
+  });
+
+  assert.equal(parsed.human_action?.comment_id, "human-action-1");
+  assert.equal(parsed.architecture_decisions[0]?.id, "ADR-001");
+  assert.ok(Object.isFrozen(parsed.architecture_decisions));
+  assert.ok(Object.isFrozen(parsed.architecture_decisions[0]?.consequences));
 });
 
 test("RootState persists only the compact latest Critique checkpoint", () => {
@@ -223,16 +252,19 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     acceptance: "A fresh read-only check proves the failure case.",
     boundaries: "Only the parser module may change.",
     consumed_comment_ids: [comment.id],
+    architecture_decisions: [],
   });
   assert.deepEqual(spec.consumed_comment_ids, [comment.id]);
   assert.ok(Object.isFrozen(spec));
   assert.ok(Object.isFrozen(spec.consumed_comment_ids));
 
+  const humanReply = { ...comment, id: "human-reply-1", parent_id: "human-action-1" } as const;
   const request = parseRootReconcileRequest({
     phase: "reconcile",
     root: issue,
-    root_state: rootState,
+    root_state: { ...rootState, human_action: { comment_id: "human-action-1" } },
     new_root_comments: [comment],
+    human_action_replies: [humanReply],
     worktree_summary: {
       status: "available",
       created: [{ path: "src/parser.ts", added_lines: 8, deleted_lines: 0 }],
@@ -241,6 +273,7 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
   });
   assert.equal(request.new_root_comments.length, 1);
   assert.ok(Object.isFrozen(request.new_root_comments));
+  assert.equal(request.human_action_replies[0]?.parent_id, "human-action-1");
   assert.throws(() => parseRootReconcileRequest({
     root: issue,
     root_state: rootState,
@@ -306,7 +339,13 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
   assert.deepEqual(parseRootReconcileDecision({
     kind: "needs_human",
     reason: "Need a decision.",
-    question: "Should the boundary expand?",
+    questions: [{
+      question: "Should the boundary expand?",
+      options: [
+        { key: "expand", label: "Expand the boundary", consequence: "Include the adjacent module." },
+        { key: "hold", label: "Hold the boundary", consequence: "Keep the existing module scope." },
+      ],
+    }],
     report: [
       "### Reason", "The requested boundary is ambiguous.", "",
       "### Question", "Should the boundary expand?", "",
@@ -315,7 +354,13 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
   }), {
     kind: "needs_human",
     reason: "Need a decision.",
-    question: "Should the boundary expand?",
+    questions: [{
+      question: "Should the boundary expand?",
+      options: [
+        { key: "expand", label: "Expand the boundary", consequence: "Include the adjacent module." },
+        { key: "hold", label: "Hold the boundary", consequence: "Keep the existing module scope." },
+      ],
+    }],
     report: [
       "### Reason", "The requested boundary is ambiguous.", "",
       "### Question", "Should the boundary expand?", "",
@@ -329,6 +374,121 @@ test("Cycle and Root Reconcile values remain immutable and consume comments as a
     status: "available", created: [{ path: "src/parser.ts", added_lines: 8, deleted_lines: 0 }],
     updated: [], deleted: [], insertions: 9, deletions: 0,
   }), /invalid_root_worktree_line_totals/u);
+});
+
+test("Needs Human decisions require structured questions and whole-batch disposition", () => {
+  const questions = [
+    {
+      question: "Which parser boundary should Symphony preserve?",
+      options: [
+        { key: "strict", label: "Keep strict parsing", consequence: "Reject ambiguous tokens at the parser boundary." },
+        { key: "recovery", label: "Add recovery", consequence: "Accept ambiguous tokens and add recovery diagnostics." },
+      ],
+    },
+  ] as const;
+  const report = [
+    "### Reason", "The parser boundary needs an explicit choice.", "",
+    "### Question", "Choose one parser boundary.", "",
+    "### Next Step", "Reply with one complete batch of choices.",
+  ].join("\n");
+
+  const accepted = parseRootReconcileDecision({
+    kind: "create_cycle",
+    reply_disposition: "accepted",
+    architecture_decisions: [{
+      title: "Preserve strict parsing",
+      decision: "Reject ambiguous tokens.",
+      rationale: "The human selected the strict parser boundary.",
+      consequences: ["Parser recovery remains out of scope."],
+    }],
+    cycle: {
+      objective: "Keep strict parser validation.",
+      acceptance: "A fresh Critic verifies ambiguous tokens are rejected.",
+      boundaries: "Only parser validation and tests are in scope.",
+    },
+    report: [
+      "### Why Continue", "The accepted reply selects a bounded repair.", "",
+      "### Evidence", "The reply batch selected strict parsing.", "",
+      "### Next Cycle", "Implement strict parser validation.",
+    ].join("\n"),
+  }, { current_phase: "NeedsHuman", has_human_action_replies: true });
+  assert.equal(accepted.reply_disposition, "accepted");
+  assert.equal(accepted.architecture_decisions?.[0]?.title, "Preserve strict parsing");
+
+  const rejected = parseRootReconcileDecision({
+    kind: "needs_human",
+    reason: "The reply batch contains conflicting choices.",
+    questions,
+    reply_disposition: "rejected",
+    report,
+  }, { current_phase: "NeedsHuman", has_human_action_replies: true });
+  assert.deepEqual(rejected, {
+    kind: "needs_human",
+    reason: "The reply batch contains conflicting choices.",
+    questions,
+    reply_disposition: "rejected",
+    report,
+  });
+  assert.ok(Object.isFrozen(rejected));
+  assert.ok(Object.isFrozen(rejected.questions));
+  assert.ok(Object.isFrozen(rejected.questions[0]));
+  assert.ok(Object.isFrozen(rejected.questions[0]?.options));
+
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "needs_human", reason: "A decision is required.", questions: [], report,
+  }), /invalid_human_questions/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "needs_human", reason: "A decision is required.", questions: [{
+      question: "Choose a boundary.",
+      options: [{ key: "only", label: "Only one option", consequence: "There is no alternative." }],
+    }], report,
+  }), /invalid_human_options/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "needs_human", reason: "A decision is required.", questions: [{
+      question: "Choose a boundary.",
+      options: [
+        { key: "same", label: "First", consequence: "First consequence." },
+        { key: "same", label: "Second", consequence: "Second consequence." },
+      ],
+    }], report,
+  }), /duplicate_human_option_key/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "complete", reply_disposition: "rejected", summary: "Done.",
+    delivery: { kind: "files", workspace_path: "/workspaces/ENG-123", files: ["result.txt"] },
+    report: [
+      "### Overview", "Done.", "",
+      "### File Changes", "None", "",
+      "### Line Changes", "None", "",
+      "### Verification", "Verified.", "",
+      "### Run Metrics", "",
+    ].join("\n"),
+  }, { current_phase: "NeedsHuman", has_human_action_replies: true }), /invalid_reply_disposition/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "needs_human", reason: "A decision is required.", questions, report,
+  }, { current_phase: "NeedsHuman", has_human_action_replies: true }), /invalid_reply_disposition/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "needs_human", reason: "A decision is required.", questions,
+    reply_disposition: "accepted", report,
+  }, { current_phase: "idle", has_human_action_replies: false }), /invalid_reply_disposition/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "create_cycle", reply_disposition: "accepted",
+    cycle: {
+      objective: "Keep strict parser validation.",
+      acceptance: "A fresh Critic verifies ambiguous tokens are rejected.",
+      boundaries: "Only parser validation and tests are in scope.",
+    },
+    report: [
+      "### Why Continue", "The accepted reply selects a bounded repair.", "",
+      "### Evidence", "The reply batch selected strict parsing.", "",
+      "### Next Cycle", "Implement strict parser validation.",
+    ].join("\n"),
+  }, { current_phase: "NeedsHuman", has_human_action_replies: true }), /invalid_architecture_decisions/u);
+  assert.throws(() => parseRootReconcileDecision({
+    kind: "needs_human", reason: "Conflicting reply.", questions,
+    reply_disposition: "rejected",
+    architecture_decisions: accepted.architecture_decisions,
+    report,
+  }, { current_phase: "NeedsHuman", has_human_action_replies: true }), /invalid_architecture_decisions/u);
 });
 
 test("Performer and Critic contracts keep process facts separate from semantic verdicts", () => {

@@ -12,17 +12,19 @@ but must not define another transition for the same fact.
 | Rule | Fact | Authority | Consequence |
 |---|---|---|---|
 | `WF-AUTH-001` | original long-term requirement | Linear Root title and the immutable requirement section of its description | Linear mode rejects simultaneous `--task`; the managed snapshot is excluded from the input |
-| `WF-AUTH-002` | new user input | new user-authored Root comments | pending input for a later Reconcile only |
+| `WF-AUTH-002` | new user input | new user-authored top-level Root comments, plus child replies in an active Human Action thread | top-level comments are ordinary pending input; thread replies are grouped only with their owning action |
 | `WF-AUTH-003` | trusted task state | Succeeded Cycles with an `accepted` Critic verdict | only source of trusted Root State progress |
 | `WF-AUTH-004` | active small-step contract | frozen Cycle description and local `CycleSpec` | Artist and Critic scope |
 | `WF-AUTH-005` | implementation state | current Root workspace | Artist effects, Critic evidence, and final PR content |
-| `WF-AUTH-006` | human-readable workflow view | Linear statuses, child Issues, Root managed snapshot, role terminal descriptions, and two Cycle comments | sole operator view; no Dashboard projection |
-| `WF-AUTH-007` | next step | one fresh Root Reconcile session over Root and Root State inputs | create one Cycle, recommend completion, or request human input |
+| `WF-AUTH-006` | human-readable workflow view | Linear statuses, Issues, managed Root content, Human Action threads, and role results | sole operator view; no Dashboard projection |
+| `WF-AUTH-007` | next step | one fresh Root Reconcile session over Root State, ordinary Root input, and grouped Human Action replies | create one Cycle, recommend completion, or request human input |
 | `WF-AUTH-008` | terminal delivery success | one valid Root Reconcile Delivery: pull request, branch, or local files | only fact that allows Root `Done` |
 | `WF-AUTH-009` | real-state verification | fresh Critic against the Root workspace | Reconcile never substitutes workspace inspection or Artist claims |
-| `WF-AUTH-010` | visible workflow status | the five canonical Linear statuses resolved for the Root team | arbitrary user states, status-order inference, or hidden local state |
+| `WF-AUTH-010` | visible workflow status | six canonical Root statuses and the five-state descendant subset resolved for the Root team | arbitrary user states, status-order inference, or hidden local state |
 | `WF-AUTH-011` | latest critique checkpoint | newest verdict, task state, pending finding, and artifact URL in `RootState.latest_critique` | complete report, Cycle DAG, child comments, or reconstructed history |
 | `WF-AUTH-012` | human-readable Reconcile rationale | latest validated report in the managed Root suffix; `create_cycle` also copies it once to the new Cycle comment | hidden decisions, raw Git status text, or a second summarizer call |
+| `WF-AUTH-013` | accepted human choice | one immutable Architecture Decision record linked to its Human Action thread and source replies | reactions, thread state, or unvalidated Markdown are not workflow authority |
+| `WF-AUTH-014` | future-cycle decision context | the ordered Architecture Decision snapshot frozen into each newly created Cycle | later decisions never rewrite a prior Cycle snapshot |
 
 Artist model output is neither parsed nor projected into semantic state. Artist
 and Critic each receive an original role prompt that requires one final
@@ -52,7 +54,7 @@ content. A Reconcile completion decision includes a structured Delivery and is
 not Root completion until the final Inbox check and durable projection succeed.
 
 Every `create_cycle`, `complete`, and `needs_human` decision also contains a
-validated human report which Conductor copies to Root under a Harness marker.
+validated human report which Conductor projects into the managed Root suffix.
 Continue reports explain why, evidence, and the next Cycle. Completion reports
 cover the complete worktree's created/updated/deleted paths, insertion/deletion
 counts, verification, wall-clock run duration, and exact accumulated token usage in short form. The
@@ -97,17 +99,70 @@ Conductor strips the complete managed block and passes only the requirement
 region to the Reconciler. A missing, duplicated, or malformed block is a
 visible provider/state error; it is not silently repaired from child Issues.
 
+## Human Action threads
+
+`needs_human` is a Root-only gate. A `needs_human` Reconcile decision creates
+one top-level Harness-managed Human Action comment and opens its native Linear
+thread. V1 has at most one active Human Action per Root. The request thread is
+the sole interaction surface for that action:
+
+```text
+Root
+└── Human Action request (top-level managed comment)
+    ├── human reply 1
+    ├── human reply 2
+    └── Symphony follow-up after rejection (managed child comment)
+```
+
+Human replies are native child comments in the request thread. A top-level
+Root comment is ordinary Root input and is never treated as a reply to the
+Human Action. Symphony groups all new child replies after the thread cursor as
+one batch; it never consumes only part of a batch or creates a second top-level
+question for the same action. An unanswered thread leaves Root `Needs Human`,
+creates no duplicate request, and starts no Cycle.
+
+When the batch is accepted, Conductor first adds one `white_check_mark`
+reaction to every source reply, then persists and reads back the accepted
+Architecture Decision. It does not create an acceptance reply. The accepted
+choice may start a Cycle, complete the Root, or open a new Human Action only
+after the prior action's decision is read back. When the batch is rejected, Conductor adds one `x`
+reaction to every source reply and writes one actionable follow-up in the same
+thread; the action remains active and Root remains `Needs Human`. Reactions are
+visible receipts only. They do not approve, reject, answer, cancel, advance the
+cursor, or replace a durable Architecture Decision. A structurally valid but partial or
+ambiguous batch is rejected as a whole, receives the `x` receipts, and gets one
+follow-up in the same thread. Malformed provider data fails closed before any
+receipt is written and remains pending for a later fresh Reconcile.
+
+Every accepted Human Action batch appends one immutable Architecture
+Decision to the Root-managed durable state. The record has a stable decision
+ID, action/thread identity, source reply IDs, bounded outcome and normalized
+choice, and the decision's creation time. The managed record is the authority;
+the child comments, reaction, native thread state, and rendered Markdown are
+evidence or receipts only. The record is written and read back before the
+thread cursor or next workflow action is committed. There is no ADR file,
+local approval table, or second decision ledger.
+
+When a later Cycle is created, Conductor copies the ordered accepted decisions
+into that CycleSpec's immutable `architecture_decisions` field and the frozen
+Cycle description. This snapshot is part of the Cycle contract and is never
+updated in place. A later Human Action can add a decision for a subsequent
+Cycle, but it cannot rewrite an old snapshot or retroactively change an
+Artist/Critic scope.
+
 ## Linear status plane
 
-Linear is the visible workflow plane. Root, Cycle, Artist, and Critic all use
-the same five canonical statuses; comments and Root State explain detail but do
-not replace an Issue status.
+Linear is the visible workflow plane. Root uses six canonical statuses. Cycle,
+Artist, and Critic use the five-state subset without `Needs Human`; Human Action
+threads, reactions, and Root State explain detail but do not replace an Issue
+status.
 
 | Canonical name | Linear type | Normalized status |
 |---|---|---|
 | `Todo` | `unstarted` | `todo` |
 | `In Progress` | `started` | `in_progress` |
 | `In Review` | `started` | `in_review` |
+| `Needs Human` | `started` | `needs_human` |
 | `Done` | `completed` | `done` |
 | `Canceled` | `canceled` | `canceled` |
 
@@ -116,8 +171,9 @@ mutate an Issue. Their provider IDs are internal projection data, never caller
 inputs or CLI flags. Other team-defined states are ignored completely: the
 harness does not infer meaning from type uniqueness, list order, or a similar
 name, and never edits or deletes those state definitions.
-After Prepare, startup gates normalize it to `Todo` before the first fresh
-Reconcile; Prepare itself does not add another Linear status.
+After Prepare, a new Root remains `Todo` before the first fresh Reconcile.
+Startup never rewrites a resumed Root to `Todo` merely because a new process
+began.
 
 The following matrix is the only role-status transition model. Conductor
 performs each update at the named boundary, so Linear shows what is happening
@@ -125,7 +181,7 @@ without waiting for a comment or a local checkpoint.
 
 | Issue | Creation | Start or advance | Terminal transition |
 |---|---|---|---|
-| Root | `Todo` after Prepare | durable family -> `In Progress`; Critic checkpoint -> `In Review`; later decisions stay there | valid Delivery projection -> `Done` |
+| Root | `Todo` after Prepare | durable family -> `In Progress`; Critic checkpoint -> `In Review`; Reconcile question -> `Needs Human` (materialized as a Human Action thread) | valid Delivery projection -> `Done` |
 | Cycle | `Todo` when created | recorded family sets `In Progress`; starting Critic sets `In Review` | a terminal Cycle result sets `Done` |
 | Artist | `Todo` when created | process launch sets `In Progress` | process return, timeout, interruption, or start failure sets `Done` |
 | Critic | `Todo` when created | Critic launch sets `In Review` | Critic report or process error sets `Done`; the report is exact Markdown |
@@ -150,9 +206,12 @@ validated Root Reconcile Delivery may project `Done` onto Root.
 | `WF-TOPO-007` | Harness-managed checkpoint suffix | Root description | exactly one mutable suffix | Conductor |
 | `WF-TOPO-008` | latest Reconcile report | Root managed suffix | exactly one replaceable report | Conductor |
 | `WF-TOPO-009` | Cycle comments | Cycle | exactly one creating Reconcile rationale and one terminal result | Cycle Runner |
+| `WF-TOPO-010` | Human Action request thread | Root | at most one active request; one top-level request and native child replies | Root Reconciler |
+| `WF-TOPO-011` | Architecture Decision record | Root managed state | one immutable record per accepted Human Action batch | Conductor |
+| `WF-TOPO-012` | Architecture Decision snapshot | Cycle description | exactly one ordered snapshot at Cycle creation; never updated | Root Reconciler |
 
 ```mermaid
-%% source-rules: WF-TOPO-001 WF-TOPO-002 WF-TOPO-003 WF-AUTH-008
+%% source-rules: WF-TOPO-001 WF-TOPO-002 WF-TOPO-003 WF-TOPO-010 WF-TOPO-011 WF-TOPO-012 WF-AUTH-008
 flowchart TD
   Root[Linear Root Issue] --> Cycle[Cycle 001]
   Cycle --> Artist[Artist]
@@ -161,6 +220,12 @@ flowchart TD
   Critic --> Result[Cycle Result]
   Result --> State[Promoted Root State]
   State --> Reconcile[Root Reconcile]
+  Root --> Human[Human Action request thread]
+  Human --> Reply[Child replies and rejection follow-up]
+  Reply --> Reconcile
+  State --> Decisions[Architecture Decisions]
+  Decisions --> Snapshot[Frozen Cycle decision snapshot]
+  Snapshot --> Cycle
   Reconcile -->|next step| Cycle
   Reconcile -->|complete| Delivery[Root Reconcile Delivery]
   Delivery --> Done[Root Done]
@@ -184,10 +249,12 @@ one, Prepare adopts the invocation current checkout.
 | `WF-TR-007` | Critic | `In Review` | process returns or errors | `Done` | append exact Critic Markdown to the description when valid, expose current error message limited to 50 characters when invalid, then transition |
 | `WF-TR-008` | Cycle | `In Progress` or `In Review` | complete Critique resolves | `Done` | serialize typed JSON once, write/upload the same bytes, record its link/error, then finish Cycle and Root projection |
 | `WF-TR-009` | prior unfinished descendants | nonterminal | process starts | `Canceled` | mechanically cancel all before fresh Reconcile |
-| `WF-TR-010` | Root | `Todo` or `In Progress` | Reconcile recommends completion or needs human input | `In Review` | perform final Inbox check or record the human gate; do not mark Done yet |
+| `WF-TR-010` | Root | active | Reconcile returns concrete human questions | `Needs Human` | create one top-level Human Action thread, persist its cursor, and release the slot |
 | `WF-TR-011` | Root Reconcile Delivery | absent | final Inbox is empty and trusted state supports completion | running | Root Reconcile creates the best available PR, branch, or files delivery |
 | `WF-TR-012` | Root | `In Review` | a valid Delivery is recorded in Root State and description | `Done` | stop successfully and retain local evidence |
 | `WF-TR-013` | Root | `Done` | later launch or poll | `Done` | after the team workflow-contract check, perform no Root-owned mutation; exit successfully |
+| `WF-TR-014` | Root | `Needs Human` | no new child reply follows the active Human Action thread cursor | `Needs Human` | exit without another request, reaction, retry, or slot occupation |
+| `WF-TR-015` | Root | `Needs Human` | new replies follow the action cursor | `Needs Human` until projection | classify the whole batch, receipt every reply, then accept or follow up in-thread |
 
 Terminal Issues are never reopened or rewritten.
 Remediation is always a new Cycle. Linear workflow status shows progress; the
@@ -248,8 +315,8 @@ Rows are evaluated in order and exactly one action runs at a time.
 | `WF-ROUTE-006` | no Cycle and no completion recommendation | Reconcile |
 | `WF-ROUTE-007` | completion recommendation and new Root input exists | discard completion recommendation and Reconcile again |
 | `WF-ROUTE-008` | completion decision, empty Inbox, no active Cycle | validate and persist Root Reconcile Delivery |
-| `WF-ROUTE-009` | active Cycle and new Root comments arrive | show pending; do not change the active Cycle |
-| `WF-ROUTE-010` | no actionable fact or human input required | record the reason and exit |
+| `WF-ROUTE-009` | active Cycle and new ordinary Root input or Human Action replies arrive | show pending; do not change the active Cycle |
+| `WF-ROUTE-010` | Root is `Needs Human` and has no new Root input or Human Action child reply | exit without another request, reaction, or retry |
 
 ## Failure policy
 
@@ -263,8 +330,8 @@ Rows are evaluated in order and exactly one action runs at a time.
 | `WF-FAIL-006` | Root Reconcile cannot produce any valid Delivery | leave Root `In Review` and retain workspace/evidence | Conductor retries Git, invents a location, or marks Root Done |
 | `WF-FAIL-007` | remote publication is unavailable | Root Reconcile may return an explicit files Delivery | require an empty commit or hide the local result |
 | `WF-FAIL-008` | unfinished descendants at startup | cancel all, warn of possible unreviewed workspace changes, then Reconcile | resume, review, parse, or synthesize their results |
-| `WF-FAIL-009` | maximum Cycle count reached | set Root State `NeedsHuman`, project Root `In Review`, and stop with the reason visible | create another Cycle or deliver |
-| `WF-FAIL-010` | saved workspace or run directory is missing, invalid, or mismatched | set Root State `NeedsHuman`, project Root `In Review`, and stop | create a replacement path or infer files from child Issues |
+| `WF-FAIL-009` | maximum Cycle count reached | expose a runtime failure and stop with Root `In Review` | invent a human question, create another Cycle, or deliver |
+| `WF-FAIL-010` | saved workspace or run directory is missing, invalid, or mismatched | expose a runtime failure and stop with Root `In Review` | invent a human question, create a replacement path, or infer files from child Issues |
 | `WF-FAIL-012` | any visible process or upload error | show only the current `error.message`, first 50 characters | walk causes, add prefixes or codes, publish raw context, or change the Critic verdict for an upload failure |
 | `WF-FAIL-013` | a runtime error escapes normal Cycle or decision handling | persist the bounded current message on Root, project Root `In Review`, then fail the process | leave Root `In Progress` or hide the visible failure |
 
@@ -275,18 +342,25 @@ The only automatic repair loop is domain-level: Critic exposes real workspace
 findings and the next Reconcile may create a repair Cycle. Infrastructure and
 PR failures do not enter a recovery state machine.
 
-## Root comment transaction
+## Root input transaction
 
 | Rule | Step | Durable meaning |
 |---|---|---|
-| `WF-INBOX-001` | fetch comments newer than startup cursor | add eligible user comments to pending input |
-| `WF-INBOX-002` | Reconcile receives all comments after cursor | place every ID in candidate `CycleSpec`, or return `NeedsHuman`; never partially consume |
+| `WF-INBOX-001` | fetch ordinary top-level Root comments after the saved cursor and child replies after each active Human Action thread cursor | preserve each input's native location; never flatten a thread reply into Root input |
+| `WF-INBOX-002` | Reconcile receives ordinary comments plus grouped Human Action reply batches | treat each reply thread as one batch; never partially accept or reject a batch |
 | `WF-INBOX-003` | create Cycle, Artist, Critic and record their provider IDs locally | establish complete frozen family |
-| `WF-INBOX-004` | persist created `CycleSpec` with `consumed_comment_ids` | mark exactly those IDs consumed for this run |
+| `WF-INBOX-004` | persist created `CycleSpec` with `consumed_comment_ids` and `architecture_decisions` | mark exactly those IDs consumed and freeze the accepted decision context for this Cycle |
 | `WF-INBOX-005` | Reconcile recommends completion | fetch once more before PR publication; any new input returns to Reconcile |
+| `WF-INBOX-006` | Reconcile accepts a Human Action reply batch | add one Symphony `white_check_mark` reaction to every child reply, persist/read back the Architecture Decision, then commit that thread cursor with the chosen action |
+| `WF-INBOX-007` | Reconcile rejects a Human Action reply batch | react `x` to every reply, write the reason and options in-thread, then commit that thread cursor |
 
-If family creation or local recording fails before `WF-INBOX-004`, comments
-remain pending and no Agent starts from the partial family.
+If family creation or local recording fails before `WF-INBOX-004`, ordinary
+comments and accepted Human Action replies remain pending and no Agent starts
+from the partial family. Malformed provider data fails closed before a receipt
+or cursor commit. When an active Cycle exists and new Root input or Human
+Action replies arrive, retain them for the next Reconcile; do not dispatch
+them into the active Cycle.
+
 When an active Cycle exists and new Root comments arrive, do not dispatch them into the Cycle.
 
 ## Persistence planes
@@ -295,11 +369,13 @@ When an active Cycle exists and new Root comments arrive, do not dispatch them i
 |---|---|---|---|
 | `WF-PERSIST-001` | Linear Root description | immutable human requirement section plus one exact Harness-managed snapshot block | treating the managed suffix as requirement input or user-authored content |
 | `WF-PERSIST-002` | Harness-managed Root description suffix | minimal checkpoint fields defined in `RootState`, latest Reconcile report, and local-offset `Updated at` | raw trajectories, revisions, child history, or process handles |
-| `WF-PERSIST-003` | Linear Root user comments | new input after saved cursor | descendant instructions or active-Cycle mutation |
-| `WF-PERSIST-004` | Linear Cycle description | frozen objective, acceptance, boundaries, and consumed comment references | later input, artist selection, or mutable progress |
+| `WF-PERSIST-003` | Linear Root top-level comments | ordinary new input after the saved cursor | Human Action child replies, descendant instructions, or active-Cycle mutation |
+| `WF-PERSIST-004` | Linear Cycle description | frozen objective, acceptance, boundaries, consumed comment references, and the `architecture_decisions` snapshot | later input, artist selection, or mutable progress |
 | `WF-PERSIST-005` | descriptions, Cycle comments, uploaded file | one terminal report per role; exactly two Cycle comments; typed Critique JSON | no Artist semantics or streams; comments/artifact are not Reconcile input |
 | `WF-PERSIST-006` | supplied external run directory | Cycle records, provider IDs, bounded parse inputs, Critic material, PR command log, and private diagnostics | credentials or Root-commit files |
 | `WF-PERSIST-007` | private diagnostic paths in the external run directory | raw Agent JSONL/stderr, error context, and `thread_id` index | Critic/Root/Linear inputs or public raw streams |
+| `WF-PERSIST-008` | Root Human Action thread | one request, direct replies, rejection follow-ups, and cursor | acceptance replies, flat-input promotion, or thread authority |
+| `WF-PERSIST-009` | Root managed durable state | append-only immutable `ArchitectureDecision` records for accepted Human Action batches | reactions, Markdown, or a second local decision ledger |
 
 Linear is the human-readable control plane; the supplied run directory is the
 minimal transaction and evidence plane. Private diagnostics exist to preserve
@@ -329,7 +405,7 @@ Root/Cycle state machine or changes a Root's trusted state.
 | `WF-PODIUM-004` | operator stop is explicit and confirms the complete process tree exited | local Desktop process supervisor | scheduler never stops work merely because a higher-priority Root arrived |
 | `WF-PODIUM-005` | only Bindings and credentials persist | Desktop storage | assignment, paths, PID, and queue rebuild without a second Root checkpoint |
 | `WF-PODIUM-006` | scheduling is confined to one Desktop host | Podium Desktop process boundary | no cross-machine lease, distributed claim, or daemon IPC is part of this target |
-| `WF-PODIUM-007` | Podium does not schedule, render, or test Conductor `NeedsHuman` handling in this round | V2 scope boundary | existing V1 `NeedsHuman` behavior remains intact, with no new Podium UI, dispatch, or E2E path |
+| `WF-PODIUM-007` | a new child reply follows the active Human Action thread | Linear candidate discovery | use the ordinary queue; add no rank, label, priority mutation, or Resume command |
 | `WF-PODIUM-008` | Desktop owns the Linear authorization session for the built-in application and injects its token into each launch | Desktop credential store | tokens rest in one 0600 credentials file; Conductors hold no refresh tokens |
 | `WF-PODIUM-009` | cleanup is explicit; optional retention removes older completed workspaces | Desktop resources | never auto-delete active or undelivered workspaces |
 
@@ -337,3 +413,5 @@ The routing label is a visible operator label used by the Desktop binding; it is
 not a hidden Linear status or a second workflow authority. The Desktop has no
 Web surface in this target. A Conductor remains the only owner of Root
 Reconcile, Artist/Critic order, Root State promotion, and terminal delivery.
+Podium displays the Root status only; it does not render the question, replies,
+reactions, or another Linear detail surface.
