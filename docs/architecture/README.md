@@ -111,7 +111,8 @@ with local permissions, with a mechanical `thread_id` index and opaque local
 references. This evidence is never supplied to Audit or Root Reconcile, never
 uploaded to Linear, and never treated as workflow authority. The caller owns
 retention; golden E2E failures archive evidence before cleaning their owned
-temporary resources and report only `diagnostic_ref`.
+local/branch resources, preserve the Linear Root tree for inspection, and report
+only `diagnostic_ref`. Only a visibly verified successful fixture is archived.
 
 ## Podium Desktop V2 boundary
 

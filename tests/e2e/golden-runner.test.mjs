@@ -626,6 +626,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
   const stderrSecret = "child-stderr-secret-never-output";
   await writeFile(path.join(runDirectory, "agent.jsonl"), `${agentSecret}\n`, { encoding: "utf8", mode: 0o600 });
   let cleaned = false;
+  let cleanupOptions;
   const fixture = {
     workspace,
     runDirectory,
@@ -633,8 +634,9 @@ test("golden archives raw failure context before fixture cleanup and returns onl
       assert.equal(await readFile(path.join(runDirectory, "agent.jsonl"), "utf8"), `${agentSecret}\n`);
       return archiveGoldenFailure({ archiveRoot, ...context_, workspace, runDirectory });
     },
-    async cleanup() {
+    async cleanup(_pullRequestUrl, options) {
       assert.equal(await readFile(path.join(runDirectory, "agent.jsonl"), "utf8"), `${agentSecret}\n`);
+      cleanupOptions = options;
       cleaned = true;
       await rm(base, { recursive: true, force: true });
     },
@@ -655,6 +657,7 @@ test("golden archives raw failure context before fixture cleanup and returns onl
     },
   });
   assert.equal(cleaned, true);
+  assert.deepEqual(cleanupOptions, { archiveIssueTree: false });
   assert.equal(result.status, "failed");
   assert.equal(result.layer, "golden");
   assert.equal(result.reason, "conductor failure");
@@ -683,6 +686,30 @@ test("golden archives raw failure context before fixture cleanup and returns onl
   assert.equal((await stat(path.join(diagnosticRef, "run_directory"))).mode & 0o777, 0o700);
   assert.equal((await stat(path.join(diagnosticRef, "run_directory", "agent.jsonl"))).mode & 0o777, 0o600);
   assert.deepEqual(await readdir(archiveRoot), [path.basename(diagnosticRef)]);
+});
+
+test("golden archives the Linear fixture only after complete visible success", async () => {
+  const cleanupCalls = [];
+  const fixture = {
+    workspace: "/tmp/golden-success-workspace",
+    runDirectory: "/tmp/golden-success-run",
+    async cleanup(pullRequestUrl, options) {
+      cleanupCalls.push({ pullRequestUrl, options });
+    },
+  };
+  const result = await runGoldenScenario({
+    environment: {
+      SYMPHONY_RUN_GOLDEN: "1",
+      LINEAR_API_KEY: "product-linear-token",
+      SYMPHONY_E2E_LINEAR_HUMAN_TOKEN: "human-linear-token",
+      SYMPHONY_E2E_PROJECT_SLUG_ID: "project-slug",
+    },
+    fixture,
+    operation: async () => ({ status: "done", root: "ENG-1" }),
+  });
+
+  assert.equal(result.status, "passed");
+  assert.deepEqual(cleanupCalls, [{ pullRequestUrl: undefined, options: { archiveIssueTree: true } }]);
 });
 
 test("golden diagnostic archives cap child streams and reject roots inside fixture-owned paths", async (context) => {

@@ -826,7 +826,7 @@ export async function createGoldenFixture({
       await verifyGoldenVisibleTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
       await verifyGoldenResultComments(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id);
     },
-    async cleanup(pullRequestUrl) {
+    async cleanup(pullRequestUrl, { archiveIssueTree: shouldArchiveIssueTree = false } = {}) {
       const failures = [];
       if (pullRequestUrl !== undefined) {
         await execute("gh", ["pr", "close", pullRequestUrl, "--delete-branch"], {
@@ -838,8 +838,10 @@ export async function createGoldenFixture({
           encoding: "utf8", timeout: 30_000,
         }).catch(() => undefined);
       }
-      await archiveIssueTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id)
-        .catch(() => failures.push("golden_issue_cleanup_failed"));
+      if (shouldArchiveIssueTree) {
+        await archiveIssueTree(environment.SYMPHONY_E2E_LINEAR_HUMAN_TOKEN, root.id)
+          .catch(() => failures.push("golden_issue_cleanup_failed"));
+      }
       await rm(base, { recursive: true, force: true })
         .catch(() => failures.push("golden_workspace_cleanup_failed"));
       if (failures.length > 0) throw new Error(failures[0]);

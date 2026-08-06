@@ -155,5 +155,6 @@ and workflow remain unchanged.
 | implementation | focused tests, Conductor tests, lint, typecheck, and build pass |
 | real boundaries | Linear, Agent CLI, Git workspace, push, and PR tests prove actual permissions and ordering |
 | end to end | fake Linear plus temporary Git remote proves Rejected repair Cycle, Succeeded Cycle, final Inbox check, and PR creation |
-| diagnostics and failures | unknown failures retain causal local evidence, publish the current message's first 50 characters plus optional `diagnostic_ref`, and golden failure cleanup archives evidence first |
+| diagnostics and failures | unknown failures retain causal local evidence, publish the current message's first 50 characters plus optional `diagnostic_ref`, and archive golden evidence before local cleanup |
+| golden fixture cleanup | failed Linear trees remain visible; Issue trees are archived only after visible success |
 | repository | full test suite, secret scan, scoped diff review, and human review pass |

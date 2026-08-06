@@ -258,7 +258,7 @@ export async function runGoldenScenario({
       : Object.freeze({ ...failure, diagnostic_ref: diagnosticRef });
   } finally {
     try {
-      await fixture?.cleanup?.(pullRequestUrl);
+      await fixture?.cleanup?.(pullRequestUrl, { archiveIssueTree: outcome?.status === "passed" });
     } catch (error) {
       cleanupError = error;
     }

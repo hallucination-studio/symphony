@@ -102,6 +102,8 @@ Agent launches may retain bounded raw JSONL, stderr, and causal error context
 there, with local file permissions, while public and Linear results remain
 sanitized. Diagnostic references are opaque local paths only; raw evidence and
 mechanically indexed `thread_id` values are never supplied to Audit or Root
-Reconcile. Retention and deletion belong to the caller. The golden E2E runner
-archives diagnostic evidence before cleaning its owned temporary resources and
-reports only `diagnostic_ref` on failure.
+Reconcile. Retention and deletion belong to the caller. On failure, the golden
+E2E runner archives diagnostic evidence before cleaning its owned local/branch
+resources, reports only `diagnostic_ref`, and preserves the Linear Root tree for
+inspection. It archives the fixture Issue tree only after visible completion is
+verified.

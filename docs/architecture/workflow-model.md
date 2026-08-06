@@ -307,8 +307,10 @@ minimal transaction and evidence plane. Private diagnostics exist to preserve
 causal evidence when public reasons must stay bounded, not to create a second
 workflow history. Files remain under caller-controlled local retention and are
 not uploaded or implicitly deleted by Conductor. Golden E2E failures archive
-this evidence before cleaning their owned temporary resources and report only a
-`diagnostic_ref`. The design has no task revision, seal, content digest, Git hash
+this evidence before cleaning their owned local/branch resources, preserve the
+Linear Root tree for inspection, and report only a `diagnostic_ref`. The fixture
+Issue tree is archived only after visible completion is verified. The design has
+no task revision, seal, content digest, Git hash
 authority, equality proof, mutation history, delivery record, or recovery
 database. Git necessarily creates an internal commit object for the PR, but its
 hash is neither captured in a public contract nor used for workflow decisions.
