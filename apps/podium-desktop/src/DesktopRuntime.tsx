@@ -124,6 +124,9 @@ export class MemoryDesktopHost implements DesktopHost {
   }
 
   async execute(command: DesktopCommand): Promise<DesktopCommandResult> {
+    if (command.kind === "cancel_linear_connect") {
+      return { kind: "confirmed" };
+    }
     if (command.kind === "list_linear_projects") {
       const state = this.state;
       if (state.kind !== "ready" || state.overview.linear.status !== "connected") {
@@ -232,8 +235,16 @@ function applyCommand(state: DesktopState, command: DesktopCommand): AppliedComm
     return { kind: "confirmed", state: next };
   }
 
-  if (command.kind === "connect_linear" || command.kind === "disconnect_linear") {
-    return { kind: "rejected", sanitizedReason: "linear_auth_native_only" };
+  if (command.kind === "connect_linear") {
+    next.overview.linear = { status: "connected", organization: "Demo workspace" };
+    next.overview.observedAt = observedAt;
+    return { kind: "confirmed", state: next };
+  }
+
+  if (command.kind === "disconnect_linear") {
+    next.overview.linear = { status: "disconnected" };
+    next.overview.observedAt = observedAt;
+    return { kind: "confirmed", state: next };
   }
 
   if (!("rootId" in command)) {

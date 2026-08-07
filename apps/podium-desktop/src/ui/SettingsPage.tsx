@@ -46,7 +46,9 @@ export function SettingsPage({
   const [editingId, setEditingId] = useState<string>();
   const [form, setForm] = useState<BindingFormState>();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const [pending, setPending] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -114,14 +116,19 @@ export function SettingsPage({
   }
 
   async function connectLinear() {
-    if (pending) return;
-    setPending(true);
+    if (connecting) return;
+    setConnecting(true);
     setError(undefined);
     setMessage(undefined);
     try {
       const result = await onCommand({ kind: "connect_linear" });
       if (result.kind === "rejected") {
-        setError(result.sanitizedReason);
+        // A cancelled authorization is operator intent, not a failure.
+        if (result.sanitizedReason === "linear_authorization_cancelled") {
+          setMessage("Connection cancelled.");
+        } else {
+          setError(result.sanitizedReason);
+        }
         return;
       }
       setMessage("Linear connected. Select a project to continue.");
@@ -134,7 +141,32 @@ export function SettingsPage({
     } catch {
       setError("Linear could not be connected.");
     } finally {
+      setConnecting(false);
+    }
+  }
+
+  function cancelConnect() {
+    if (!connecting) return;
+    void onCommand({ kind: "cancel_linear_connect" });
+  }
+
+  async function disconnectLinear() {
+    if (pending) return;
+    setPending(true);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      const result = await onCommand({ kind: "disconnect_linear" });
+      if (result.kind === "rejected") {
+        setError(result.sanitizedReason);
+      } else {
+        setMessage("Linear disconnected. Bindings stay saved until you reconnect.");
+      }
+    } catch {
+      setError("Linear could not be disconnected.");
+    } finally {
       setPending(false);
+      setConfirmingDisconnect(false);
     }
   }
 
@@ -196,6 +228,7 @@ export function SettingsPage({
       />
       <div className="page-stack">
         {message && <Notice tone="positive">{message}</Notice>}
+        {error && !form && <Notice tone="negative">{error}</Notice>}
         <section className="panel" aria-labelledby="settings-linear-heading">
           <div className="section-heading">
             <h2 id="settings-linear-heading">Linear connection</h2>
@@ -207,16 +240,33 @@ export function SettingsPage({
           {linear.status === "connected" ? (
             <>
               <p className="quiet">Connected to {linear.organization}. Projects are read from this Linear account.</p>
-              <button className="button" type="button" disabled={pending || loadingProjects} onClick={() => void loadProjects()}>
-                {loadingProjects ? "Loading projects…" : "Refresh projects"}
-              </button>
+              <div className="button-row">
+                <button className="button" type="button" disabled={pending || loadingProjects} onClick={() => void loadProjects()}>
+                  {loadingProjects ? "Loading projects…" : "Refresh projects"}
+                </button>
+                <button className="button destructive" type="button" disabled={pending} onClick={() => setConfirmingDisconnect(true)}>
+                  Disconnect
+                </button>
+              </div>
             </>
           ) : (
             <>
               <p className="quiet">Connect Linear before choosing a Project Binding.</p>
-              <button className="button primary" type="button" disabled={pending} onClick={() => void connectLinear()}>
-                {pending ? "Connecting…" : linear.status === "reconnect_required" ? "Reconnect Linear" : "Connect Linear"}
-              </button>
+              <div className="button-row">
+                <button className="button primary" type="button" disabled={connecting} onClick={() => void connectLinear()}>
+                  {connecting && <span className="button-spinner" aria-hidden="true" />}
+                  {connecting
+                    ? "Waiting for the browser…"
+                    : linear.status === "reconnect_required"
+                      ? "Reconnect Linear"
+                      : "Connect Linear"}
+                </button>
+                {connecting && (
+                  <button className="button" type="button" onClick={cancelConnect}>
+                    Cancel
+                  </button>
+                )}
+              </div>
             </>
           )}
         </section>
@@ -360,6 +410,17 @@ export function SettingsPage({
           pending={pending}
           onConfirm={() => void removeBinding()}
           onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+
+      {confirmingDisconnect && (
+        <ConfirmDialog
+          title="Disconnect Linear?"
+          body="Polling and Conductor launches will stop. Your bindings stay saved, and reconnecting restores them."
+          confirmLabel="Disconnect"
+          pending={pending}
+          onConfirm={() => void disconnectLinear()}
+          onCancel={() => setConfirmingDisconnect(false)}
         />
       )}
     </>

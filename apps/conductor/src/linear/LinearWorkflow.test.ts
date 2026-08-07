@@ -8,6 +8,7 @@ const canonicalStates = [
   { id: "state-todo", name: "Todo", type: "unstarted" as const, team_id: "team-id" },
   { id: "state-progress", name: "In Progress", type: "started" as const, team_id: "team-id" },
   { id: "state-review", name: "In Review", type: "started" as const, team_id: "team-id" },
+  { id: "state-needs-human", name: "Needs Human", type: "started" as const, team_id: "team-id" },
   { id: "state-done", name: "Done", type: "completed" as const, team_id: "team-id" },
   { id: "state-canceled", name: "Canceled", type: "canceled" as const, team_id: "team-id" },
 ];
@@ -22,6 +23,7 @@ test("workflow resolution selects exact canonical names and types", () => {
     todo_status_id: "state-todo",
     in_progress_status_id: "state-progress",
     in_review_status_id: "state-review",
+    needs_human_status_id: "state-needs-human",
     done_status_id: "state-done",
     canceled_status_id: "state-canceled",
   });
@@ -56,7 +58,7 @@ test("workflow resolution fails closed on missing, duplicate, wrong-type, or for
 test("workflow ensure creates only missing canonical states and ignores provider extensions", async () => {
   const gateway = new InMemoryLinearGateway({
     states: [
-      canonicalStates[0]!, canonicalStates[1]!, canonicalStates[3]!, canonicalStates[4]!,
+      canonicalStates[0]!, canonicalStates[1]!, canonicalStates[4]!, canonicalStates[5]!,
       { id: "state-custom", name: "Provider Active", type: "started", team_id: "team-id" },
     ],
   });
@@ -66,6 +68,7 @@ test("workflow ensure creates only missing canonical states and ignores provider
   assert.equal(workflow.todo_status_id, "state-todo");
   assert.equal(workflow.in_progress_status_id, "state-progress");
   assert.match(workflow.in_review_status_id, /^fake-state-/u);
+  assert.match(workflow.needs_human_status_id, /^fake-state-/u);
   assert.equal(workflow.done_status_id, "state-done");
   assert.equal(workflow.canceled_status_id, "state-canceled");
   assert.equal((await gateway.list_team_states("team-id")).filter(({ name }) => name === "In Review").length, 1);

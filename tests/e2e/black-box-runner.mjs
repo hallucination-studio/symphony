@@ -28,7 +28,7 @@ export function runnerError(code) {
 
 export function safeReason(error, fallback = "e2e_runner_failed") {
   if (error instanceof E2ERunnerError) return error.code;
-  if (error instanceof Error && error.message.length > 0) return error.message.slice(0, 50);
+  if (error instanceof Error && error.message.length > 0) return error.message;
   return fallback;
 }
 
