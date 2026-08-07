@@ -663,6 +663,19 @@ input[type="radio"] {
   color: var(--status-positive);
 }
 
+.notice[data-tone="neutral"] {
+  color: var(--color-label-secondary);
+}
+
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.notice .button {
+  flex-shrink: 0;
+}
+
 .notice-check {
   animation: check-pop var(--duration-standard) var(--easing-emphasized)
     backwards;
