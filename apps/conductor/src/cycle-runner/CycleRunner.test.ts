@@ -38,11 +38,11 @@ async function world() {
   });
   const spec = parseCycleSpec({
     cycle_number: 1, objective: "Reject ambiguity", acceptance: "Parser test passes",
-    boundaries: "Parser only", consumed_comment_ids: ["comment-1"],
+    boundaries: "Parser only", consumed_comment_ids: ["comment-1"], architecture_decisions: [],
   });
   const rootState = parseRootState({
     workspace_path: workspace, run_directory: runDirectory, root_branch: "root/ENG-1",
-    current_phase: "cycle", task_state_markdown: "Lexer complete",
+    current_phase: "cycle", task_state_markdown: "Lexer complete", architecture_decisions: [],
     latest_critique: {
       verdict: "incomplete", task_state_markdown: "Lexer complete", pending_finding: "Ambiguity remains",
     },
